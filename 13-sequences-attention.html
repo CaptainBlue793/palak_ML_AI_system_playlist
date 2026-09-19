@@ -1,0 +1,357 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Sequences &amp; Attention</title>
+<link rel="stylesheet" href="assets/style.css">
+<script>try{var t=JSON.parse(localStorage.getItem('ml-theme'));if(t)document.documentElement.setAttribute('data-theme',t)}catch(e){}</script>
+<style>
+  .sent { display:flex; gap:6px; flex-wrap:wrap; margin:12px 0 }
+  .sent button { padding:8px 12px; border-radius:10px; border:1.5px solid var(--border); background:var(--surface-2); color:var(--text); font-size:14.5px; cursor:pointer; position:relative; font-family:var(--font) }
+  .sent button.q { border-color:var(--pink); background:var(--pink-soft); color:var(--pink); font-weight:700 }
+  .sent button .w { position:absolute; bottom:-15px; left:0; right:0; font-size:9.5px; font-family:var(--mono); color:var(--muted) }
+  .attn-row { display:flex; gap:4px; margin-top:22px; flex-wrap:wrap }
+  .attn-row i { height:26px; border-radius:6px; display:grid; place-items:center; font-style:normal; font-size:11px; font-family:var(--mono); min-width:58px; padding:0 6px }
+  .qkv { display:grid; grid-template-columns:repeat(3,1fr); gap:10px; margin-top:12px }
+  .qkv > div { padding:12px; border-radius:12px; border:1px solid var(--border); background:var(--surface-2); font-size:13.5px }
+  .qkv b { display:block; margin-bottom:4px }
+  .mask-grid { display:grid; gap:2px; margin-top:10px; max-width:340px }
+  .mask-grid i { aspect-ratio:1; border-radius:3px; background:var(--accent-soft); border:1px solid var(--accent) }
+  .mask-grid i.off { background:var(--surface-3); border-color:var(--border) }
+  .cost-svg { width:100%; height:210px }
+  .cost-svg .rnn { fill:none; stroke:var(--amber); stroke-width:2.6 }
+  .cost-svg .att { fill:none; stroke:var(--accent); stroke-width:2.6 }
+  .cost-svg text { font-size:10.5px; fill:var(--muted); font-family:var(--mono) }
+  .rnnviz text { font-size:11px; fill:var(--muted); font-family:var(--mono) }
+</style>
+</head>
+<body data-chapter="13">
+<main class="content">
+
+  <section class="hero">
+    <div class="eyebrow"><span class="pill accent">Chapter 13</span><span class="pill cyan">Intermediate</span><span class="pill">⏱ 40 min</span></div>
+    <h1>Sequences <span class="grad">&amp; Attention</span></h1>
+    <p class="lead">Text, audio, clickstreams and sensor traces all share one problem: the meaning depends on order and on things that happened far away. Recurrence was the first answer. Attention was the better one — and understanding why is the shortest path to understanding transformers.</p>
+    <ul class="objectives">
+      <li>Explain how an RNN carries state, and why it forgets</li>
+      <li>Describe what LSTM gates fix and what they don't</li>
+      <li>Derive attention as “look up the relevant parts, weighted by similarity”</li>
+      <li>Read query, key and value roles and compute a weighted sum</li>
+      <li>Compare cost and parallelism of recurrence vs attention</li>
+    </ul>
+  </section>
+
+  <h2>Why sequences are different</h2>
+  <p>A tabular row is self-contained. A sequence is not: “the trophy didn't fit in the suitcase because <b>it</b> was too big” requires linking a pronoun to a noun five words back. Three properties define the problem:</p>
+
+  <div class="grid c3">
+    <div class="card feature reveal"><div class="f-ico">📏</div><h4>Variable length</h4><p>Sentences, sessions and audio clips differ wildly in length. Fixed-size inputs don't fit.</p></div>
+    <div class="card feature reveal"><div class="f-ico" style="background:var(--accent-2-soft)">🔀</div><h4>Order matters</h4><p>“Dog bites man” ≠ “man bites dog”. Bag-of-words throws the difference away.</p></div>
+    <div class="card feature reveal"><div class="f-ico" style="background:var(--green-soft)">🔭</div><h4>Long-range dependencies</h4><p>The relevant context may be 5 tokens back, or 5,000. Both need to work.</p></div>
+  </div>
+
+  <h2>Recurrent networks: carry a state forward</h2>
+  <p>An RNN processes one element at a time, maintaining a hidden state that summarises everything so far: <code>hₜ = tanh(Wₓxₜ + Wₕhₜ₋₁ + b)</code>. The same weights are reused at every step — parameter sharing across time, exactly as convolution shares across space.</p>
+
+  <div class="panel">
+    <div class="panel-head"><div class="dots"><i></i><i></i><i></i></div><span class="p-title">An RNN, unrolled</span><span class="p-tag">Step-through</span></div>
+    <div class="panel-body svg-scroll">
+      <svg id="rnnSvg" class="diagram rnnviz" viewBox="0 0 760 240">
+        <defs><marker id="rh" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" class="arrow-head"/></marker></defs>
+        <path id="r-e1" class="edge dimmable" d="M130,120 L190,120" marker-end="url(#rh)"/>
+        <path id="r-e2" class="edge dimmable" d="M300,120 L360,120" marker-end="url(#rh)"/>
+        <path id="r-e3" class="edge dimmable" d="M470,120 L530,120" marker-end="url(#rh)"/>
+        <g id="r-c1" class="node dimmable" transform="translate(20,90)"><rect width="110" height="60" rx="12"/><text x="55" y="28" style="font-size:13px">RNN cell</text><text x="55" y="46">t = 1 · “the”</text></g>
+        <g id="r-c2" class="node dimmable" transform="translate(190,90)"><rect width="110" height="60" rx="12"/><text x="55" y="28" style="font-size:13px">RNN cell</text><text x="55" y="46">t = 2 · “trophy”</text></g>
+        <g id="r-c3" class="node dimmable" transform="translate(360,90)"><rect width="110" height="60" rx="12"/><text x="55" y="28" style="font-size:13px">RNN cell</text><text x="55" y="46">t = 3 · “didn’t”</text></g>
+        <g id="r-c4" class="node dimmable" transform="translate(530,90)"><rect width="110" height="60" rx="12"/><text x="55" y="28" style="font-size:13px">RNN cell</text><text x="55" y="46">t = 12 · “it”</text></g>
+        <g id="r-out" class="node dimmable" transform="translate(660,90)"><rect width="80" height="60" rx="12"/><text x="40" y="34">output</text></g>
+        <text x="330" y="180" text-anchor="middle">one shared weight matrix, applied at every step</text>
+        <text x="330" y="200" text-anchor="middle" style="fill:var(--red)">the hidden state is the only channel between t=2 and t=12</text>
+      </svg>
+    </div>
+    <div class="stepper" data-diagram="rnnSvg">
+      <ol class="steps">
+        <li data-title="Step 1" data-on="r-c1">The first token is embedded and combined with an initial hidden state (usually zeros). Output: h₁, a fixed-size vector meant to summarise “the”.</li>
+        <li data-title="Step 2 carries state forward" data-on="r-c1 r-c2 r-e1" data-packet="r-c1>r-c2">h₁ is fed in alongside the next embedding. Note the <b>sequential dependency</b>: step 2 cannot start until step 1 finishes. On a GPU this is the fatal flaw — no parallelism across time during training.</li>
+        <li data-title="State gets rewritten each step" data-on="r-c2 r-c3 r-e2" data-packet="r-c2>r-c3" data-color="var(--accent-2)">Each step overwrites the state with a new mixture. Information about “trophy” must survive being re-mixed ten times to still be there when “it” arrives.</li>
+        <li data-title="Long-range dependency" data-on="r-c3 r-c4 r-e3" data-packet="r-c3>r-c4" data-color="var(--amber)">To resolve “it”, the model needs the subject from ten steps ago — through a fixed-size bottleneck that has been multiplied by the same matrix ten times.</li>
+        <li data-title="Backward through time" data-on="r-c1 r-c2 r-c3 r-c4" data-packet="r-c4>r-c3,r-c3>r-c2,r-c2>r-c1" data-color="var(--red)">Gradients flow backwards through every step, multiplying by the same weight matrix each time. Slightly-less-than-one factors vanish exponentially; slightly-more-than-one factors explode. This is <b>the</b> limitation of plain RNNs.</li>
+      </ol>
+    </div>
+  </div>
+
+  <div class="callout warn">
+    <div class="ico">🧠</div>
+    <div class="body"><div class="title">LSTM and GRU: gates that protect memory</div>
+      <p>An <b>LSTM</b> adds a cell state with additive updates and learned gates (forget, input, output) controlling what is kept, written and read. The additive path is the key: like a residual connection, it gives gradients a route with derivative ≈1, so information survives hundreds of steps instead of dozens. A <b>GRU</b> is a lighter two-gate variant with similar performance. Both extended the useful range dramatically — and neither fixed the sequential-training problem.</p></div>
+  </div>
+
+  <h2>The encoder–decoder bottleneck</h2>
+  <p>Early neural translation ran an encoder RNN over the source sentence, took its final hidden state, and decoded a target sentence from it. That single vector had to carry an entire sentence. Quality collapsed as sentences got longer — the model was being asked to memorise a paragraph in 512 numbers.</p>
+
+  <div class="callout tip">
+    <div class="ico">💡</div>
+    <div class="body"><div class="title">The idea that fixed it</div>
+      <p>Instead of compressing the source into one vector, keep <b>all</b> the encoder states and let each decoding step <i>choose</i> which source positions to look at. That choice is a set of weights summing to one — and computing them from similarity is attention. Bahdanau's 2014 paper introduced it for translation; “Attention Is All You Need” (2017) then removed the recurrence entirely.</p></div>
+  </div>
+
+  <h2>Attention from first principles</h2>
+  <p>Think of a soft dictionary lookup. Each position offers a <b>key</b> (what I am) and a <b>value</b> (what I contribute). The position doing the looking has a <b>query</b> (what I need). Score the query against every key, softmax the scores into weights, and return the weighted average of values.</p>
+
+  <div class="qkv">
+    <div><b>🔍 Query (Q)</b>What this token is looking for. Derived from the current position: <code>q = Wq·x</code>.</div>
+    <div><b>🏷️ Key (K)</b>What each token advertises about itself: <code>k = Wk·x</code>. The score is <code>q·k</code>.</div>
+    <div><b>📦 Value (V)</b>What is actually retrieved and mixed: <code>v = Wv·x</code>. The output is <code>Σ weightᵢ · vᵢ</code>.</div>
+  </div>
+
+  <pre class="code">scores  = Q @ K.T / sqrt(d)      <span class="c"># similarity, scaled so softmax doesn't saturate</span>
+weights = softmax(scores)         <span class="c"># each row sums to 1</span>
+out     = weights @ V             <span class="c"># weighted average of values</span></pre>
+
+  <div class="panel">
+    <div class="panel-head"><div class="dots"><i></i><i></i><i></i></div><span class="p-title">Click a word to see what it attends to</span><span class="p-tag">Interactive</span></div>
+    <div class="panel-body">
+      <div class="seg" id="sentSeg"><button data-v="0" class="active">Pronoun resolution</button><button data-v="1">Subject–verb</button><button data-v="2">Long-range fact</button></div>
+      <div class="sent" id="sentence"></div>
+      <div class="attn-row" id="attnRow"></div>
+      <div class="callout" id="attnInfo" style="margin-top:20px"><div class="ico">🔍</div><div class="body"><p style="margin:0"></p></div></div>
+      <p class="small muted">Weights are illustrative, but the mechanism is exact: a softmax over dot products, producing a distribution over positions. Real models learn dozens of these patterns in parallel — one head tracks syntax, another coreference, another position (Chapter 14).</p>
+    </div>
+  </div>
+
+  <div class="callout tip">
+    <div class="ico">➗</div>
+    <div class="body"><div class="title">Why divide by √d?</div>
+      <p>The dot product of two random d-dimensional vectors has standard deviation proportional to √d. Without scaling, scores for d=128 are large enough that softmax saturates into a near-one-hot distribution, gradients vanish, and training stalls. Dividing by √d keeps the score variance around 1 — a one-line fix for a real failure mode.</p></div>
+  </div>
+
+  <h2>Self-attention vs cross-attention, and masking</h2>
+  <div class="split">
+    <div class="card"><h4 class="mt0">Self-attention</h4><p class="small mb0">Q, K and V all come from the same sequence: every token looks at every other token in its own context. This is what builds contextual representations.</p></div>
+    <div class="card"><h4 class="mt0">Cross-attention</h4><p class="small mb0">Q comes from one sequence, K and V from another: a decoder attending to an encoder, or a language model attending to retrieved documents or image patches.</p></div>
+  </div>
+
+  <div class="panel">
+    <div class="panel-head"><div class="dots"><i></i><i></i><i></i></div><span class="p-title">Attention masks</span><span class="p-tag">Interactive</span></div>
+    <div class="panel-body">
+      <div class="seg" id="maskSeg"><button data-v="full" class="active">Bidirectional (BERT)</button><button data-v="causal">Causal (GPT)</button><button data-v="pad">With padding</button><button data-v="window">Sliding window</button></div>
+      <div class="mask-grid" id="maskGrid"></div>
+      <div class="callout" id="maskInfo" style="margin-top:12px"><div class="ico">📘</div><div class="body"><p style="margin:0"></p></div></div>
+      <p class="small muted">Rows are queries, columns are keys. A filled cell means “this query may attend to this key”. Masking is implemented by setting blocked scores to −∞ before the softmax, so their weight becomes exactly zero.</p>
+    </div>
+  </div>
+
+  <h2>Cost and parallelism: the actual trade</h2>
+  <p>Attention is not cheaper than recurrence — it's quadratic in sequence length where an RNN is linear. It won because of <b>parallelism</b>: every position can be computed simultaneously during training, which maps perfectly onto a GPU, while an RNN must walk the sequence one step at a time.</p>
+
+  <div class="panel">
+    <div class="panel-head"><div class="dots"><i></i><i></i><i></i></div><span class="p-title">Compute and sequential depth vs sequence length</span><span class="p-tag">Interactive</span></div>
+    <div class="panel-body">
+      <div class="svg-scroll"><svg id="costSvg" class="diagram cost-svg" viewBox="0 0 640 210"></svg></div>
+      <div class="range-row"><label for="seqT">Sequence length T</label><input type="range" id="seqT" min="64" max="8192" step="64" value="1024"><output id="seqTV"></output></div>
+      <div class="stats">
+        <div class="stat"><div class="k">RNN: work</div><div class="v" id="rnnWork" style="font-size:16px">–</div></div>
+        <div class="stat bad"><div class="k">RNN: sequential steps</div><div class="v" id="rnnSeq" style="font-size:16px">–</div></div>
+        <div class="stat acc"><div class="k">Attention: work</div><div class="v" id="attWork" style="font-size:16px">–</div></div>
+        <div class="stat good"><div class="k">Attention: sequential steps</div><div class="v" id="attSeq" style="font-size:16px">–</div></div>
+      </div>
+      <p class="small muted" style="margin-top:8px">More total arithmetic, but it all happens at once. A GPU with 10,000 lanes would rather do 10× the work in one parallel sweep than 1× the work in 1,000 dependent steps. (At inference, autoregressive decoding <i>is</i> sequential again — which is why Chapter 26 exists.)</p>
+    </div>
+  </div>
+
+  <div class="callout warn">
+    <div class="ico">📈</div>
+    <div class="body"><div class="title">The quadratic wall</div>
+      <p>Doubling context quadruples attention cost and memory. That's why long-context work is a research area of its own: FlashAttention (same maths, far fewer memory round-trips), sliding-window and sparse patterns, linear-attention approximations, and state-space models like Mamba that revive a recurrent formulation with a parallel training algorithm.</p></div>
+  </div>
+
+  <div class="callout danger"><div class="ico">⚠️</div><div class="body"><div class="title">Common mistakes</div>
+    <ul class="mb0">
+      <li><b>Forgetting the causal mask</b> in a generative model. It trains beautifully and generates nonsense — because it was reading the answer.</li>
+      <li><b>Not masking padding.</b> The model attends to pad tokens, and batch composition silently changes results.</li>
+      <li><b>Omitting the √d scaling.</b> Softmax saturates, gradients vanish, and the model appears to be “too small”.</li>
+      <li><b>Treating attention weights as explanations.</b> They show where information was mixed from, not why the output was produced — a well-studied caveat.</li>
+      <li><b>Assuming longer context is free.</b> Cost and memory are quadratic, and retrieval is often cheaper and more accurate than stuffing everything in (Chapter 21).</li>
+    </ul></div></div>
+
+  <div class="callout interview"><div class="ico">🎤</div><div class="body"><div class="title">Interview drill</div>
+    <p class="small" style="margin:10px 0 0"><b>Warm-up:</b> Attention costs O(T²) and an RNN costs O(T). Why did attention win?</p>
+    <details class="ans"><summary>How a strong answer sounds</summary><div>Because the relevant currency is wall-clock time on parallel hardware, not FLOPs. An RNN has O(T) <i>sequential</i> steps — each depends on the last — so a GPU's thousands of lanes sit idle. Attention has O(1) sequential depth: all positions are computed in one batched matmul. It also gives every position a direct path to every other, so the gradient between distant tokens doesn't have to survive T multiplications. More arithmetic, radically better utilization and optimization.</div></details>
+    <p class="small" style="margin:10px 0 0"><b>Deeper:</b> You need to model 100,000-token documents. Options?</p>
+    <details class="ans"><summary>How a strong answer sounds</summary><div>First ask whether the whole document must be in context: retrieval over chunks is usually cheaper and often more accurate, since attention over 100k tokens dilutes as much as it helps. If full context is genuinely required: use FlashAttention to make the memory cost linear even though compute stays quadratic; use sparse or sliding-window attention with a few global tokens; consider a state-space or linear-attention hybrid; and exploit KV-cache reuse and prompt caching if the document is queried repeatedly. I'd also measure quality as a function of position — many long-context models degrade in the middle, so the engineering answer has to be validated, not assumed.</div></details>
+  </div></div>
+
+  <div class="takeaways">
+    <h3>🧠 Key takeaways</h3>
+    <ul>
+      <li>RNNs carry a fixed-size hidden state; gradients through time vanish or explode, and training can't parallelise.</li>
+      <li>LSTM/GRU gates add an additive memory path that extends useful range, but keep the sequential bottleneck.</li>
+      <li>Attention is a soft lookup: score queries against keys, softmax, average the values.</li>
+      <li>Scaling by √d keeps softmax out of saturation; masks enforce causality and ignore padding.</li>
+      <li>Attention costs more FLOPs but has O(1) sequential depth — that parallelism is why it replaced recurrence.</li>
+    </ul>
+  </div>
+
+  <div class="quiz-wrap">
+    <h2>Check your understanding</h2>
+    <div class="quiz-score"></div>
+
+    <div class="quiz" data-answer="2">
+      <p class="q">What is the main reason plain RNNs struggle with long-range dependencies?</p>
+      <div class="opts">
+        <button class="opt">They have too few parameters</button>
+        <button class="opt">They can't handle variable-length input</button>
+        <button class="opt">Repeated multiplication by the same matrix makes gradients vanish or explode</button>
+        <button class="opt">They require padding</button>
+      </div>
+      <div class="explain">Backpropagation through time multiplies the same Jacobian repeatedly; the product shrinks or grows exponentially with distance. Gates and additive paths were invented to work around exactly this.</div>
+    </div>
+
+    <div class="quiz" data-answer="1">
+      <p class="q">In attention, what do the values (V) represent?</p>
+      <div class="opts">
+        <button class="opt">The similarity scores between positions</button>
+        <button class="opt">The content that gets mixed into the output, weighted by attention</button>
+        <button class="opt">The positional encodings</button>
+        <button class="opt">The loss gradients</button>
+      </div>
+      <div class="explain">Keys decide <i>how much</i> attention each position gets; values are <i>what</i> is actually retrieved and averaged.</div>
+    </div>
+
+    <div class="quiz" data-answer="0">
+      <p class="q">Why are attention scores divided by √d?</p>
+      <div class="opts">
+        <button class="opt">To stop softmax saturating as dimension grows, which would kill gradients</button>
+        <button class="opt">To normalize the values to unit length</button>
+        <button class="opt">To make the operation associative</button>
+        <button class="opt">To reduce memory usage</button>
+      </div>
+      <div class="explain">Dot-product magnitude grows with √d. Without scaling the softmax becomes nearly one-hot, its gradient goes to zero, and training stalls.</div>
+    </div>
+
+    <div class="quiz" data-answer="3">
+      <p class="q">A GPT-style model must not attend to future tokens. How is that enforced?</p>
+      <div class="opts">
+        <button class="opt">By reversing the sequence</button>
+        <button class="opt">By training only on short sequences</button>
+        <button class="opt">By zeroing the value vectors of future tokens</button>
+        <button class="opt">By setting future scores to −∞ before the softmax</button>
+      </div>
+      <div class="explain">−∞ becomes exactly zero weight after softmax. Zeroing values instead would still let the softmax denominator include them, subtly leaking information.</div>
+    </div>
+
+    <div class="quiz" data-answer="1">
+      <p class="q">Doubling sequence length from 2k to 4k affects self-attention compute how?</p>
+      <div class="opts">
+        <button class="opt">Doubles it</button>
+        <button class="opt">Quadruples it</button>
+        <button class="opt">Leaves it unchanged</button>
+        <button class="opt">Halves it per token</button>
+      </div>
+      <div class="explain">The score matrix is T×T, so cost scales with T². This quadratic growth is what drives FlashAttention, sparse patterns and retrieval-based alternatives.</div>
+    </div>
+  </div>
+</main>
+<script src="assets/app.js"></script>
+<script>
+(function(){
+  const { $, $$, clamp } = ML;
+
+  /* ================= attention demo ================= */
+  const EXAMPLES = [
+    { words: ['The', 'trophy', 'did', 'not', 'fit', 'in', 'the', 'suitcase', 'because', 'it', 'was', 'too', 'big'],
+      q: 9,
+      w: { 1: 0.52, 7: 0.21, 12: 0.11, 4: 0.05, 9: 0.04 },
+      n: '“<b>it</b>” must resolve to a noun. The head has learned a coreference pattern: most weight on <i>trophy</i>, some on the competing candidate <i>suitcase</i>, a little on the disambiguating adjective <i>big</i>. Change “big” to “small” and a well-trained model flips the winner — the famous Winograd test.' },
+    { words: ['The', 'engineers', 'who', 'reviewed', 'the', 'design', 'were', 'concerned'],
+      q: 6,
+      w: { 1: 0.61, 3: 0.12, 5: 0.08, 2: 0.06 },
+      n: 'To choose “<b>were</b>” over “was”, the verb must agree with the true subject <i>engineers</i> — not the closest noun <i>design</i>. Syntax heads specialise in exactly this kind of long-distance grammatical link, skipping over intervening clauses.' },
+    { words: ['Marie', 'moved', 'to', 'Paris', 'in', '1891', 'and', 'later', 'won', 'a', 'prize', 'in', 'that', 'city'],
+      q: 13,
+      w: { 3: 0.64, 0: 0.10, 12: 0.09, 5: 0.05 },
+      n: '“that <b>city</b>” refers back nine tokens to <i>Paris</i>. Note that the attention weight does not decay with distance the way an RNN’s memory does — every position is one hop away, which is precisely the structural advantage of attention.' },
+  ];
+  let cur = 0, qIdx = EXAMPLES[0].q;
+
+  function drawAttn() {
+    const ex = EXAMPLES[cur];
+    const weights = {};
+    let rest = 1;
+    if (qIdx === ex.q) { Object.assign(weights, ex.w); }
+    else {
+      // generic plausible pattern: nearby tokens + the query itself
+      ex.words.forEach((_, i) => { const d = Math.abs(i - qIdx); weights[i] = Math.exp(-d * 0.7) * (i === qIdx ? 1.4 : 1); });
+    }
+    let total = 0;
+    ex.words.forEach((_, i) => { total += weights[i] || 0; });
+    const rem = Math.max(0, 1 - total);
+    ex.words.forEach((_, i) => { weights[i] = (weights[i] || 0) + rem / ex.words.length; });
+
+    $('#sentence').innerHTML = ex.words.map((w, i) =>
+      `<button data-i="${i}" class="${i === qIdx ? 'q' : ''}" style="border-color:${i === qIdx ? '' : `rgba(13,148,136,${clamp(weights[i] * 2.2, 0.08, 1).toFixed(2)})`}">${w}<span class="w">${(weights[i] * 100).toFixed(0)}%</span></button>`).join('');
+    $$('#sentence button').forEach(b => b.onclick = () => { qIdx = +b.dataset.i; drawAttn(); });
+
+    const mx = Math.max(...Object.values(weights));
+    $('#attnRow').innerHTML = ex.words.map((w, i) => {
+      const a = clamp(weights[i] / mx, 0.05, 1);
+      return `<i style="background:rgba(13,148,136,${a.toFixed(2)});color:${a > 0.5 ? '#fff' : 'var(--text-2)'}">${w}</i>`;
+    }).join('');
+    $('#attnInfo p').innerHTML = qIdx === ex.q ? ex.n :
+      `Query = “<b>${ex.words[qIdx]}</b>”. This is a generic locality pattern — many real heads do look mostly at neighbours. Click “<b>${ex.words[ex.q]}</b>” to see the interesting long-range head for this sentence.`;
+  }
+  $('#sentSeg').addEventListener('segchange', (e) => { cur = +e.detail; qIdx = EXAMPLES[cur].q; drawAttn(); });
+  drawAttn();
+
+  /* ================= masks ================= */
+  const T = 10;
+  const MASKS = {
+    full: { f: () => true, n: '<b>Bidirectional.</b> Every token sees every other token, past and future. Used by encoder models (BERT-style) for classification, retrieval embeddings and any task where the whole input is available at once.' },
+    causal: { f: (q, k) => k <= q, n: '<b>Causal / autoregressive.</b> Token t may only see tokens ≤ t. This is what makes next-token prediction a valid training objective: the model can be trained on every position of a sequence in parallel without any position seeing its own answer.' },
+    pad: { f: (q, k) => k <= q && k < 7, n: '<b>Causal plus padding mask.</b> Positions 7–9 are padding added to make the batch rectangular, so they are blocked entirely. Forget this and the model attends to meaningless filler — and results change depending on what else is in the batch.' },
+    window: { f: (q, k) => k <= q && q - k < 4, n: '<b>Sliding window.</b> Each token attends only to the last 4 positions, making cost linear in sequence length instead of quadratic. Used in long-context models, usually mixed with a few full-attention layers or global tokens so information can still travel far.' },
+  };
+  function drawMask() {
+    const k = $('#maskSeg').dataset.value || 'full', m = MASKS[k];
+    const g = $('#maskGrid');
+    g.style.gridTemplateColumns = `repeat(${T},1fr)`;
+    let h = '';
+    for (let q = 0; q < T; q++) for (let kk = 0; kk < T; kk++) h += `<i class="${m.f(q, kk) ? '' : 'off'}"></i>`;
+    g.innerHTML = h;
+    $('#maskInfo p').innerHTML = m.n;
+  }
+  $('#maskSeg').addEventListener('segchange', drawMask);
+  drawMask();
+
+  /* ================= cost curves ================= */
+  function cost() {
+    const T = +$('#seqT').value;
+    $('#seqTV').textContent = T.toLocaleString() + ' tokens';
+    const d = 1024;
+    const rnnF = T * d * d * 4, attF = T * T * d * 2 + T * d * d * 4;
+    $('#rnnWork').textContent = (rnnF / 1e9).toFixed(1) + ' GFLOP';
+    $('#rnnSeq').textContent = T.toLocaleString() + ' steps';
+    $('#attWork').textContent = (attF / 1e9).toFixed(1) + ' GFLOP';
+    $('#attSeq').textContent = '1 step';
+    const X = (t) => 45 + (t / 8192) * 570, Y = (f) => 175 - clamp(f / (8192 * 8192 * d * 2 + 8192 * d * d * 4), 0, 1) * 155;
+    let a = '', r = '';
+    for (let t = 64; t <= 8192; t += 64) {
+      a += (a ? 'L' : 'M') + X(t).toFixed(1) + ',' + Y(t * t * d * 2 + t * d * d * 4).toFixed(1) + ' ';
+      r += (r ? 'L' : 'M') + X(t).toFixed(1) + ',' + Y(t * d * d * 4).toFixed(1) + ' ';
+    }
+    $('#costSvg').innerHTML =
+      `<line stroke="var(--border-strong)" x1="45" y1="175" x2="625" y2="175"/><line stroke="var(--border-strong)" x1="45" y1="12" x2="45" y2="175"/>` +
+      `<path class="att" d="${a}"/><path class="rnn" d="${r}"/>` +
+      `<line x1="${X(T)}" y1="12" x2="${X(T)}" y2="175" stroke="var(--text)" stroke-dasharray="4 4" stroke-width="1.5"/>` +
+      `<text x="330" y="196">sequence length</text><text x="2" y="14">FLOPs</text>` +
+      `<text x="470" y="40" style="fill:var(--accent)">attention · O(T²·d)</text>` +
+      `<text x="470" y="160" style="fill:var(--amber)">RNN · O(T·d²)</text>`;
+  }
+  $('#seqT').addEventListener('input', cost);
+  cost();
+})();
+</script>
+</body>
+</html>

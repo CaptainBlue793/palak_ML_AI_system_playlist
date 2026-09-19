@@ -1,0 +1,346 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Distributed Training I: Data Parallel, ZeRO &amp; FSDP</title>
+<link rel="stylesheet" href="assets/style.css">
+<script>try{var t=JSON.parse(localStorage.getItem('ml-theme'));if(t)document.documentElement.setAttribute('data-theme',t)}catch(e){}</script>
+<style>
+  .memtable { display:grid; gap:6px }
+  .memtable .r { display:grid; grid-template-columns:200px 1fr 96px; gap:10px; align-items:center; font-size:13px }
+  .memtable .tk { height:16px; border-radius:6px; background:var(--surface-3); overflow:hidden }
+  .memtable .tk i { display:block; height:100%; transition:width .35s }
+  .memtable .v { font-family:var(--mono); text-align:right; color:var(--muted) }
+  .scale-svg { width:100%; height:230px }
+  .scale-svg .ideal { fill:none; stroke:var(--border-strong); stroke-dasharray:5 4; stroke-width:2 }
+  .scale-svg .real { fill:none; stroke:var(--accent); stroke-width:2.8 }
+  .scale-svg .pt { fill:var(--pink) }
+  .scale-svg text { font-size:10.5px; fill:var(--muted); font-family:var(--mono) }
+  .ringviz text { font-size:10.5px; fill:var(--muted); font-family:var(--mono) }
+  .ringviz .gpu { fill:var(--surface-2); stroke:var(--border-strong); stroke-width:1.5 }
+  .ringviz .gpu.on { fill:var(--accent-soft); stroke:var(--accent); stroke-width:2.5 }
+</style>
+</head>
+<body data-chapter="23">
+<main class="content">
+
+  <section class="hero">
+    <div class="eyebrow"><span class="pill accent">Chapter 23</span><span class="pill">Advanced</span><span class="pill">⏱ 45 min</span></div>
+    <h1>Distributed Training I: <span class="grad">Data Parallel, ZeRO &amp; FSDP</span></h1>
+    <p class="lead">Two reasons to use more than one GPU: the model doesn't fit, or it would take too long. Data parallelism solves the second. ZeRO and FSDP extend it to solve the first — by noticing that every GPU is holding an identical copy of things only one of them needs at a time.</p>
+    <ul class="objectives">
+      <li>Trace a data-parallel step and where the all-reduce happens</li>
+      <li>Compute the communication volume of ring all-reduce</li>
+      <li>Explain ZeRO stages 1–3 and size memory per GPU</li>
+      <li>Use gradient accumulation and scale the learning rate correctly</li>
+      <li>Diagnose poor scaling efficiency</li>
+    </ul>
+  </section>
+
+  <h2>Data parallelism in one picture</h2>
+  <p>Every GPU holds a full copy of the model. The global batch is split between them; each computes gradients on its shard; then all gradients are averaged so every replica applies an identical update and the copies stay in sync.</p>
+
+  <div class="panel">
+    <div class="panel-head"><div class="dots"><i></i><i></i><i></i></div><span class="p-title">One data-parallel step</span><span class="p-tag">Step-through</span></div>
+    <div class="panel-body svg-scroll">
+      <svg id="dpSvg" class="diagram ringviz" viewBox="0 0 760 280">
+        <defs><marker id="dph" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" class="arrow-head"/></marker></defs>
+        <path id="d-e1" class="edge dimmable" d="M110,60 L110,95" marker-end="url(#dph)"/>
+        <path id="d-e2" class="edge dimmable" d="M270,60 L270,95" marker-end="url(#dph)"/>
+        <path id="d-e3" class="edge dimmable" d="M430,60 L430,95" marker-end="url(#dph)"/>
+        <path id="d-e4" class="edge dimmable" d="M590,60 L590,95" marker-end="url(#dph)"/>
+        <path id="d-ring1" class="edge dimmable" d="M160,150 L220,150" marker-end="url(#dph)"/>
+        <path id="d-ring2" class="edge dimmable" d="M320,150 L380,150" marker-end="url(#dph)"/>
+        <path id="d-ring3" class="edge dimmable" d="M480,150 L540,150" marker-end="url(#dph)"/>
+        <path id="d-ring4" class="edge dimmable dash" d="M600,175 L600,215 L100,215 L100,175" marker-end="url(#dph)"/>
+        <rect id="d-batch" class="node dimmable" x="60" y="20" width="580" height="40" rx="10" fill="var(--surface-2)" stroke="var(--border-strong)"/>
+        <text x="350" y="45" text-anchor="middle" style="font-size:12px;fill:var(--text-2);font-weight:600">global batch — 4M tokens</text>
+        <g id="d-g0" class="node dimmable" transform="translate(60,105)"><rect width="100" height="70" rx="12"/><text x="50" y="26">GPU 0</text><text x="50" y="44">model copy</text><text x="50" y="60">batch ¼</text></g>
+        <g id="d-g1" class="node dimmable" transform="translate(220,105)"><rect width="100" height="70" rx="12"/><text x="50" y="26">GPU 1</text><text x="50" y="44">model copy</text><text x="50" y="60">batch ¼</text></g>
+        <g id="d-g2" class="node dimmable" transform="translate(380,105)"><rect width="100" height="70" rx="12"/><text x="50" y="26">GPU 2</text><text x="50" y="44">model copy</text><text x="50" y="60">batch ¼</text></g>
+        <g id="d-g3" class="node dimmable" transform="translate(540,105)"><rect width="100" height="70" rx="12"/><text x="50" y="26">GPU 3</text><text x="50" y="44">model copy</text><text x="50" y="60">batch ¼</text></g>
+        <text x="350" y="245" text-anchor="middle" style="font-size:11px;fill:var(--muted)">ring all-reduce: every GPU ends up with the averaged gradient</text>
+      </svg>
+    </div>
+    <div class="stepper" data-diagram="dpSvg">
+      <ol class="steps">
+        <li data-title="Split the batch" data-on="d-batch d-g0 d-g1 d-g2 d-g3 d-e1 d-e2 d-e3 d-e4">Each GPU takes a different slice. With 4 GPUs and a 4M-token global batch, each processes 1M tokens. The <i>per-device</i> batch is what has to fit in memory; the <i>global</i> batch is what determines the learning-rate schedule.</li>
+        <li data-title="Forward pass" data-on="d-g0 d-g1 d-g2 d-g3">Every replica runs the same computation on different data. No communication at all — this phase scales perfectly.</li>
+        <li data-title="Backward pass" data-on="d-g0 d-g1 d-g2 d-g3">Each GPU computes gradients for <b>every</b> parameter, but only from its own data. Four different gradient vectors now exist, and they must be reconciled.</li>
+        <li data-title="All-reduce, part 1: reduce-scatter" data-on="d-g0 d-g1 d-ring1 d-ring2" data-packet="d-g0>d-g1,d-g1>d-g2" data-color="var(--accent-2)">Gradients are split into N chunks. In N−1 steps around the ring, each GPU accumulates the sum for one chunk. Each step sends 1/N of the gradients — so the communication is spread evenly rather than converging on one node.</li>
+        <li data-title="All-reduce, part 2: all-gather" data-on="d-g2 d-g3 d-ring3 d-ring4" data-packet="d-g2>d-g3,d-g3>d-g0" data-color="var(--green)">Another N−1 steps distribute each finished chunk back around the ring. Total traffic per GPU: <b>2·(N−1)/N × gradient bytes</b> ≈ 2× the model size, independent of how many GPUs you have — which is why ring all-reduce scales.</li>
+        <li data-title="Optimizer step" data-on="d-g0 d-g1 d-g2 d-g3">Every GPU applies the identical averaged gradient to its identical weights, so the replicas remain bit-identical. Any divergence here — different dropout seeds, non-deterministic reductions — silently breaks the guarantee.</li>
+        <li data-title="Overlap is where the speed comes from" data-on="d-ring1 d-ring2 d-ring3">Gradients for the last layer are ready long before the first layer's. Frameworks bucket them and start all-reducing while the backward pass is still running, hiding most of the communication behind compute. Without this overlap, scaling efficiency collapses.</li>
+      </ol>
+    </div>
+  </div>
+
+  <div class="callout tip">
+    <div class="ico">📐</div>
+    <div class="body"><div class="title">The communication number worth memorising</div>
+      <p>Ring all-reduce moves <b>2×(N−1)/N × model_size</b> bytes per GPU per step — about 2× the model size regardless of N. For a 7B model in bf16 that's ~28 GB per GPU per step. On 400 GB/s NVLink that's 70 ms; on a 25 GB/s network link it's over a second. This one calculation explains why intra-node bandwidth dictates your parallelism strategy.</p></div>
+  </div>
+
+  <h2>Where the memory goes, and how ZeRO removes it</h2>
+  <p>In plain data parallelism every GPU stores the full weights, the full gradients <i>and</i> the full optimizer state — but at any moment each GPU only needs a slice of the optimizer state to do its share of the update. ZeRO (and its PyTorch implementation, FSDP) shards what doesn't need duplicating.</p>
+
+  <div class="panel">
+    <div class="panel-head"><div class="dots"><i></i><i></i><i></i></div><span class="p-title">Memory per GPU by ZeRO stage</span><span class="p-tag">Interactive</span></div>
+    <div class="panel-body">
+      <div class="range-row"><label for="zP">Model size (B parameters)</label><input type="range" id="zP" min="0.5" max="180" step="0.5" value="13"><output id="zPV"></output></div>
+      <div class="range-row"><label for="zN">GPUs</label><input type="range" id="zN" min="1" max="512" step="1" value="8"><output id="zNV"></output></div>
+      <div class="range-row"><label for="zAct">Activation memory per GPU (GB)</label><input type="range" id="zAct" min="1" max="60" step="1" value="12"><output id="zActV"></output></div>
+      <div class="seg" id="zStage"><button data-v="0" class="active">DDP (no sharding)</button><button data-v="1">ZeRO-1</button><button data-v="2">ZeRO-2</button><button data-v="3">ZeRO-3 / FSDP</button></div>
+      <div class="memtable" id="zBars" style="margin-top:12px"></div>
+      <div class="callout" id="zInfo" style="margin-top:12px"><div class="ico">💾</div><div class="body"><p style="margin:0"></p></div></div>
+    </div>
+  </div>
+
+  <div class="table-wrap">
+    <table class="t">
+      <thead><tr><th>Stage</th><th>Shards</th><th>Memory saved</th><th>Extra communication</th></tr></thead>
+      <tbody>
+        <tr><td><b>DDP</b></td><td>Nothing</td><td>—</td><td>All-reduce gradients (2× model)</td></tr>
+        <tr><td><b>ZeRO-1</b></td><td>Optimizer state</td><td>Large — usually the biggest single item</td><td>None extra in practice</td></tr>
+        <tr><td><b>ZeRO-2</b></td><td>+ gradients</td><td>More</td><td>Same volume, reshaped (reduce-scatter instead of all-reduce)</td></tr>
+        <tr><td><b>ZeRO-3 / FSDP</b></td><td>+ parameters</td><td>Scales with N — the model no longer needs to fit on one GPU</td><td>~1.5× total: parameters are all-gathered per layer, then freed</td></tr>
+        <tr><td><b>+ offload</b></td><td>To CPU or NVMe</td><td>Enormous</td><td>Very slow — a last resort, not a plan</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="callout warn">
+    <div class="ico">🔁</div>
+    <div class="body"><div class="title">ZeRO-3 trades bandwidth for memory</div>
+      <p>With parameters sharded, each layer's weights must be gathered just before use and released after. That's extra traffic on every forward <i>and</i> backward pass. It works beautifully inside a node on NVLink and degrades badly across a slow network — which is why the standard layout is FSDP within a node and other parallelism dimensions across nodes (Chapter 24).</p></div>
+  </div>
+
+  <h2>Gradient accumulation and effective batch</h2>
+  <p>If the per-device batch you need doesn't fit, split it into micro-batches and accumulate gradients before stepping:</p>
+
+  <pre class="code">effective_batch = per_device_batch × accumulation_steps × num_gpus
+
+for i, micro in enumerate(micro_batches):
+    loss = model(micro).loss / accumulation_steps   <span class="c"># ← divide, or your LR silently multiplies</span>
+    loss.backward()                                  <span class="c"># gradients accumulate</span>
+    if (i + 1) % accumulation_steps == 0:
+        clip_grad_norm_(model.parameters(), 1.0)
+        opt.step(); opt.zero_grad()</pre>
+
+  <div class="callout tip">
+    <div class="ico">⚖️</div>
+    <div class="body"><div class="title">Accumulation is free compute, not free bandwidth</div>
+      <p>Only the final micro-batch triggers the all-reduce, so accumulation also <i>reduces</i> communication per token — a useful trick when the network is the bottleneck. In DDP, remember to suppress synchronisation on intermediate micro-batches (<code>no_sync()</code>), or you all-reduce every one of them and lose the benefit entirely.</p></div>
+  </div>
+
+  <h2>Scaling efficiency</h2>
+  <p>Doubling GPUs never doubles throughput. Plot what you actually get:</p>
+
+  <div class="panel">
+    <div class="panel-head"><div class="dots"><i></i><i></i><i></i></div><span class="p-title">Strong scaling simulator</span><span class="p-tag">Interactive</span></div>
+    <div class="panel-body">
+      <div class="svg-scroll"><svg id="scSvg" class="diagram scale-svg" viewBox="0 0 640 230"></svg></div>
+      <div class="range-row"><label for="scN">GPUs</label><input type="range" id="scN" min="1" max="512" step="1" value="64"><output id="scNV"></output></div>
+      <div class="range-row"><label for="scBw">Interconnect (GB/s per GPU)</label><input type="range" id="scBw" min="5" max="900" step="5" value="400"><output id="scBwV"></output></div>
+      <div class="range-row"><label for="scOverlap">Communication hidden by compute</label><input type="range" id="scOverlap" min="0" max="95" step="5" value="80"><output id="scOverlapV"></output></div>
+      <div class="stats">
+        <div class="stat acc"><div class="k">Scaling efficiency</div><div class="v" id="scEff">–</div></div>
+        <div class="stat"><div class="k">Effective GPUs</div><div class="v" id="scEffN" style="font-size:18px">–</div></div>
+        <div class="stat bad"><div class="k">Wasted per step</div><div class="v" id="scWaste" style="font-size:18px">–</div></div>
+      </div>
+      <div class="callout" id="scInfo" style="margin-top:12px"><div class="ico">📉</div><div class="body"><p style="margin:0"></p></div></div>
+    </div>
+  </div>
+
+  <h2>What actually breaks scaling</h2>
+  <div class="table-wrap">
+    <table class="t">
+      <thead><tr><th>Symptom</th><th>Cause</th><th>Fix</th></tr></thead>
+      <tbody>
+        <tr><td>Efficiency drops sharply past one node</td><td>Crossing from NVLink to network</td><td>Keep the chattiest parallelism inside the node; use hierarchical collectives</td></tr>
+        <tr><td>One GPU always finishes last</td><td>Straggler: uneven sequence lengths, a hot device, a bad NIC</td><td>Length bucketing/packing, health checks, drain the bad node</td></tr>
+        <tr><td>Long stalls at step boundaries</td><td>No communication/computation overlap</td><td>Enable gradient bucketing; check bucket size; overlap backward with all-reduce</td></tr>
+        <tr><td>Throughput fine, loss worse</td><td>Global batch grew without LR/warmup changes</td><td>Scale learning rate with batch size; lengthen warmup</td></tr>
+        <tr><td>Random hangs</td><td>Collective mismatch — one rank took a different branch</td><td>Make control flow rank-identical; set collective timeouts and log rank state</td></tr>
+        <tr><td>OOM only at a large scale</td><td>Fragmentation, or activation memory growing with sequence length</td><td>Activation checkpointing, expandable allocator, sequence packing</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="callout danger"><div class="ico">⚠️</div><div class="body"><div class="title">Common mistakes</div>
+    <ul class="mb0">
+      <li><b>Not dividing the loss by accumulation steps.</b> The effective learning rate multiplies, and the run diverges mysteriously.</li>
+      <li><b>Forgetting <code>no_sync()</code> during accumulation.</b> You pay the full all-reduce on every micro-batch.</li>
+      <li><b>Different data order per rank without a shared seed policy.</b> Either duplicated samples or silently skipped ones.</li>
+      <li><b>Rank-dependent control flow.</b> If one rank skips a collective, everything hangs until the timeout — the worst failure to debug.</li>
+      <li><b>Scaling batch size without touching the schedule.</b> Fewer steps at the same LR is a different, usually worse, run.</li>
+      <li><b>Benchmarking without warmup.</b> The first steps include compilation, allocator growth and NCCL setup.</li>
+    </ul></div></div>
+
+  <div class="callout interview"><div class="ico">🎤</div><div class="body"><div class="title">Interview drill</div>
+    <p class="small" style="margin:10px 0 0"><b>Warm-up:</b> Why does ring all-reduce scale better than a parameter server?</p>
+    <details class="ans"><summary>How a strong answer sounds</summary><div>A parameter server concentrates traffic: every worker sends gradients to the same place, so the server's bandwidth is a hard ceiling and it scales like O(N) on one link. Ring all-reduce distributes it — each GPU only ever talks to two neighbours, and the volume per GPU is about 2× the model size regardless of N, so adding GPUs doesn't increase per-link traffic. The cost is latency: 2(N−1) sequential steps, which is why very large clusters use hierarchical or tree-based algorithms that trade a little extra volume for fewer hops.</div></details>
+    <p class="small" style="margin:10px 0 0"><b>Deeper:</b> A 70B model won't fit for training on 8×80 GB. Walk through your options in order.</p>
+    <details class="ans"><summary>How a strong answer sounds</summary><div>First do the arithmetic: 70B in mixed precision with AdamW is roughly 70×16 = 1.1 TB for weights, gradients and optimizer state, against 640 GB of HBM — so plain DDP is impossible before activations. Options in order of cost: ZeRO-1 to shard optimizer state (removes the largest item); ZeRO-2 for gradients; ZeRO-3/FSDP to shard parameters too, which fits but adds all-gather traffic on every layer — acceptable within a node on NVLink. Add activation checkpointing to cut activation memory, and use bf16 with an 8-bit optimizer if still tight. If it still doesn't fit or the communication is too costly, move to tensor parallelism within the node plus pipeline parallelism across nodes (Chapter 24). I'd measure MFU at each step rather than assuming — the goal is throughput, not merely fitting.</div></details>
+  </div></div>
+
+  <div class="takeaways">
+    <h3>🧠 Key takeaways</h3>
+    <ul>
+      <li>Data parallelism replicates the model and averages gradients with an all-reduce.</li>
+      <li>Ring all-reduce moves ~2× the model size per GPU per step, independent of GPU count.</li>
+      <li>ZeRO-1/2/3 shard optimizer state, gradients and parameters — the last trades bandwidth for memory.</li>
+      <li>Gradient accumulation enlarges the effective batch; divide the loss and suppress intermediate syncs.</li>
+      <li>Scaling efficiency dies from unoverlapped communication, stragglers and crossing node boundaries.</li>
+    </ul>
+  </div>
+
+  <div class="quiz-wrap">
+    <h2>Check your understanding</h2>
+    <div class="quiz-score"></div>
+
+    <div class="quiz" data-answer="2">
+      <p class="q">How much data does each GPU send during one ring all-reduce of a 7B bf16 model?</p>
+      <div class="opts">
+        <button class="opt">14 GB divided by the number of GPUs</button>
+        <button class="opt">14 GB × number of GPUs</button>
+        <button class="opt">About 28 GB, roughly independent of GPU count</button>
+        <button class="opt">It depends only on the batch size</button>
+      </div>
+      <div class="explain">2×(N−1)/N × 14 GB ≈ 28 GB. The constancy in N is exactly why ring all-reduce is the standard algorithm.</div>
+    </div>
+
+    <div class="quiz" data-answer="1">
+      <p class="q">ZeRO-1 shards which component?</p>
+      <div class="opts">
+        <button class="opt">Model parameters</button>
+        <button class="opt">Optimizer state</button>
+        <button class="opt">Activations</button>
+        <button class="opt">The dataset</button>
+      </div>
+      <div class="explain">Optimizer state is usually the largest item (12 bytes/param for AdamW in mixed precision) and sharding it costs essentially no extra communication — the best ratio of the three stages.</div>
+    </div>
+
+    <div class="quiz" data-answer="0">
+      <p class="q">Why is ZeRO-3 a poor fit across a slow network?</p>
+      <div class="opts">
+        <button class="opt">Parameters must be all-gathered per layer on every forward and backward pass</button>
+        <button class="opt">It requires more GPU memory</button>
+        <button class="opt">It changes the mathematics of the update</button>
+        <button class="opt">It doesn't support mixed precision</button>
+      </div>
+      <div class="explain">Sharded parameters have to be reassembled before use. On NVLink that's cheap; over a 25 GB/s link it dominates step time.</div>
+    </div>
+
+    <div class="quiz" data-answer="3">
+      <p class="q">You use 4 accumulation steps but forget to divide the loss by 4. What happens?</p>
+      <div class="opts">
+        <button class="opt">Training is 4× slower</button>
+        <button class="opt">Gradients become zero</button>
+        <button class="opt">Nothing — the optimizer normalizes</button>
+        <button class="opt">The effective learning rate is 4× too large, and training likely diverges</button>
+      </div>
+      <div class="explain">Accumulated gradients are a sum, not a mean. The step is four times bigger than intended — a classic silent divergence.</div>
+    </div>
+
+    <div class="quiz" data-answer="1">
+      <p class="q">Scaling efficiency is 92% within one node but 48% across four nodes. First thing to investigate?</p>
+      <div class="opts">
+        <button class="opt">The learning-rate schedule</button>
+        <button class="opt">Inter-node bandwidth and whether communication overlaps with compute</button>
+        <button class="opt">The optimizer choice</button>
+        <button class="opt">Weight initialization</button>
+      </div>
+      <div class="explain">The drop coincides exactly with leaving NVLink. Check achieved network bandwidth, collective algorithm, bucket sizes and overlap before touching anything about the model.</div>
+    </div>
+  </div>
+</main>
+<script src="assets/app.js"></script>
+<script>
+(function(){
+  const { $, $$, clamp, fmt } = ML;
+
+  /* ================= ZeRO memory ================= */
+  function zero() {
+    const P = +$('#zP').value * 1e9, N = +$('#zN').value, act = +$('#zAct').value;
+    const stage = +($('#zStage').dataset.value || 0);
+    $('#zPV').textContent = (P / 1e9).toFixed(1) + ' B';
+    $('#zNV').textContent = N + ' GPUs';
+    $('#zActV').textContent = act + ' GB';
+    const w = P * 2 / 1e9;                       // bf16 weights
+    const gr = P * 2 / 1e9;                      // bf16 gradients
+    const os = P * 12 / 1e9;                     // fp32 master + m + v
+    const rows = [
+      ['Parameters (bf16)', stage >= 3 ? w / N : w, 'var(--accent)'],
+      ['Gradients (bf16)', stage >= 2 ? gr / N : gr, 'var(--accent-2)'],
+      ['Optimizer state (fp32)', stage >= 1 ? os / N : os, 'var(--amber)'],
+      ['Activations', act, 'var(--green)'],
+    ];
+    const total = rows.reduce((s, r) => s + r[1], 0);
+    const cap = 80;
+    $('#zBars').innerHTML = rows.map(([n, v, c]) =>
+      `<div class="r"><span>${n}</span><div class="tk"><i style="width:${clamp(v / Math.max(total, cap) * 100, 0, 100)}%;background:${c}"></i></div><span class="v">${v.toFixed(1)} GB</span></div>`).join('') +
+      `<div class="r"><span><b>Total per GPU (vs 80 GB)</b></span><div class="tk"><i style="width:${clamp(total / Math.max(total, cap) * 100, 0, 100)}%;background:${total > cap ? 'var(--red)' : 'var(--green)'}"></i></div><span class="v"><b>${total.toFixed(1)} GB</b></span></div>`;
+    const names = ['DDP', 'ZeRO-1', 'ZeRO-2', 'ZeRO-3 / FSDP'];
+    const ddpTotal = w + gr + os + act;
+    $('#zInfo p').innerHTML = total <= cap
+      ? `✅ <b>${names[stage]} fits</b> at ${total.toFixed(1)} GB per GPU — ${(ddpTotal / total).toFixed(1)}× less than plain DDP would need (${ddpTotal.toFixed(0)} GB). ` +
+        (stage === 0 ? 'Note the optimizer state is the largest single item; ZeRO-1 removes most of it for free.' :
+         stage === 3 ? 'ZeRO-3 makes per-GPU memory fall as you add GPUs — but every layer’s parameters are gathered and released on each pass, so keep this within a fast interconnect.' :
+         'Sharding at this stage costs essentially no extra communication, which makes it the best first move.')
+      : `❌ <b>${names[stage]} does not fit:</b> ${total.toFixed(1)} GB per GPU against 80 GB. Next moves: advance a ZeRO stage, add GPUs (stage 3 scales with N), turn on activation checkpointing to cut the ${act} GB of activations, or move to tensor/pipeline parallelism (Chapter 24).`;
+  }
+  ['#zP', '#zN', '#zAct'].forEach(id => $(id).addEventListener('input', zero));
+  $('#zStage').addEventListener('segchange', zero);
+  zero();
+
+  /* ================= scaling ================= */
+  function scaling() {
+    const N = +$('#scN').value, bw = +$('#scBw').value, ov = +$('#scOverlap').value / 100;
+    $('#scNV').textContent = N;
+    $('#scBwV').textContent = bw + ' GB/s';
+    $('#scOverlapV').textContent = (ov * 100).toFixed(0) + '%';
+    const modelGB = 14, computeMs = 240;
+    const eff = (n) => {
+      if (n === 1) return 1;
+      const commGB = 2 * (n - 1) / n * modelGB;
+      // crossing node boundary (8 GPUs/node) costs bandwidth
+      const effBw = n > 8 ? bw * 0.18 : bw;
+      const commMs = commGB / effBw * 1000;
+      const exposed = commMs * (1 - ov);
+      const straggler = 1 + Math.log2(Math.max(1, n)) * 0.006;
+      return computeMs / ((computeMs + exposed) * straggler);
+    };
+    const e = eff(N);
+    $('#scEff').textContent = (e * 100).toFixed(1) + '%';
+    $('#scEffN').textContent = (N * e).toFixed(0) + ' of ' + N;
+    $('#scWaste').textContent = (N - N * e).toFixed(0) + ' GPUs';
+
+    const X = (n) => 45 + Math.log2(n) / 9 * 570, Y = (t) => 195 - t / 512 * 175;
+    let ideal = '', real = '';
+    for (let n = 1; n <= 512; n *= 1.12) {
+      const k = Math.max(1, Math.round(n));
+      ideal += (ideal ? 'L' : 'M') + X(k).toFixed(1) + ',' + Y(k).toFixed(1) + ' ';
+      real += (real ? 'L' : 'M') + X(k).toFixed(1) + ',' + Y(k * eff(k)).toFixed(1) + ' ';
+    }
+    $('#scSvg').innerHTML =
+      `<line stroke="var(--border-strong)" x1="45" y1="195" x2="628" y2="195"/><line stroke="var(--border-strong)" x1="45" y1="10" x2="45" y2="195"/>` +
+      `<path class="ideal" d="${ideal}"/><path class="real" d="${real}"/>` +
+      `<circle class="pt" cx="${X(N)}" cy="${Y(N * e)}" r="6"/>` +
+      `<line x1="${X(8)}" y1="10" x2="${X(8)}" y2="195" stroke="var(--border-strong)" stroke-dasharray="3 5"/>` +
+      `<text x="${X(8) + 4}" y="22">node boundary</text>` +
+      `<text x="280" y="216">GPUs (log scale)</text><text x="2" y="14">throughput</text>` +
+      `<text x="470" y="34" style="fill:var(--muted)">linear (ideal)</text><text x="460" y="120" style="fill:var(--accent)">achieved</text>`;
+    $('#scInfo p').innerHTML = e > 0.85
+      ? `✅ <b>${(e * 100).toFixed(0)}% efficiency.</b> Communication is largely hidden behind compute. This is roughly what a well-tuned run looks like — above 90% is uncommon at scale.`
+      : e > 0.6
+        ? `⚠️ <b>${(e * 100).toFixed(0)}% efficiency</b> — you are paying for ${(N - N * e).toFixed(0)} idle GPUs. ${N > 8 ? 'Most of the loss comes from crossing node boundaries: check achieved inter-node bandwidth and use hierarchical collectives.' : 'Increase overlap (gradient bucketing) or raise the per-device batch so compute dominates.'}`
+        : `🚨 <b>${(e * 100).toFixed(0)}% efficiency.</b> Over half the cluster is waiting. Either the interconnect is far too slow for data parallelism at this size, or communication isn't overlapping. Consider gradient accumulation (fewer syncs per token), a different parallelism strategy, or simply fewer GPUs — a smaller cluster at high efficiency often trains faster in wall-clock than a large one at 40%.`;
+  }
+  ['#scN', '#scBw', '#scOverlap'].forEach(id => $(id).addEventListener('input', scaling));
+  scaling();
+})();
+</script>
+</body>
+</html>

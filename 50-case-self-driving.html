@@ -1,0 +1,307 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Case Study: Self-Driving Perception</title>
+<link rel="stylesheet" href="assets/style.css">
+<script>try{var t=JSON.parse(localStorage.getItem('ml-theme'));if(t)document.documentElement.setAttribute('data-theme',t)}catch(e){}</script>
+<style>
+  .req { display:grid; grid-template-columns:repeat(auto-fit,minmax(160px,1fr)); gap:8px }
+  .req > div { padding:10px 12px; border-radius:12px; background:var(--surface-2); border:1px solid var(--border) }
+  .req b { display:block; font-size:11px; color:var(--muted); text-transform:uppercase; letter-spacing:.05em }
+  .req span { font-family:var(--mono); font-size:17px; font-weight:800 }
+  .avviz text { font-size:10px; fill:var(--text-2); font-family:var(--font); font-weight:600 }
+  .avviz .sub { font-size:8.5px; fill:var(--muted); font-family:var(--mono); font-weight:400 }
+  .tail { width:100%; height:225px }
+  .tail text { font-size:10px; fill:var(--muted); font-family:var(--mono) }
+  .lane { display:grid; gap:8px }
+  .lane .r { display:grid; grid-template-columns:165px 1fr; gap:12px; padding:11px 13px; border-radius:12px; background:var(--surface-2); border:1px solid var(--border); font-size:13.5px }
+  .lane .r b { font-family:var(--mono); color:var(--accent) }
+</style>
+</head>
+<body data-chapter="50">
+<main class="content">
+
+  <section class="hero">
+    <div class="eyebrow"><span class="pill accent">Chapter 50</span><span class="pill pink">Case Study</span><span class="pill">⏱ 50 min</span></div>
+    <h1>Case Study: <span class="grad">Self-Driving Perception</span></h1>
+    <p class="lead">Turn eight cameras, a lidar and five radars into a coherent picture of the world, forty times a second, on a computer bolted into a car, with a latency budget measured in tens of milliseconds and a failure mode that is not a bad recommendation. Everything you have learned about iterating quickly meets a domain where being wrong occasionally is not an acceptable operating point.</p>
+    <ul class="objectives">
+      <li>Design a multi-sensor, multi-task perception stack under a hard real-time budget</li>
+      <li>Build the data engine that mines the long tail from a fleet</li>
+      <li>Reason about edge compute, determinism and redundancy</li>
+      <li>Construct a safety argument that survives statistical scrutiny</li>
+      <li>Understand why the last 1% of scenarios takes 99% of the effort</li>
+    </ul>
+  </section>
+
+  <h2>1 · Requirements</h2>
+  <div class="req">
+    <div><b>Cameras</b><span>8 × 1080p</span></div>
+    <div><b>Frame rate</b><span>36 Hz</span></div>
+    <div><b>Perception budget</b><span>&lt; 45 ms</span></div>
+    <div><b>Sense-to-act</b><span>&lt; 100 ms</span></div>
+    <div><b>On-board compute</b><span>~250 W</span></div>
+    <div><b>Fleet</b><span>25k vehicles</span></div>
+  </div>
+  <p class="small muted" style="margin-top:10px"><b>In scope:</b> the perception and prediction stack, the data engine, on-vehicle serving, validation. <b>Out of scope:</b> planning and control policy, vehicle hardware design, the regulatory approval process — though the safety argument below is what feeds it.</p>
+
+  <div class="callout tip">
+    <div class="ico">🎯</div>
+    <div class="body"><div class="title">Metrics</div>
+      <p><b>Safety-critical:</b> missed detections of vulnerable road users per million miles, sliced by lighting, weather and occlusion; false-brake events per thousand miles. <b>Perception quality:</b> detection and tracking accuracy by range band and object class, velocity error, prediction displacement error at 3 s. <b>System:</b> end-to-end latency at p99.9 (not p95 — the tail is the whole point), frame drop rate, thermal throttling incidents. <b>Programme:</b> miles per critical intervention, and the rate at which newly discovered failure modes are closed.</p></div>
+  </div>
+
+  <div class="callout warn">
+    <div class="ico">⚖️</div>
+    <div class="body"><div class="title">Why every metric in this chapter is a tail metric</div>
+      <p>A recommender that is 95% accurate is excellent. A perception stack that misses 5% of pedestrians is a lethal product. The distributions you care about are entirely in the tail: the p99.9 of latency, the rarest 0.1% of scenes, the one lighting condition your training set under-represents. This inverts the usual engineering economics — average-case improvements are nearly worthless, and almost all the effort goes into finding and fixing cases that occur once every few hundred thousand miles.</p></div>
+  </div>
+
+  <h2>2 · The perception stack</h2>
+  <div class="panel">
+    <div class="panel-head"><div class="dots"><i></i><i></i><i></i></div><span class="p-title">One frame, sensors to planner</span><span class="p-tag">Step-through</span></div>
+    <div class="panel-body svg-scroll">
+      <svg id="avSvg" class="diagram avviz" viewBox="0 0 900 320">
+        <defs><marker id="av50" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" class="arrow-head"/></marker></defs>
+        <path id="a-e1" class="edge dimmable" d="M110,55 L160,55" marker-end="url(#av50)"/>
+        <path id="a-e2" class="edge dimmable" d="M280,55 L330,55" marker-end="url(#av50)"/>
+        <path id="a-e3" class="edge dimmable" d="M450,55 L500,55" marker-end="url(#av50)"/>
+        <path id="a-e4" class="edge dimmable" d="M620,55 L670,55" marker-end="url(#av50)"/>
+        <path id="a-e5" class="edge dimmable" d="M745,80 L745,150" marker-end="url(#av50)"/>
+        <path id="a-e6" class="edge dimmable" d="M660,175 L500,175" marker-end="url(#av50)"/>
+        <path id="a-log" class="edge dimmable dash" d="M390,80 L390,255" marker-end="url(#av50)"/>
+        <path id="a-emap" class="edge dimmable dash" d="M170,255 L170,80" marker-end="url(#av50)"/>
+        <g id="a-sens" class="node dimmable" transform="translate(20,30)"><rect width="90" height="50" rx="11"/><text x="45" y="22" text-anchor="middle">Sensors</text><text x="45" y="38" text-anchor="middle" class="sub">8 cam · lidar · radar</text></g>
+        <g id="a-sync" class="node dimmable" transform="translate(160,30)"><rect width="120" height="50" rx="11"/><text x="60" y="22" text-anchor="middle">Sync + calib</text><text x="60" y="38" text-anchor="middle" class="sub">timestamps · extrinsics</text></g>
+        <g id="a-bb" class="node dimmable" transform="translate(330,30)"><rect width="120" height="50" rx="11"/><text x="60" y="22" text-anchor="middle">Backbones</text><text x="60" y="38" text-anchor="middle" class="sub">per-camera features</text></g>
+        <g id="a-bev" class="node dimmable" transform="translate(500,30)"><rect width="120" height="50" rx="11"/><text x="60" y="22" text-anchor="middle">BEV fusion</text><text x="60" y="38" text-anchor="middle" class="sub">one shared space</text></g>
+        <g id="a-head" class="node dimmable" transform="translate(670,30)"><rect width="150" height="50" rx="11"/><text x="75" y="22" text-anchor="middle">Task heads</text><text x="75" y="38" text-anchor="middle" class="sub">detect · lanes · free space</text></g>
+        <g id="a-track" class="node dimmable" transform="translate(490,150)"><rect width="180" height="50" rx="11"/><text x="90" y="22" text-anchor="middle">Track + predict</text><text x="90" y="38" text-anchor="middle" class="sub">identity over time</text></g>
+        <g id="a-plan" class="node dimmable" transform="translate(280,150)"><rect width="180" height="50" rx="11"/><text x="90" y="22" text-anchor="middle">Planner interface</text><text x="90" y="38" text-anchor="middle" class="sub">objects + uncertainty</text></g>
+        <g id="a-map" class="node dimmable" transform="translate(90,255)"><rect width="160" height="46" rx="11"/><text x="80" y="20" text-anchor="middle">Map + localisation</text><text x="80" y="36" text-anchor="middle" class="sub">prior, not truth</text></g>
+        <g id="a-trig" class="node dimmable" transform="translate(310,255)"><rect width="170" height="46" rx="11"/><text x="85" y="20" text-anchor="middle">Triggers → fleet</text><text x="85" y="36" text-anchor="middle" class="sub">interesting frames only</text></g>
+      </svg>
+    </div>
+    <div class="stepper" data-diagram="avSvg">
+      <ol class="steps">
+        <li data-title="Capture, and agree on when" data-on="a-sens">Sensors run at different rates and none of them are truly simultaneous. Hardware-triggered capture with a shared clock gives every measurement a trustworthy timestamp. At 30 m/s, a 10 ms timing error is a 30 cm position error — enough to change whether a pedestrian is in your lane.</li>
+        <li data-title="Calibration is a live concern" data-on="a-sens a-sync a-e1" data-packet="a-sens>a-sync">Extrinsics drift with temperature, potholes and a service technician leaning on a mirror. Online calibration monitoring runs continuously, because a slowly rotating camera degrades fusion quality in a way that looks exactly like a model regression and is not.</li>
+        <li data-title="Per-sensor backbones" data-on="a-sync a-bb a-e2" data-packet="a-sync>a-bb">Each camera runs a shared-weight backbone producing features rather than boxes. Extracting features first and fusing later is what makes multi-camera reasoning possible: an object crossing between two cameras must not become two objects.</li>
+        <li data-title="Fuse into one bird's-eye space" data-on="a-bb a-bev a-e3" data-packet="a-bb>a-bev" data-color="var(--accent-2)">Project features into a shared top-down representation using the calibrated geometry, and fuse camera, lidar and radar there. This is the architectural heart of a modern stack: one consistent space where all sensors and all tasks agree, rather than per-camera detections stitched together afterwards with heuristics.</li>
+        <li data-title="Many heads, one trunk" data-on="a-bev a-head a-e4" data-packet="a-bev>a-head" data-color="var(--green)">Detection, lane geometry, drivable space, traffic controls, occupancy — all from the same features. Necessary for the compute budget, and useful for accuracy through shared representation. The cost is coupling: a change that helps one head can regress another, so every head is a release gate.</li>
+        <li data-title="Track and predict" data-on="a-head a-track a-e5" data-packet="a-head>a-track">Per-frame detections become persistent objects with velocity and identity, then the stack predicts several seconds of plausible futures with probabilities. A cyclist's intent matters far more to the planner than a tight bounding box, and tracking is where flicker — an object detected, lost, redetected — turns into phantom braking.</li>
+        <li data-title="Hand over uncertainty, not just objects" data-on="a-track a-plan a-e6" data-packet="a-track>a-plan" data-color="var(--amber)">The planner needs calibrated confidence and explicit occlusion reasoning: "there may be something behind that van" is an output, not a gap. A perception stack that reports only what it saw forces the planner to assume the world is fully observed, which it never is.</li>
+        <li data-title="Decide what to remember" data-on="a-trig a-log">The vehicle generates terabytes an hour and can upload a tiny fraction. On-board triggers select the interesting seconds — disagreement between sensors, low-confidence detections, driver interventions, near-misses, novel scenes — and those clips are the fuel for everything in the next section.</li>
+      </ol>
+    </div>
+  </div>
+
+  <h2>3 · Deep dive: the data engine</h2>
+  <p>Everyone has the same models. The difference between a demo and a product is the loop that finds the scenes your model gets wrong and turns them into training data — and the way you spend a finite labelling budget decides how fast that loop closes.</p>
+
+  <div class="panel">
+    <div class="panel-head"><div class="dots"><i></i><i></i><i></i></div><span class="p-title">Spending 100,000 labelled clips</span><span class="p-tag">Interactive</span></div>
+    <div class="panel-body">
+      <div class="seg" id="deSeg"><button data-v="rand" class="active">Random from the fleet</button><button data-v="unc">Model uncertainty</button><button data-v="trig">Fleet triggers</button><button data-v="auto">Auto-label + human review</button></div>
+      <div class="svg-scroll"><svg id="tailSvg" class="diagram tail" viewBox="0 0 640 225"></svg></div>
+      <div class="stats">
+        <div class="stat acc"><div class="k">Rare scenarios covered</div><div class="v" id="dCov" style="font-size:18px">–</div></div>
+        <div class="stat good"><div class="k">Effective clips</div><div class="v" id="dEff" style="font-size:18px">–</div></div>
+        <div class="stat warn"><div class="k">Cost per useful clip</div><div class="v" id="dCost" style="font-size:18px">–</div></div>
+        <div class="stat bad"><div class="k">Cycle time</div><div class="v" id="dCyc" style="font-size:18px">–</div></div>
+      </div>
+      <div class="callout" id="deInfo" style="margin-top:12px"><div class="ico">🔁</div><div class="body"><p style="margin:0"></p></div></div>
+    </div>
+  </div>
+
+  <div class="callout tip">
+    <div class="ico">🏷️</div>
+    <div class="body"><div class="title">Auto-labelling: the offline model is allowed to cheat</div>
+      <p>The on-vehicle model must run causally in 45 ms. The labelling model faces neither constraint: it can see the <em>future</em> of the clip, run a hundred times slower, use a far larger network, and fuse lidar returns the production stack may not have. Running that model over a clip produces labels better than a human can draw — especially for velocity, occluded extents and distant objects — and humans then audit and correct a sample instead of drawing every box.</p>
+      <p>This is knowledge distillation with a temporal advantage (Chapter 27), and it is the single biggest lever on labelling cost in the industry. The trap is a feedback loop: if auto-labels come from a teacher trained on the same data, you reinforce shared blind spots. Guard it with a human-audited holdout that never enters the auto-label loop.</p></div>
+  </div>
+
+  <h2>4 · Deep dive: the on-vehicle budget</h2>
+  <div class="table-wrap">
+    <table class="t">
+      <thead><tr><th>Stage</th><th>Budget</th><th>Constraint</th></tr></thead>
+      <tbody>
+        <tr><td>Capture and ISP</td><td>~8 ms</td><td>Fixed by hardware; sets the floor on everything downstream</td></tr>
+        <tr><td>Backbones (8 cameras)</td><td>~18 ms</td><td>The dominant cost; int8 quantized, fused kernels, no dynamic shapes</td></tr>
+        <tr><td>BEV fusion + heads</td><td>~12 ms</td><td>Shared trunk keeps this affordable</td></tr>
+        <tr><td>Tracking + prediction</td><td>~7 ms</td><td>Mostly CPU; must be deterministic for replay</td></tr>
+        <tr><td>Planner + control</td><td>~25 ms</td><td>Outside this chapter, but it shares the 100 ms sense-to-act budget</td></tr>
+        <tr><td>Thermal headroom</td><td>~15%</td><td>A stack that only fits in winter is a stack that does not fit</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="small muted" style="margin-top:8px">Three constraints have no analogue in cloud serving. <b>Determinism:</b> the same inputs must produce the same outputs, or a replay cannot reproduce an incident and you cannot prove a fix. <b>No batching across requests:</b> there is one vehicle, so latency cannot be traded for throughput. <b>Degradation, not failure:</b> if a camera fails, the stack must keep operating with reduced capability and tell the planner the field of view has shrunk.</p>
+
+  <h2>5 · Deep dive: the safety argument</h2>
+  <div class="lane">
+    <div class="r"><b>The statistics</b><span>Serious injury occurs roughly once per tens of millions of miles of human driving. Demonstrating a superior rate by direct observation alone requires billions of miles — decades of fleet time. No programme can validate by road miles alone, so the argument has to be built from several weaker pieces.</span></div>
+    <div class="r"><b>Simulation</b><span>Millions of scenario variations per release, with the perturbations that matter: the pedestrian one step later, the van parked half a metre further out. The known weakness is that simulation mostly tests the situations you thought to write down.</span></div>
+    <div class="r"><b>Resimulation</b><span>Replay real logged clips against the new stack and diff the outputs. Catches regressions on the exact scenes that previously caused trouble, and only works if the stack is deterministic.</span></div>
+    <div class="r"><b>Shadow mode</b><span>Run the new stack on fleet vehicles without control authority and compare its decisions with the human's. Enormous statistical power with zero exposure — the closest thing to free evidence in this domain.</span></div>
+    <div class="r"><b>Operational design domain</b><span>State exactly where the system is claimed to work: which roads, speeds, weather, lighting. Most of the safety case is a bounded claim plus reliable detection of leaving those bounds.</span></div>
+    <div class="r"><b>Regression discipline</b><span>Every discovered failure becomes a permanent test case. The programme's real velocity metric is how fast newly found failure modes get closed, not how good the headline benchmark looks (Chapter 32).</span></div>
+  </div>
+
+  <h2>6 · Fleet, training and cost</h2>
+  <div class="table-wrap">
+    <table class="t">
+      <thead><tr><th>Quantity</th><th>Estimate</th><th>Notes</th></tr></thead>
+      <tbody>
+        <tr><td>Raw data generated</td><td>~1.5 TB per vehicle-hour</td><td>Essentially all of it discarded on board</td></tr>
+        <tr><td>Uploaded</td><td>~0.02% of frames</td><td>Trigger-selected clips; bandwidth is the binding constraint</td></tr>
+        <tr><td>Training set</td><td>~4M clips, ~2 PB</td><td>Rebalanced every cycle toward rare classes</td></tr>
+        <tr><td>Training run</td><td>~2,000 GPUs, ~4 days</td><td>Multi-task, multi-sensor; retrained on a weekly cadence</td></tr>
+        <tr><td>Auto-label compute</td><td>~35% of total GPU spend</td><td>Larger than most teams expect, and cheaper than the humans it replaces</td></tr>
+        <tr><td>Validation per release</td><td>~8M simulated scenarios</td><td>Plus resimulation over the full regression clip library</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h2>7 · What breaks</h2>
+  <div class="table-wrap">
+    <table class="t">
+      <thead><tr><th>Failure</th><th>Symptom</th><th>Response</th></tr></thead>
+      <tbody>
+        <tr><td>Calibration drift on one vehicle</td><td>Fusion errors on that car only; looks like a model bug</td><td>Continuous online calibration monitoring, per-vehicle health</td></tr>
+        <tr><td>Thermal throttling in summer</td><td>Frame drops and latency spikes in specific climates</td><td>Budget with headroom; test at the temperature extremes, not the mean</td></tr>
+        <tr><td>Long-tail class under-represented</td><td>Confident misdetection of a rare but critical object</td><td>Trigger-mined mining, targeted collection, per-class release gates</td></tr>
+        <tr><td>Auto-label feedback loop</td><td>Metrics improve while real-world failures persist</td><td>Human-audited holdout that never enters the auto-label loop</td></tr>
+        <tr><td>Non-deterministic kernels</td><td>An incident cannot be reproduced in replay</td><td>Determinism is a hard requirement, enforced in CI</td></tr>
+        <tr><td>Track identity flicker</td><td>Phantom braking from an object lost and redetected</td><td>Temporal smoothing and identity-stability metrics, not just per-frame accuracy</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="callout interview"><div class="ico">🎤</div><div class="body"><div class="title">Interview drill</div>
+    <p class="small" style="margin:10px 0 0"><b>Follow-up:</b> “Your detection benchmark improved 3% but the fleet sees more phantom braking. How is that possible?”</p>
+    <details class="ans"><summary>How a strong answer sounds</summary><div>Because per-frame detection accuracy is not what causes phantom braking — temporal instability is. A model can detect an object slightly better on average while flickering more: detected, lost for two frames, redetected as a new track. Downstream, that reads as an object appearing suddenly at close range, and the planner brakes. The benchmark has no notion of identity persistence, so this is invisible to it. I would look at track-level metrics — identity switches, track fragmentation, velocity stability — and at the distribution rather than the mean, because the aggregate gain probably comes from easy mid-range objects while the regression is at the edges of the field of view or on partially occluded ones. The fix path is resimulation against the clips that produced the braking events, then adding temporal-stability terms to both the training objective and the release gates. The general lesson: the metric that moves the product is rarely the metric the model was trained on, and in this domain the gap is dangerous rather than merely annoying.</div></details>
+    <p class="small" style="margin:10px 0 0"><b>Follow-up:</b> “How would you prove the new release is safer than the old one?”</p>
+    <details class="ans"><summary>How a strong answer sounds</summary><div>Not by road miles — the events are too rare, and demonstrating a meaningful difference by direct observation would take billions of miles. I would build a layered argument. Resimulation across the full regression library, so I can show that every previously known failure is still fixed and diff every behavioural change on real logged scenes. Simulation across millions of perturbed scenarios, with coverage reported by scenario family so the gaps are explicit rather than implied. Shadow mode on the fleet: run the new stack without control authority and compare its decisions against the old stack and the human driver, which gives real statistical power at zero exposure. Then component-level gates per object class, range band and weather condition, because an aggregate improvement can hide a regression on pedestrians at night. And finally a staged rollout with a clearly stated operational design domain and a defined trigger for pulling it back. No single one of those proves safety; together they form an argument that a regulator, and an engineer, can actually interrogate.</div></details>
+  </div></div>
+
+  <div class="takeaways">
+    <h3>🧠 Key takeaways</h3>
+    <ul>
+      <li>Fuse sensor features in one shared bird's-eye space rather than stitching per-camera detections together afterwards.</li>
+      <li>The data engine — triggers, mining, auto-labelling, targeted collection — is the real product; the model architecture is comparatively commoditised.</li>
+      <li>An offline auto-labelling model may use the future and unlimited compute, which makes labels better and cheaper than human ones.</li>
+      <li>On-vehicle serving adds determinism, thermal limits and graceful degradation to the usual latency constraints.</li>
+      <li>Safety cannot be validated by road miles; it is argued from resimulation, simulation, shadow mode and a bounded operational domain.</li>
+    </ul>
+  </div>
+
+  <div class="quiz-wrap">
+    <h2>Check your understanding</h2>
+    <div class="quiz-score"></div>
+
+    <div class="quiz" data-answer="2">
+      <p class="q">Why fuse sensors in a shared bird's-eye-view space rather than merging per-camera detections?</p>
+      <div class="opts">
+        <button class="opt">It uses less memory</button>
+        <button class="opt">It removes the need for calibration</button>
+        <button class="opt">All sensors and all tasks reason in one consistent geometry, so an object crossing camera boundaries stays one object</button>
+        <button class="opt">It allows higher frame rates</button>
+      </div>
+      <div class="explain">Late fusion of per-camera boxes needs heuristics to reconcile disagreements, and those heuristics are where the long-tail failures live.</div>
+    </div>
+
+    <div class="quiz" data-answer="0">
+      <p class="q">Why can an offline auto-labelling model produce better labels than the on-vehicle model?</p>
+      <div class="opts">
+        <button class="opt">It can see the whole clip including the future, run far slower, and use a much larger network</button>
+        <button class="opt">It is trained on more classes</button>
+        <button class="opt">It has access to the planner's decisions</button>
+        <button class="opt">It uses a different loss function</button>
+      </div>
+      <div class="explain">The production model must be causal and finish in 45 ms. The labeller has neither constraint — which is why its velocity and occlusion labels beat what a human would draw.</div>
+    </div>
+
+    <div class="quiz" data-answer="3">
+      <p class="q">Why is determinism a hard requirement on the vehicle?</p>
+      <div class="opts">
+        <button class="opt">It improves accuracy</button>
+        <button class="opt">It reduces latency</button>
+        <button class="opt">It is required for quantization</button>
+        <button class="opt">Without it an incident cannot be reproduced in replay, so you can neither diagnose it nor prove a fix</button>
+      </div>
+      <div class="explain">Resimulation is the backbone of the safety argument, and it only works if identical inputs give identical outputs.</div>
+    </div>
+
+    <div class="quiz" data-answer="1">
+      <p class="q">Why can safety not be validated by driving enough miles?</p>
+      <div class="opts">
+        <button class="opt">Because regulators do not accept fleet data</button>
+        <button class="opt">Because serious events are so rare that demonstrating a difference directly would take billions of miles</button>
+        <button class="opt">Because fleet vehicles run older software</button>
+        <button class="opt">Because simulation is always more accurate</button>
+      </div>
+      <div class="explain">Hence the layered argument: resimulation, simulation, shadow mode, component gates and a bounded operational design domain.</div>
+    </div>
+
+    <div class="quiz" data-answer="2">
+      <p class="q">Detection accuracy improved but phantom braking increased. Most likely cause?</p>
+      <div class="opts">
+        <button class="opt">The camera calibration changed</button>
+        <button class="opt">The planner became more conservative</button>
+        <button class="opt">Temporal instability — objects flicker between tracks, so they appear to materialise at close range</button>
+        <button class="opt">The prediction horizon was shortened</button>
+      </div>
+      <div class="explain">Per-frame metrics are blind to identity persistence. Track fragmentation and identity switches are what the planner actually reacts to.</div>
+    </div>
+  </div>
+</main>
+<script src="assets/app.js"></script>
+<script>
+(function(){
+  const { $, fmt } = ML;
+
+  const MODES = {
+    rand: { cov: 0.31, eff: 9000, cost: 62, cyc: '6 weeks',
+      note: `🚩 <b>Random sampling from the fleet.</b> You label 100,000 clips of ordinary daytime highway driving, because that is what the fleet mostly does. The model gets better at what it was already good at. Rare scenarios — a mattress on the motorway, a child behind a parked van, emergency lights at dusk — appear a handful of times, which is not enough to learn from. This is the default when no data engine exists, and it is why programmes plateau at "impressive demo".` },
+    unc: { cov: 0.58, eff: 34000, cost: 26, cyc: '4 weeks',
+      note: `⚠️ <b>Sample where the model is uncertain.</b> A large improvement over random — you stop paying to label what the model already knows. The weakness is systematic: the model is not uncertain about failures it is confidently wrong about, and those are exactly the dangerous ones. Uncertainty sampling finds the boundary you already know about, not the blind spot you do not.` },
+    trig: { cov: 0.79, eff: 61000, cost: 15, cyc: '2 weeks',
+      note: `✅ <b>Fleet triggers.</b> Write detectors that run on every vehicle for the things that matter: disagreement between camera and radar, driver interventions, hard braking, tracks appearing from nowhere, scenes no clip in the training set resembles. Twenty-five thousand vehicles become a distributed search over the long tail, and a new failure mode can be turned into a trigger and mined across the whole fleet within days. The cycle time matters as much as the coverage — this is what turns the data engine into a loop.` },
+    auto: { cov: 0.91, eff: 100000, cost: 6, cyc: '1 week',
+      note: `✅ <b>Triggers plus auto-labelling with human audit.</b> The offline model — non-causal, far larger, allowed to see the whole clip — labels everything, and humans audit a sample and correct the hard cases instead of drawing every box. The same budget now buys an order of magnitude more labelled data, and the loop closes in a week. Keep a human-audited holdout outside the auto-label loop, or you will reinforce the teacher's blind spots and watch your metrics improve while the fleet does not.` },
+  };
+
+  function draw() {
+    const m = MODES[$('#deSeg').dataset.value || 'rand'];
+    // long-tail histogram: common scenarios left, rare right; coverage shades from the left
+    const N = 26, x0 = 42, w = 20;
+    let out = `<line stroke="var(--border-strong)" x1="${x0}" y1="172" x2="620" y2="172"/>`;
+    for (let i = 0; i < N; i++) {
+      const freq = Math.exp(-i / 4.2);
+      const h = Math.max(3, freq * 140);
+      const x = x0 + i * w;
+      // coverage reaches further right as the strategy improves
+      const covered = i / N < m.cov;
+      out += `<rect x="${x}" y="${(172 - h).toFixed(1)}" width="${w - 4}" height="${h.toFixed(1)}" rx="3" fill="${covered ? 'var(--green)' : 'var(--border-strong)'}" opacity="${covered ? '.85' : '.55'}"/>`;
+    }
+    const cx = x0 + m.cov * N * w;
+    out += `<line x1="${cx.toFixed(1)}" y1="18" x2="${cx.toFixed(1)}" y2="172" stroke="var(--pink)" stroke-dasharray="4 4"/>`;
+    out += `<text x="${Math.min(cx + 6, 470).toFixed(1)}" y="30" style="fill:var(--pink);font-weight:700">coverage edge</text>`;
+    out += `<text x="${x0}" y="190" style="fill:var(--muted)">common scenarios</text>`;
+    out += `<text x="500" y="190" style="fill:var(--muted)">the long tail →</text>`;
+    out += `<text x="${x0}" y="210" style="fill:var(--muted);font-size:9px">green = scenario families with enough labelled examples to learn from</text>`;
+    $('#tailSvg').innerHTML = out;
+    $('#dCov').textContent = (m.cov * 100).toFixed(0) + '%';
+    $('#dEff').textContent = fmt(m.eff, 0);
+    $('#dCost').textContent = '£' + m.cost;
+    $('#dCyc').textContent = m.cyc;
+    $('#deInfo p').innerHTML = m.note;
+  }
+  $('#deSeg').addEventListener('segchange', draw);
+  draw();
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,330 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>The Deep Learning Stack</title>
+<link rel="stylesheet" href="assets/style.css">
+<script>try{var t=JSON.parse(localStorage.getItem('ml-theme'));if(t)document.documentElement.setAttribute('data-theme',t)}catch(e){}</script>
+<style>
+  .tgrid { display:grid; gap:4px; margin-top:10px }
+  .tgrid i { height:34px; border-radius:6px; display:grid; place-items:center; font-style:normal; font-family:var(--mono); font-size:11px; background:var(--surface-2); border:1px solid var(--border); color:var(--text-2) }
+  .tgrid i.hl { background:var(--accent-soft); border-color:var(--accent); color:var(--accent); font-weight:700 }
+  .memline { display:flex; gap:3px; flex-wrap:wrap; margin-top:8px }
+  .memline i { width:30px; height:26px; border-radius:5px; display:grid; place-items:center; font-style:normal; font-family:var(--mono); font-size:10px; background:var(--surface-3); color:var(--muted) }
+  .memline i.hl { background:var(--accent); color:#fff; font-weight:700 }
+  .fuse { display:grid; gap:6px }
+  .fuse .op { padding:8px 12px; border-radius:10px; background:var(--surface-2); border:1px solid var(--border); font-family:var(--mono); font-size:12.5px; display:flex; gap:10px; align-items:center }
+  .fuse .op .b { margin-left:auto; color:var(--muted); font-size:11.5px }
+  .fuse .op.fused { border-color:var(--green); background:var(--green-soft) }
+  .stackviz .lyr { fill:var(--surface-2); stroke:var(--border-strong); stroke-width:1.5 }
+  .stackviz .lyr.on { fill:var(--accent-soft); stroke:var(--accent); stroke-width:2.5 }
+  .stackviz text { font-size:11.5px; fill:var(--text-2); font-family:var(--font); font-weight:600 }
+  .stackviz .sub { font-size:10px; fill:var(--muted); font-family:var(--mono); font-weight:400 }
+</style>
+</head>
+<body data-chapter="11">
+<main class="content">
+
+  <section class="hero">
+    <div class="eyebrow"><span class="pill accent">Chapter 11</span><span class="pill cyan">Intermediate</span><span class="pill">⏱ 40 min</span></div>
+    <h1>The Deep Learning <span class="grad">Stack</span></h1>
+    <p class="lead">Between <code>loss.backward()</code> and electrons moving on a die there are five layers of machinery. Knowing what each one does is what separates “the model is slow” from “we're launching 40,000 tiny kernels and the fix is one decorator”.</p>
+    <ul class="objectives">
+      <li>Name every layer from framework call to GPU kernel</li>
+      <li>Read a tensor's shape, stride, dtype and device — and know when a view is free</li>
+      <li>Explain reverse-mode autodiff and what the graph actually stores</li>
+      <li>Decide between eager and compiled execution, and spot graph breaks</li>
+      <li>Diagnose an input-bound pipeline and an out-of-memory crash</li>
+    </ul>
+  </section>
+
+  <h2>Five layers, top to bottom</h2>
+  <p>Step through what happens when you run one training step.</p>
+
+  <div class="panel">
+    <div class="panel-head"><div class="dots"><i></i><i></i><i></i></div><span class="p-title">From Python to silicon</span><span class="p-tag">Step-through</span></div>
+    <div class="panel-body svg-scroll">
+      <svg id="stackSvg" class="diagram stackviz" viewBox="0 0 700 340">
+        <g id="s-py"><rect class="lyr dimmable" x="60" y="20" width="580" height="48" rx="12"/><text x="350" y="42" text-anchor="middle">1 · Your Python code</text><text x="350" y="58" text-anchor="middle" class="sub">model(x), loss.backward(), optimizer.step()</text></g>
+        <g id="s-fw"><rect class="lyr dimmable" x="60" y="80" width="580" height="48" rx="12"/><text x="350" y="102" text-anchor="middle">2 · Framework layer</text><text x="350" y="118" text-anchor="middle" class="sub">modules, tensors, autograd tape, dispatcher</text></g>
+        <g id="s-gr"><rect class="lyr dimmable" x="60" y="140" width="580" height="48" rx="12"/><text x="350" y="162" text-anchor="middle">3 · Graph capture &amp; compiler</text><text x="350" y="178" text-anchor="middle" class="sub">torch.compile / XLA / TensorRT — fusion, layout, scheduling</text></g>
+        <g id="s-kn"><rect class="lyr dimmable" x="60" y="200" width="580" height="48" rx="12"/><text x="350" y="222" text-anchor="middle">4 · Kernel libraries</text><text x="350" y="238" text-anchor="middle" class="sub">cuBLAS, cuDNN, FlashAttention, Triton, custom CUDA</text></g>
+        <g id="s-hw"><rect class="lyr dimmable" x="60" y="260" width="580" height="48" rx="12"/><text x="350" y="282" text-anchor="middle">5 · Hardware</text><text x="350" y="298" text-anchor="middle" class="sub">SMs, tensor cores, HBM, NVLink (Chapter 10)</text></g>
+      </svg>
+    </div>
+    <div class="stepper" data-diagram="stackSvg">
+      <ol class="steps">
+        <li data-title="You call the model" data-on="s-py">In eager mode this is ordinary Python: attribute lookups, a loop over modules, one framework call per operation. Python overhead is real — a few microseconds per op — which is invisible for big matmuls and disastrous for thousands of tiny ones.</li>
+        <li data-title="The framework dispatches" data-on="s-py s-fw">Each op is routed by dtype, device and layout to an implementation, and (if gradients are needed) an entry is pushed onto the <b>autograd tape</b> recording how to reverse it.</li>
+        <li data-title="Optionally, a compiler captures a graph" data-on="s-fw s-gr">With <code>torch.compile</code> or JAX's <code>jit</code>, the sequence of ops is traced into a graph, then optimised: fuse elementwise chains, pick layouts, pre-plan memory, and generate new kernels (often via Triton).</li>
+        <li data-title="Kernels run" data-on="s-gr s-kn">A matmul lands in cuBLAS; a convolution in cuDNN; attention in FlashAttention. These are hand-tuned per architecture and per shape — which is why odd tensor sizes can be much slower than round ones.</li>
+        <li data-title="Hardware executes" data-on="s-kn s-hw">Thread blocks are scheduled onto SMs, data streams from HBM through L2 into registers, tensor cores accumulate. Everything in Chapter 10 applies here.</li>
+        <li data-title="Backward, in reverse" data-on="s-hw s-kn s-gr s-fw">Calling <code>.backward()</code> walks the tape backwards, running each op's gradient kernel. Saved activations are read here — which is why they occupy memory for the whole forward pass.</li>
+        <li data-title="Optimizer step" data-on="s-fw s-kn">Weights and optimizer state update. Naively this is thousands of tiny kernels; production implementations use <i>fused</i> or <i>foreach</i> optimizers that batch them into a handful.</li>
+      </ol>
+    </div>
+  </div>
+
+  <h2>Tensors: shape, stride, dtype, device</h2>
+  <p>A tensor is a flat block of memory plus metadata describing how to index it. That indirection is why many operations are free — they only change the metadata.</p>
+
+  <div class="panel">
+    <div class="panel-head"><div class="dots"><i></i><i></i><i></i></div><span class="p-title">Views, strides and contiguity</span><span class="p-tag">Interactive</span></div>
+    <div class="panel-body">
+      <div class="seg" id="viewSeg"><button data-v="base" class="active">x (3×4)</button><button data-v="t">x.T</button><button data-v="slice">x[:, 1:3]</button><button data-v="reshape">x.reshape(2,6)</button><button data-v="contig">x.T.contiguous()</button></div>
+      <div class="tgrid" id="tGrid" style="margin-top:12px"></div>
+      <div class="small muted" style="margin-top:10px">Underlying memory (row-major), highlighted cells are the ones this view addresses:</div>
+      <div class="memline" id="memLine"></div>
+      <div class="stats" style="margin-top:12px">
+        <div class="stat"><div class="k">Shape</div><div class="v" id="vShape" style="font-size:16px">–</div></div>
+        <div class="stat acc"><div class="k">Stride</div><div class="v" id="vStride" style="font-size:16px">–</div></div>
+        <div class="stat good"><div class="k">Copies memory?</div><div class="v" id="vCopy" style="font-size:16px">–</div></div>
+      </div>
+      <div class="callout" id="vInfo" style="margin-top:12px"><div class="ico">📘</div><div class="body"><p style="margin:0"></p></div></div>
+    </div>
+  </div>
+
+  <div class="callout tip">
+    <div class="ico">🧭</div>
+    <div class="body"><div class="title">Four things to check on any tensor bug</div>
+      <p><code>t.shape</code> (is the batch dimension where you think?), <code>t.dtype</code> (silent fp32 costs 2× memory and speed), <code>t.device</code> (a stray CPU tensor forces a synchronising copy every step), and <code>t.is_contiguous()</code> (some kernels quietly fall back to a slow path or copy).</p></div>
+  </div>
+
+  <h2>Autodiff: the tape</h2>
+  <p>Frameworks use <b>reverse-mode</b> automatic differentiation. During the forward pass, every operation records itself and saves whatever it needs for its own derivative. <code>backward()</code> walks that record in reverse, applying the chain rule.</p>
+
+  <pre class="code">x = torch.randn(4, 3, requires_grad=True)
+y = (x @ W).relu()        <span class="c"># saves: x, W, and the relu mask</span>
+loss = y.mean()
+
+loss.backward()           <span class="c"># walks the tape backwards, fills .grad</span>
+opt.step(); opt.zero_grad()   <span class="c"># update, then clear — forgetting this accumulates</span></pre>
+
+  <div class="grid c3">
+    <div class="card"><h4 class="mt0">💾 Why activations dominate memory</h4><p class="small mb0">Every saved intermediate must live until its backward runs — i.e. the whole forward pass. <b>Gradient checkpointing</b> trades compute for memory: drop most activations and recompute them during backward (~30% slower, several times less memory).</p></div>
+    <div class="card"><h4 class="mt0">🚫 no_grad / inference_mode</h4><p class="small mb0">At inference there is no tape to build. Wrapping evaluation in <code>torch.no_grad()</code> (or <code>inference_mode</code>) removes that memory and overhead entirely. Forgetting it is a classic cause of OOM during validation.</p></div>
+    <div class="card"><h4 class="mt0">✂️ detach()</h4><p class="small mb0">Cuts the graph at a point — useful for target networks, stop-gradients and logging. Accidentally keeping a tensor attached is how “my loss list ate 40 GB” happens.</p></div>
+  </div>
+
+  <h2>Eager vs compiled</h2>
+  <p>Eager execution runs operations one at a time as Python reaches them: easy to debug, and it pays Python overhead plus a memory round-trip for every op. Compilation captures a graph first and optimises across operations.</p>
+
+  <div class="panel">
+    <div class="panel-head"><div class="dots"><i></i><i></i><i></i></div><span class="p-title">What fusion actually saves</span><span class="p-tag">Interactive</span></div>
+    <div class="panel-body">
+      <div class="range-row"><label for="fSize">Tensor size (millions of elements)</label><input type="range" id="fSize" min="1" max="200" step="1" value="40"><output id="fSizeV"></output></div>
+      <div class="split">
+        <div>
+          <div class="small muted" style="font-weight:700;margin-bottom:6px">Eager — one kernel per op</div>
+          <div class="fuse" id="fuseEager"></div>
+        </div>
+        <div>
+          <div class="small muted" style="font-weight:700;margin-bottom:6px">Fused — one kernel</div>
+          <div class="fuse" id="fuseFused"></div>
+        </div>
+      </div>
+      <div class="stats" style="margin-top:12px">
+        <div class="stat bad"><div class="k">Eager bytes moved</div><div class="v" id="fEager">–</div></div>
+        <div class="stat good"><div class="k">Fused bytes moved</div><div class="v" id="fFused">–</div></div>
+        <div class="stat acc"><div class="k">Speedup (memory-bound)</div><div class="v" id="fSpeed">–</div></div>
+      </div>
+      <p class="small muted" style="margin-top:8px">These operations do trivial arithmetic, so their cost is entirely reading and writing HBM. Fusing them means the data is loaded once, transformed in registers, and written once — which is most of what <code>torch.compile</code> buys you on real models.</p>
+    </div>
+  </div>
+
+  <div class="table-wrap">
+    <table class="t">
+      <thead><tr><th>Mode</th><th>Good for</th><th>Cost</th></tr></thead>
+      <tbody>
+        <tr><td><b>Eager</b></td><td>Development, debugging, dynamic control flow</td><td>Python overhead; no cross-op optimisation</td></tr>
+        <tr><td><b>torch.compile</b></td><td>Training and inference speedups with almost no code change</td><td>Compile time; <b>graph breaks</b> on unsupported Python; recompiles on new shapes</td></tr>
+        <tr><td><b>JAX jit / XLA</b></td><td>TPUs, functional style, whole-program optimisation</td><td>Strictly functional code; static shapes</td></tr>
+        <tr><td><b>ONNX / TensorRT</b></td><td>Deployment, cross-runtime portability</td><td>Export friction; a frozen graph, so no dynamic Python</td></tr>
+        <tr><td><b>Custom Triton / CUDA</b></td><td>The last 20% on a hot kernel</td><td>Real engineering effort; you own the correctness</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="callout warn">
+    <div class="ico">🧱</div>
+    <div class="body"><div class="title">Graph breaks and recompiles</div>
+      <p>A compiler traces until it hits something it can't handle — a <code>print</code>, a data-dependent <code>if</code>, a <code>.item()</code> call that forces a sync. It then splits the graph, losing fusion across the boundary. Similarly, every new input shape can trigger a fresh compile: with variable-length sequences, bucket your lengths or mark dimensions dynamic, or you'll spend the run compiling.</p></div>
+  </div>
+
+  <h2>The input pipeline is part of the model</h2>
+  <p>A GPU that finishes a step in 80 ms needs the next batch ready in 80 ms. Decoding JPEGs, tokenizing text or reading many small files from network storage will not keep up unless you engineer it.</p>
+
+  <div class="table-wrap">
+    <table class="t">
+      <thead><tr><th>Lever</th><th>What it fixes</th></tr></thead>
+      <tbody>
+        <tr><td><b>More worker processes</b></td><td>CPU-bound decode/augment; start at (cores − 2) and measure</td></tr>
+        <tr><td><b>Prefetch + pinned memory</b></td><td>Overlaps host→device copy with compute</td></tr>
+        <tr><td><b>Sharded sequential formats</b> (webdataset, TFRecord, Parquet)</td><td>Millions of small-file reads → few large sequential reads</td></tr>
+        <tr><td><b>Pre-tokenize / pre-resize offline</b></td><td>Stops you re-doing identical work every epoch</td></tr>
+        <tr><td><b>GPU-side augmentation</b></td><td>Moves decode/augment off a saturated CPU</td></tr>
+        <tr><td><b>Length bucketing / packing</b></td><td>Removes padding waste in sequence models</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h2>When it breaks: profiling and OOM</h2>
+  <div class="split">
+    <div class="card"><h4 class="mt0">🔬 Profile before optimising</h4><p class="small mb0">The framework profiler gives a kernel-level timeline: how long each op took, how much time is Python, where the gaps are. Look for (1) gaps = input starvation, (2) many tiny kernels = fusion opportunity, (3) big all-reduce blocks = communication not overlapped.</p></div>
+    <div class="card"><h4 class="mt0">💥 OOM triage, in order</h4><p class="small mb0">Reduce batch size → enable gradient checkpointing → check for tensors accidentally kept alive (loss lists, caches) → confirm <code>no_grad</code> at eval → use a memory-efficient optimizer → then shard across GPUs (Ch 23). Memory snapshots show <i>which</i> tensors are resident, not just the total.</p></div>
+  </div>
+
+  <div class="callout tip">
+    <div class="ico">📦</div>
+    <div class="body"><div class="title">Checkpoints: prefer safetensors</div>
+      <p>Classic pickle-based checkpoints execute arbitrary code on load — a genuine supply-chain risk when downloading weights (Chapter 36). <b>safetensors</b> is a plain tensor container: no code execution, memory-mappable, faster to load. Also save the optimizer state, the RNG state, the step count and the config, or your “resume” is a restart.</p></div>
+  </div>
+
+  <div class="callout danger"><div class="ico">⚠️</div><div class="body"><div class="title">Common mistakes</div>
+    <ul class="mb0">
+      <li><b>Calling <code>.item()</code> or <code>.cpu()</code> inside the training loop.</b> Each one synchronises the GPU and stalls the pipeline. Accumulate on device, log occasionally.</li>
+      <li><b>Keeping the loss tensor in a list.</b> It holds the entire graph alive. Append <code>loss.detach().item()</code> instead.</li>
+      <li><b>Evaluating without <code>no_grad</code>.</b> Doubles memory for no reason and often OOMs at the worst moment.</li>
+      <li><b>Benchmarking without warmup or synchronisation.</b> CUDA is asynchronous; measure after a few warmup iterations and an explicit sync, or you're timing queue submission.</li>
+      <li><b>Assuming <code>torch.compile</code> is free.</b> Measure it. On small models Python overhead was never the bottleneck, and compile time can exceed the savings.</li>
+    </ul></div></div>
+
+  <div class="callout interview"><div class="ico">🎤</div><div class="body"><div class="title">Interview drill</div>
+    <p class="small" style="margin:10px 0 0"><b>Warm-up:</b> Why does gradient checkpointing save memory, and what does it cost?</p>
+    <details class="ans"><summary>How a strong answer sounds</summary><div>Normally every intermediate activation is kept from the forward pass until its backward runs, which is the dominant memory cost for deep models. Checkpointing stores only a few boundary activations and recomputes the rest during backward. Memory drops from roughly O(layers) to O(√layers) with the standard policy, at the cost of one extra forward pass — typically 20–35% more compute. It's the standard trade when you're memory-bound but have spare FLOPs, which is most large-model training.</div></details>
+    <p class="small" style="margin:10px 0 0"><b>Deeper:</b> A profile shows 60% of step time in tiny elementwise kernels. What do you do?</p>
+    <details class="ans"><summary>How a strong answer sounds</summary><div>Those kernels are memory-bound, so the goal is to move the tensor fewer times. First, enable compilation so the chain fuses into one kernel; check the log for graph breaks and remove the Python constructs causing them. Second, use fused implementations that already exist — fused optimizers, fused LayerNorm, FlashAttention. Third, check dtype: running elementwise chains in fp32 doubles the bytes. If it's still hot afterwards, write one Triton kernel for the specific chain. I'd re-profile after each change rather than applying all of them blind.</div></details>
+  </div></div>
+
+  <div class="takeaways">
+    <h3>🧠 Key takeaways</h3>
+    <ul>
+      <li>The stack is Python → framework/autograd → compiler → kernels → hardware; performance problems live at a specific layer.</li>
+      <li>Tensors are memory plus metadata; views are free, and non-contiguity can silently trigger copies.</li>
+      <li>Reverse-mode autodiff saves activations for the whole forward pass — the main memory cost of training.</li>
+      <li>Compilation mainly wins by fusing memory-bound chains; graph breaks and reshape-driven recompiles undo it.</li>
+      <li>Profile first: gaps mean input starvation, tiny kernels mean fusion, big collectives mean communication overlap.</li>
+    </ul>
+  </div>
+
+  <div class="quiz-wrap">
+    <h2>Check your understanding</h2>
+    <div class="quiz-score"></div>
+
+    <div class="quiz" data-answer="1">
+      <p class="q">What does <code>x.T</code> do to memory in a typical framework?</p>
+      <div class="opts">
+        <button class="opt">Copies the data into a new transposed buffer</button>
+        <button class="opt">Nothing — it returns a view with swapped strides</button>
+        <button class="opt">Moves the tensor to the CPU</button>
+        <button class="opt">Converts it to a sparse format</button>
+      </div>
+      <div class="explain">Transpose only changes metadata, so it's free — but the result is non-contiguous, and an op that requires contiguity will then copy.</div>
+    </div>
+
+    <div class="quiz" data-answer="2">
+      <p class="q">Your validation loop OOMs while training runs fine at the same batch size. Most likely cause?</p>
+      <div class="opts">
+        <button class="opt">The validation set is larger</button>
+        <button class="opt">A different optimizer is used at eval</button>
+        <button class="opt">Missing <code>torch.no_grad()</code>, so the autograd graph is being built</button>
+        <button class="opt">Dropout is still enabled</button>
+      </div>
+      <div class="explain">Without <code>no_grad</code> every op records itself and saves activations. Evaluation then costs as much memory as training — plus whatever training is already holding.</div>
+    </div>
+
+    <div class="quiz" data-answer="0">
+      <p class="q">A profile shows regular gaps where no kernel is running. What is the most likely cause?</p>
+      <div class="opts">
+        <button class="opt">The data loader can't produce batches fast enough</button>
+        <button class="opt">The learning rate is too high</button>
+        <button class="opt">Weight decay is misconfigured</button>
+        <button class="opt">The GPU is thermally throttled</button>
+      </div>
+      <div class="explain">Periodic idle time between steps is the classic input-bound signature: add workers, prefetch, pin memory, or move preprocessing offline.</div>
+    </div>
+
+    <div class="quiz" data-answer="3">
+      <p class="q">Why can <code>torch.compile</code> repeatedly recompile during training?</p>
+      <div class="opts">
+        <button class="opt">Because the learning rate changes</button>
+        <button class="opt">Because gradients change every step</button>
+        <button class="opt">Because the optimizer has state</button>
+        <button class="opt">Because new input shapes trigger new specialised graphs</button>
+      </div>
+      <div class="explain">Compilers specialise on shapes. Variable-length batches produce a new graph each time — bucket the lengths or mark dimensions dynamic.</div>
+    </div>
+
+    <div class="quiz" data-answer="1">
+      <p class="q">Why prefer safetensors over pickle-based checkpoints?</p>
+      <div class="opts">
+        <button class="opt">It compresses better</button>
+        <button class="opt">It doesn't execute arbitrary code on load and can be memory-mapped</button>
+        <button class="opt">It stores optimizer state automatically</button>
+        <button class="opt">It supports more dtypes</button>
+      </div>
+      <div class="explain">Loading a pickle runs code from the file — a real risk for downloaded weights. safetensors is a plain container: safer, and faster to load.</div>
+    </div>
+  </div>
+</main>
+<script src="assets/app.js"></script>
+<script>
+(function(){
+  const { $, $$, fmt } = ML;
+
+  /* ================= tensor views ================= */
+  const VIEWS = {
+    base:  { shape: [3, 4], stride: [4, 1], copy: false, idx: (r, c) => r * 4 + c,
+      n: 'A plain 3×4 row-major tensor. Stride (4, 1) means: to move one row, jump 4 elements; to move one column, jump 1. The tensor is <b>contiguous</b> — memory order matches index order.' },
+    t:     { shape: [4, 3], stride: [1, 4], copy: false, idx: (r, c) => c * 4 + r,
+      n: 'Transpose swaps the strides and touches no data at all — it is a pure metadata change, so it costs nothing. The result is non-contiguous: walking along a row now jumps 4 elements at a time, which is worse for cache locality and makes some kernels copy internally.' },
+    slice: { shape: [3, 2], stride: [4, 1], copy: false, idx: (r, c) => r * 4 + (c + 1),
+      n: 'A basic slice is also a view: same buffer, a storage offset of 1, same strides. Note that it <b>shares memory</b> with the original — writing to the slice modifies the parent, which is a frequent source of surprising bugs.' },
+    reshape: { shape: [2, 6], stride: [6, 1], copy: false, idx: (r, c) => r * 6 + c,
+      n: 'Reshaping a contiguous tensor is free: the elements are already in the right memory order, only the interpretation changes. Reshaping a <i>non-contiguous</i> tensor cannot be done as a view, so the framework silently copies (or, with <code>view()</code>, raises an error).' },
+    contig: { shape: [4, 3], stride: [3, 1], copy: true, idx: (r, c) => r * 3 + c,
+      n: 'Calling <code>.contiguous()</code> on the transpose materialises a new buffer in the new order. This <b>does</b> cost a full copy — bandwidth and memory — so you only do it when a downstream kernel needs it, and ideally you restructure to avoid needing it at all.' },
+  };
+  function drawView() {
+    const k = $('#viewSeg').dataset.value || 'base', v = VIEWS[k];
+    const [R, C] = v.shape;
+    let g = '';
+    const used = new Set();
+    for (let r = 0; r < R; r++) for (let c = 0; c < C; c++) {
+      const m = v.idx(r, c);
+      used.add(m);
+      g += `<i class="hl" style="grid-row:${r + 1};grid-column:${c + 1}">${m}</i>`;
+    }
+    const grid = $('#tGrid');
+    grid.style.gridTemplateColumns = `repeat(${C}, minmax(0,1fr))`;
+    grid.innerHTML = g;
+    $('#memLine').innerHTML = Array.from({ length: 12 }, (_, i) => `<i class="${used.has(i) ? 'hl' : ''}">${i}</i>`).join('');
+    $('#vShape').textContent = '(' + v.shape.join(', ') + ')';
+    $('#vStride').textContent = '(' + v.stride.join(', ') + ')';
+    $('#vCopy').textContent = v.copy ? '⚠️ yes — full copy' : '✅ no — free view';
+    $('#vInfo p').innerHTML = v.n;
+  }
+  $('#viewSeg').addEventListener('segchange', drawView);
+  drawView();
+
+  /* ================= fusion ================= */
+  const OPS = ['y = x * 2', 'y = y + bias', 'y = relu(y)', 'y = y * mask', 'y = y / scale'];
+  function fuse() {
+    const n = +$('#fSize').value * 1e6, bytes = n * 2;   // bf16
+    $('#fSizeV').textContent = n / 1e6 + ' M elements (' + fmt(bytes, 0) + 'B)';
+    $('#fuseEager').innerHTML = OPS.map((o) =>
+      `<div class="op"><span>${o}</span><span class="b">read ${(bytes / 1e6).toFixed(0)} MB · write ${(bytes / 1e6).toFixed(0)} MB</span></div>`).join('');
+    $('#fuseFused').innerHTML =
+      `<div class="op fused"><span>one generated kernel:<br>${OPS.map(o => o.replace('y = ', '')).join(' → ')}</span><span class="b">read ${(bytes / 1e6).toFixed(0)} MB · write ${(bytes / 1e6).toFixed(0)} MB</span></div>`;
+    const eager = bytes * 2 * OPS.length, fused = bytes * 2;
+    $('#fEager').textContent = (eager / 1e9).toFixed(2) + ' GB';
+    $('#fFused').textContent = (fused / 1e9).toFixed(2) + ' GB';
+    $('#fSpeed').textContent = (eager / fused).toFixed(1) + '×';
+  }
+  $('#fSize').addEventListener('input', fuse);
+  fuse();
+})();
+</script>
+</body>
+</html>

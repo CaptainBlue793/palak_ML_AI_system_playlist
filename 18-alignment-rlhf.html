@@ -1,0 +1,353 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Alignment: RLHF, DPO &amp; Reward Models</title>
+<link rel="stylesheet" href="assets/style.css">
+<script>try{var t=JSON.parse(localStorage.getItem('ml-theme'));if(t)document.documentElement.setAttribute('data-theme',t)}catch(e){}</script>
+<style>
+  .pair { display:grid; grid-template-columns:1fr 1fr; gap:12px; margin-top:10px }
+  @media (max-width:700px){ .pair{ grid-template-columns:1fr } }
+  .pair .opt2 { padding:14px; border-radius:14px; border:1.5px solid var(--border); background:var(--surface-2); cursor:pointer; font-size:14px; line-height:1.55; transition:.2s }
+  .pair .opt2:hover { border-color:var(--accent); transform:translateY(-2px) }
+  .pair .opt2 b { display:block; font-size:11.5px; text-transform:uppercase; letter-spacing:.05em; color:var(--muted); margin-bottom:6px; font-family:var(--mono) }
+  .rm-list { display:grid; gap:6px; margin-top:12px }
+  .rm-list .r { display:grid; grid-template-columns:190px 1fr 62px; gap:10px; align-items:center; font-size:13px }
+  .rm-list .tk { height:14px; border-radius:99px; background:var(--surface-3); overflow:hidden }
+  .rm-list .tk i { display:block; height:100%; background:linear-gradient(90deg,var(--accent),var(--accent-2)); transition:width .4s }
+  .rm-list .v { font-family:var(--mono); text-align:right; color:var(--muted) }
+  .kl-svg { width:100%; height:220px }
+  .kl-svg .r1 { fill:none; stroke:var(--green); stroke-width:2.6 }
+  .kl-svg .r2 { fill:none; stroke:var(--red); stroke-width:2.6; stroke-dasharray:5 4 }
+  .kl-svg .mark { stroke:var(--text); stroke-dasharray:4 4; stroke-width:1.5 }
+  .kl-svg text { font-size:10.5px; fill:var(--muted); font-family:var(--mono) }
+  .pipeviz text { font-size:11px; fill:var(--text-2); font-family:var(--font); font-weight:600 }
+  .pipeviz .sub { font-size:9.5px; fill:var(--muted); font-family:var(--mono); font-weight:400 }
+</style>
+</head>
+<body data-chapter="18">
+<main class="content">
+
+  <section class="hero">
+    <div class="eyebrow"><span class="pill accent">Chapter 18</span><span class="pill cyan">Intermediate</span><span class="pill">⏱ 45 min</span></div>
+    <h1>Alignment: RLHF, DPO <span class="grad">&amp; Reward Models</span></h1>
+    <p class="lead">A pretrained model predicts plausible continuations of the internet. An assistant answers your question, refuses the dangerous request and admits when it doesn't know. Turning the first into the second is alignment — and it is mostly a data and evaluation problem wearing a reinforcement-learning coat.</p>
+    <ul class="objectives">
+      <li>Explain the SFT → reward model → RL pipeline and what each stage adds</li>
+      <li>Collect preference data that produces a usable reward model</li>
+      <li>Describe the KL penalty and what happens without it</li>
+      <li>Compare PPO with DPO and know when each is appropriate</li>
+      <li>Recognise reward hacking, sycophancy and over-refusal</li>
+    </ul>
+  </section>
+
+  <h2>The gap alignment closes</h2>
+  <p>Ask a base model “How do I reset my password?” and a very plausible continuation is three more questions in the same style — because that's what web pages look like. It isn't broken; it's doing exactly what it was trained to do. Alignment changes the objective from “what text usually follows?” to “what response would a person prefer?”.</p>
+
+  <div class="grid c3">
+    <div class="card feature reveal"><div class="f-ico">🤝</div><h4>Helpful</h4><p>Answers the actual question, at the right length, in a usable format, asking for clarification when genuinely needed.</p></div>
+    <div class="card feature reveal"><div class="f-ico" style="background:var(--amber-soft)">🛡️</div><h4>Harmless</h4><p>Declines genuinely dangerous requests — without refusing the many benign ones that merely sound similar.</p></div>
+    <div class="card feature reveal"><div class="f-ico" style="background:var(--green-soft)">🎯</div><h4>Honest</h4><p>Says “I don't know”, doesn't invent citations, and doesn't agree with you just because you pushed back.</p></div>
+  </div>
+
+  <h2>The classic three-stage pipeline</h2>
+
+  <div class="panel">
+    <div class="panel-head"><div class="dots"><i></i><i></i><i></i></div><span class="p-title">From base model to aligned assistant</span><span class="p-tag">Step-through</span></div>
+    <div class="panel-body svg-scroll">
+      <svg id="pipeSvg" class="diagram pipeviz" viewBox="0 0 760 280">
+        <defs><marker id="ph" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" class="arrow-head"/></marker></defs>
+        <path id="p-e1" class="edge dimmable" d="M170,70 L215,70" marker-end="url(#ph)"/>
+        <path id="p-e2" class="edge dimmable" d="M375,70 L420,70" marker-end="url(#ph)"/>
+        <path id="p-e3" class="edge dimmable" d="M580,70 L625,70" marker-end="url(#ph)"/>
+        <path id="p-e4" class="edge dimmable dash" d="M500,100 L500,150 L300,150 L300,185" marker-end="url(#ph)"/>
+        <path id="p-e5" class="edge dimmable dash" d="M300,235 L300,255 L690,255 L690,100" marker-end="url(#ph)"/>
+        <g id="p-base" class="node dimmable" transform="translate(30,45)"><rect width="140" height="50" rx="12"/><text x="70" y="24" text-anchor="middle">Base model</text><text x="70" y="40" text-anchor="middle" class="sub">next-token pretrained</text></g>
+        <g id="p-sft" class="node dimmable" transform="translate(215,45)"><rect width="160" height="50" rx="12"/><text x="80" y="24" text-anchor="middle">1 · SFT</text><text x="80" y="40" text-anchor="middle" class="sub">demonstrations</text></g>
+        <g id="p-rm" class="node dimmable" transform="translate(420,45)"><rect width="160" height="50" rx="12"/><text x="80" y="24" text-anchor="middle">2 · Reward model</text><text x="80" y="40" text-anchor="middle" class="sub">trained on preferences</text></g>
+        <g id="p-rl" class="node dimmable" transform="translate(625,45)"><rect width="110" height="50" rx="12"/><text x="55" y="24" text-anchor="middle">3 · RL</text><text x="55" y="40" text-anchor="middle" class="sub">PPO / GRPO</text></g>
+        <g id="p-pref" class="node dimmable" transform="translate(210,185)"><rect width="180" height="50" rx="12"/><text x="90" y="24" text-anchor="middle">Human preferences</text><text x="90" y="40" text-anchor="middle" class="sub">A vs B comparisons</text></g>
+        <text x="380" y="272" text-anchor="middle" class="sub">the policy is scored by the reward model and stays close to the reference</text>
+      </svg>
+    </div>
+    <div class="stepper" data-diagram="pipeSvg">
+      <ol class="steps">
+        <li data-title="Start from a base model" data-on="p-base">Pretrained on trillions of tokens (Chapter 16). It has the knowledge and the language ability; what it lacks is the <i>conversational contract</i>.</li>
+        <li data-title="Stage 1 — supervised fine-tuning" data-on="p-base p-sft p-e1" data-packet="p-base>p-sft">Train on tens of thousands of high-quality demonstrations: a prompt and the response a good assistant would give (Chapter 17). This alone gets you most of the way to something usable — and it is the stage with the best effort-to-quality ratio.</li>
+        <li data-title="Collect preferences" data-on="p-sft p-pref" data-color="var(--amber)">Sample several responses per prompt from the SFT model and have humans rank them pairwise. Comparisons are far more reliable than absolute scores — people agree on “B is better” far more than on “that's a 7/10”.</li>
+        <li data-title="Stage 2 — train a reward model" data-on="p-pref p-rm p-e4 p-e2" data-packet="p-pref>p-rm">A model (often the SFT model with a scalar head) learns to output a score such that preferred responses score higher. Loss: <code>−log σ(r_chosen − r_rejected)</code> — the Bradley–Terry model, the same maths as Elo ratings.</li>
+        <li data-title="Stage 3 — optimise against it" data-on="p-rm p-rl p-e3" data-packet="p-rm>p-rl" data-color="var(--green)">Now use RL (PPO, or simpler variants like GRPO) to update the policy so its responses score higher under the reward model. Each step: sample responses, score them, push probability toward high-scoring ones.</li>
+        <li data-title="Keep it anchored" data-on="p-rl p-sft p-e5" data-color="var(--red)">Subtract a KL penalty for drifting from the SFT reference policy. Without it the policy finds degenerate text that the reward model loves and humans hate — the reward model is only accurate near the distribution it was trained on.</li>
+        <li data-title="Evaluate and iterate" data-on="p-rl p-pref">Measure win rate against the previous model with human or model judges, red-team it, check refusal calibration, then collect fresh preferences on the <i>new</i> model's outputs and go round again. Alignment is iterative, not a one-off stage.</li>
+      </ol>
+    </div>
+  </div>
+
+  <h2>Build a reward model, one comparison at a time</h2>
+  <p>Pick the better response. Each click updates the scores exactly as a Bradley–Terry / Elo update would — which is, in miniature, how a reward model is trained.</p>
+
+  <div class="panel">
+    <div class="panel-head"><div class="dots"><i></i><i></i><i></i></div><span class="p-title">Preference collection simulator</span><span class="p-tag">Interactive</span></div>
+    <div class="panel-body">
+      <p class="small muted" style="margin:0"><b>Prompt:</b> <span id="rmPrompt"></span></p>
+      <div class="pair" id="rmPair"></div>
+      <div class="rm-list" id="rmScores"></div>
+      <div class="controls" style="margin-top:10px">
+        <button class="btn sm ghost" id="rmReset">↺ Reset scores</button>
+        <span class="badge" id="rmCount">0 comparisons</span>
+      </div>
+      <div class="callout" id="rmInfo" style="margin-top:12px"><div class="ico">🧠</div><div class="body"><p style="margin:0">Pick the response you prefer. After a few comparisons the learned ordering stabilises — and you can watch your own implicit preferences (length? hedging? structure?) become a number.</p></div></div>
+    </div>
+  </div>
+
+  <div class="callout warn">
+    <div class="ico">📏</div>
+    <div class="body"><div class="title">Your annotators define the model's values, literally</div>
+      <p>The reward model learns whatever your labellers prefer, including biases they don't know they have: longer answers, confident tone, bullet points, American spelling. Measure inter-annotator agreement, write guidelines that state trade-offs explicitly (“prefer correct and short over plausible and long”), and audit for length bias — it's the most common and most damaging.</p></div>
+  </div>
+
+  <h2>The KL penalty</h2>
+  <p>The RL objective is <code>maximise E[r(x,y)] − β·KL(π ‖ π_ref)</code>. The second term is the leash: how far the tuned policy may drift from the SFT model. Slide it and watch the trade-off.</p>
+
+  <div class="panel">
+    <div class="panel-head"><div class="dots"><i></i><i></i><i></i></div><span class="p-title">Reward vs drift</span><span class="p-tag">Interactive</span></div>
+    <div class="panel-body">
+      <div class="svg-scroll"><svg id="klSvg" class="diagram kl-svg" viewBox="0 0 640 220"></svg></div>
+      <div class="range-row"><label for="klB">KL coefficient β</label><input type="range" id="klB" min="-2.3" max="0.7" step="0.05" value="-1"><output id="klBV"></output></div>
+      <div class="stats">
+        <div class="stat acc"><div class="k">Reward-model score</div><div class="v" id="klR" style="font-size:18px">–</div></div>
+        <div class="stat warn"><div class="k">KL from reference</div><div class="v" id="klD" style="font-size:18px">–</div></div>
+        <div class="stat good"><div class="k">Actual human preference</div><div class="v" id="klH" style="font-size:18px">–</div></div>
+      </div>
+      <div class="callout" id="klInfo" style="margin-top:12px"><div class="ico">⚖️</div><div class="body"><p style="margin:0"></p></div></div>
+      <p class="small muted">The gap between the green and red curves is <b>reward hacking</b>: past a point the policy keeps improving on the proxy while getting worse for real, because it has wandered off the distribution where the reward model was ever accurate.</p>
+    </div>
+  </div>
+
+  <h2>DPO: skip the reward model</h2>
+  <p>Direct Preference Optimization observes that the optimal RLHF policy has a closed-form relationship to the reward, so you can optimise the preference data <i>directly</i> with a simple classification-style loss — no separate reward model, no sampling loop, no RL machinery.</p>
+
+  <pre class="code">L_DPO = −log σ( β·[ log π(y_w|x) − log π_ref(y_w|x)
+                   − log π(y_l|x) + log π_ref(y_l|x) ] )
+<span class="c"># y_w = preferred, y_l = rejected; π_ref frozen. Two forward passes, ordinary backprop.</span></pre>
+
+  <div class="table-wrap">
+    <table class="t">
+      <thead><tr><th></th><th>PPO (classic RLHF)</th><th>DPO and relatives</th></tr></thead>
+      <tbody>
+        <tr><td><b>Moving parts</b></td><td>Policy, reference, reward model, value model</td><td>Policy + frozen reference</td></tr>
+        <tr><td><b>Compute</b></td><td>High — online sampling every step</td><td>Low — offline, like supervised fine-tuning</td></tr>
+        <tr><td><b>Stability</b></td><td>Finicky: many hyperparameters</td><td>Much more robust</td></tr>
+        <tr><td><b>Online improvement</b></td><td>Yes — explores new responses</td><td>No, unless you iterate (sample → label → re-train)</td></tr>
+        <tr><td><b>Best for</b></td><td>Frontier labs squeezing maximum quality</td><td><b>Almost everyone else</b></td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="callout tip">
+    <div class="ico">🧭</div>
+    <div class="body"><div class="title">The practical recipe in 2026</div>
+      <p>SFT on a few thousand excellent demonstrations → DPO (or ORPO/KTO if you only have thumbs-up/down rather than pairs) on preference data → iterate by sampling from the new model and collecting fresh preferences. Reserve full PPO-style RL for when you have a reward signal worth exploring against — verifiable rewards like unit tests passing, or a maths checker — which is also where reinforcement learning has recently made the biggest gains.</p></div>
+  </div>
+
+  <h2>Scaling preferences: RLAIF and constitutions</h2>
+  <p>Human comparisons cost £1–5 each and take days. Two standard multipliers:</p>
+
+  <div class="split">
+    <div class="card"><h4 class="mt0">🤖 RLAIF</h4><p class="small mb0">Use a strong model as the judge to produce preference labels. Far cheaper and surprisingly competitive — but it inherits the judge's biases, so keep a human-labelled subset to measure agreement and catch drift.</p></div>
+    <div class="card"><h4 class="mt0">📜 Constitutional AI</h4><p class="small mb0">Give the model a written set of principles; have it critique and revise its own responses against them, then train on the revisions. Makes the value judgements explicit, auditable and editable — a document rather than a labelling instruction.</p></div>
+  </div>
+
+  <h2>Failure modes to watch for</h2>
+  <div class="table-wrap">
+    <table class="t">
+      <thead><tr><th>Failure</th><th>Looks like</th><th>Cause &amp; mitigation</th></tr></thead>
+      <tbody>
+        <tr><td><b>Length bias</b></td><td>Answers get longer and more padded every iteration</td><td>Annotators prefer long answers; add length-controlled rewards and explicit brevity instructions</td></tr>
+        <tr><td><b>Sycophancy</b></td><td>“You're right, I apologise” when the user is wrong</td><td>Preference data rewards agreement; include examples that reward polite disagreement</td></tr>
+        <tr><td><b>Over-refusal</b></td><td>Refuses benign requests that pattern-match to unsafe ones</td><td>Safety data without matched benign near-misses; add them and track a false-refusal rate</td></tr>
+        <tr><td><b>Reward hacking</b></td><td>High reward, obviously worse outputs</td><td>KL too loose, or reward model over-optimised; raise β, retrain the RM on fresh on-policy samples</td></tr>
+        <tr><td><b>Capability regression</b></td><td>Worse maths or code after alignment</td><td>The “alignment tax”; mix capability data into the tuning set and evaluate it every run</td></tr>
+        <tr><td><b>Mode collapse</b></td><td>Every answer has the same shape and phrasing</td><td>Over-optimisation; check output diversity as a first-class metric</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="callout danger"><div class="ico">⚠️</div><div class="body"><div class="title">Common mistakes</div>
+    <ul class="mb0">
+      <li><b>Optimising the reward model score as the goal.</b> It's a proxy that stops being valid exactly where you're pushing it hardest.</li>
+      <li><b>Collecting preferences on an old model's outputs.</b> The reward model must see on-policy samples or it scores a distribution that no longer exists.</li>
+      <li><b>Not measuring false refusals.</b> Over-refusal is as much a product failure as unsafe output, and far easier to ship accidentally.</li>
+      <li><b>Skipping SFT.</b> RL on top of a base model is dramatically harder; demonstrations get you 80% of the way for a fraction of the effort.</li>
+      <li><b>One-shot alignment.</b> Preferences, jailbreaks and product needs move; this is a loop with a cadence, not a launch step.</li>
+    </ul></div></div>
+
+  <div class="callout interview"><div class="ico">🎤</div><div class="body"><div class="title">Interview drill</div>
+    <p class="small" style="margin:10px 0 0"><b>Warm-up:</b> Why does RLHF need a KL penalty against the reference policy?</p>
+    <details class="ans"><summary>How a strong answer sounds</summary><div>The reward model is a learned approximation trained on samples from roughly the SFT distribution. Optimise against it without constraint and the policy drifts into regions where the reward model has never seen data and is simply wrong — producing text that scores brilliantly and reads terribly. The KL term keeps the policy near the distribution where the proxy is trustworthy. It's the standard answer to Goodhart's law: constrain the optimiser rather than trust the measure.</div></details>
+    <p class="small" style="margin:10px 0 0"><b>Deeper:</b> Your aligned model is measurably more helpful but 30% worse at code. What do you do?</p>
+    <details class="ans"><summary>How a strong answer sounds</summary><div>That's the alignment tax, usually from a preference set dominated by conversational prompts, so gradients pull the model toward chatty behaviour and away from precise code. Diagnose first: is it formatting (wrapping code in prose, refusing to output long files) or genuine capability loss? Formatting is fixable with targeted preference data. For real regression: mix code demonstrations and code preference pairs into the tuning set, lower the learning rate and epochs, tighten the KL if it's an RL stage, and consider tuning a separate adapter for code paths. Above all, put code benchmarks into the standard eval suite so every alignment run reports them — the tax is only invisible if you don't measure it.</div></details>
+  </div></div>
+
+  <div class="takeaways">
+    <h3>🧠 Key takeaways</h3>
+    <ul>
+      <li>SFT teaches the contract; preference optimisation refines the ranking among plausible answers.</li>
+      <li>A reward model is trained on pairwise comparisons with a Bradley–Terry loss — the same maths as Elo.</li>
+      <li>The KL penalty keeps the policy where the reward model is still accurate; without it you get reward hacking.</li>
+      <li>DPO achieves most of RLHF's benefit with supervised-style training and far fewer moving parts.</li>
+      <li>Watch length bias, sycophancy, over-refusal and capability regression — and measure each explicitly.</li>
+    </ul>
+  </div>
+
+  <div class="quiz-wrap">
+    <h2>Check your understanding</h2>
+    <div class="quiz-score"></div>
+
+    <div class="quiz" data-answer="2">
+      <p class="q">Why is preference data collected as pairwise comparisons rather than 1–10 ratings?</p>
+      <div class="opts">
+        <button class="opt">Comparisons are cheaper to store</button>
+        <button class="opt">Ratings can't be used to train a model</button>
+        <button class="opt">People are far more consistent at ranking two items than at assigning absolute scores</button>
+        <button class="opt">Comparisons avoid the need for a reward model</button>
+      </div>
+      <div class="explain">Absolute scales drift between annotators and across sessions. Pairwise judgements are more reliable, and Bradley–Terry converts them into a consistent scalar reward.</div>
+    </div>
+
+    <div class="quiz" data-answer="0">
+      <p class="q">Removing the KL penalty from RLHF typically causes what?</p>
+      <div class="opts">
+        <button class="opt">Reward hacking — high reward-model scores with worse real quality</button>
+        <button class="opt">The policy stops updating</button>
+        <button class="opt">The reward model overfits</button>
+        <button class="opt">Training becomes deterministic</button>
+      </div>
+      <div class="explain">The policy drifts off the distribution the reward model was trained on, where its scores are meaningless. Degenerate, repetitive text that maxes the proxy is the classic symptom.</div>
+    </div>
+
+    <div class="quiz" data-answer="1">
+      <p class="q">What is DPO's main practical advantage over PPO-based RLHF?</p>
+      <div class="opts">
+        <button class="opt">It needs no preference data</button>
+        <button class="opt">It removes the separate reward model and the online sampling loop</button>
+        <button class="opt">It guarantees a safer model</button>
+        <button class="opt">It trains on unlabelled text</button>
+      </div>
+      <div class="explain">DPO optimises preferences directly with a supervised-style loss against a frozen reference — far simpler and more stable, at the cost of not exploring new responses online.</div>
+    </div>
+
+    <div class="quiz" data-answer="3">
+      <p class="q">Your aligned model refuses “how do I kill a process on Linux?”. What's the fix?</p>
+      <div class="opts">
+        <button class="opt">Increase the KL coefficient</button>
+        <button class="opt">Train longer on safety data</button>
+        <button class="opt">Lower the sampling temperature</button>
+        <button class="opt">Add benign near-miss examples to the preference data and track a false-refusal rate</button>
+      </div>
+      <div class="explain">The model has learned a surface pattern rather than the concept. More safety data makes it worse; matched benign examples teach the distinction, and a measured false-refusal rate stops it regressing again.</div>
+    </div>
+
+    <div class="quiz" data-answer="2">
+      <p class="q">Preferences were collected on last quarter's model. Why is that a problem now?</p>
+      <div class="opts">
+        <button class="opt">The data expires legally</button>
+        <button class="opt">The reward model would be too accurate</button>
+        <button class="opt">The reward model scores a distribution the current policy no longer produces</button>
+        <button class="opt">Old preferences make training slower</button>
+      </div>
+      <div class="explain">Reward models are only reliable near the distribution they were trained on. Off-policy data leaves them miscalibrated exactly where the current policy lives — hence the sample → label → retrain loop.</div>
+    </div>
+  </div>
+</main>
+<script src="assets/app.js"></script>
+<script>
+(function(){
+  const { $, $$, clamp } = ML;
+
+  /* ================= preference simulator ================= */
+  const PROMPT = 'A customer writes: “My invoice is wrong, this is the third time. Fix it.”';
+  const RESP = [
+    { id: 'A', label: 'Short and direct', text: 'I’m sorry — I’ve corrected invoice #4471 and issued a £42.60 credit. You’ll see it within one billing cycle. I’ve also flagged the recurring error to billing.' },
+    { id: 'B', label: 'Long and hedged', text: 'Thank you so much for reaching out, and I sincerely apologise for any inconvenience this may have caused. Billing issues can certainly be frustrating. Let me look into this for you. There are several possible reasons an invoice might appear incorrect…' },
+    { id: 'C', label: 'Asks a question first', text: 'Sorry about that. So I fix the right thing: is the problem the amount charged, the billing period, or a line item you don’t recognise? If you have the invoice number I can correct it immediately.' },
+    { id: 'D', label: 'Over-apologetic', text: 'I am so incredibly sorry. You are completely right to be upset and I take full responsibility. This should never have happened. Again, my sincerest apologies for this unacceptable experience.' },
+    { id: 'E', label: 'Policy-first', text: 'Per our billing policy, corrections require verification within 30 days of issue. Please submit a dispute form via the portal and our team will respond within 5 business days.' },
+    { id: 'F', label: 'Structured', text: 'Here’s what I found and did:\n• Invoice #4471 double-charged seat licences (£42.60)\n• Credit applied today\n• Root cause: duplicate sync from the seat-count job\n• Prevention: the job now de-duplicates; I’ve subscribed you to the fix ticket.' },
+  ];
+  let scores = Object.fromEntries(RESP.map(r => [r.id, 0])), count = 0, pair = [0, 1];
+
+  function pickPair() {
+    let a = Math.floor(Math.random() * RESP.length), b = a;
+    while (b === a) b = Math.floor(Math.random() * RESP.length);
+    pair = [a, b];
+  }
+  function drawRM() {
+    $('#rmPrompt').textContent = PROMPT;
+    $('#rmPair').innerHTML = pair.map(i =>
+      `<div class="opt2" data-i="${i}"><b>${RESP[i].label}</b>${RESP[i].text.replace(/\n/g, '<br>')}</div>`).join('');
+    $$('#rmPair .opt2').forEach(el => el.onclick = () => {
+      const w = RESP[+el.dataset.i].id, l = RESP[pair.find(p => p !== +el.dataset.i)].id;
+      // Bradley-Terry / logistic update
+      const p = 1 / (1 + Math.exp(-(scores[w] - scores[l])));
+      const lr = 0.6;
+      scores[w] += lr * (1 - p);
+      scores[l] -= lr * (1 - p);
+      count++;
+      pickPair();
+      drawRM();
+    });
+    const sorted = RESP.slice().sort((a, b) => scores[b.id] - scores[a.id]);
+    const mx = Math.max(1e-6, ...RESP.map(r => Math.abs(scores[r.id])));
+    $('#rmScores').innerHTML = sorted.map(r =>
+      `<div class="r"><span>${r.label}</span><div class="tk"><i style="width:${clamp((scores[r.id] / mx * 0.5 + 0.5) * 100, 2, 100)}%"></i></div><span class="v">${scores[r.id].toFixed(2)}</span></div>`).join('');
+    $('#rmCount').textContent = count + ' comparison' + (count === 1 ? '' : 's');
+    if (count >= 6) {
+      const top = sorted[0];
+      $('#rmInfo p').innerHTML = `After ${count} comparisons your reward model ranks “<b>${top.label}</b>” highest. A real reward model does exactly this over ~100k comparisons, then a policy is optimised to produce responses it scores well. Note how quickly a consistent ranking emerges — and how completely it encodes <i>your</i> taste, including any preference for length or structure you may not have intended.`;
+    }
+  }
+  $('#rmReset').onclick = () => { scores = Object.fromEntries(RESP.map(r => [r.id, 0])); count = 0; pickPair(); drawRM(); };
+  pickPair(); drawRM();
+
+  /* ================= KL trade-off ================= */
+  function kl() {
+    const b = Math.pow(10, +$('#klB').value);
+    $('#klBV').textContent = b.toFixed(3);
+    // toy model: drift falls with beta; proxy reward rises with drift; true quality peaks then falls
+    const drift = 60 / (1 + b * 22);
+    const proxy = 0.42 + 0.52 * (1 - Math.exp(-drift / 12));
+    const human = 0.42 + 0.50 * (1 - Math.exp(-drift / 10)) - Math.pow(Math.max(0, drift - 16) / 26, 2) * 0.55;
+    $('#klR').textContent = (proxy * 100).toFixed(1) + '%';
+    $('#klD').textContent = drift.toFixed(1) + ' nats';
+    $('#klH').textContent = (clamp(human, 0, 1) * 100).toFixed(1) + '%';
+
+    const X = (d) => 45 + d / 60 * 575, Y = (v) => 190 - clamp(v, 0, 1) * 165;
+    let p1 = '', p2 = '';
+    for (let d = 0; d <= 60; d += 0.4) {
+      const pr = 0.42 + 0.52 * (1 - Math.exp(-d / 12));
+      const hu = 0.42 + 0.50 * (1 - Math.exp(-d / 10)) - Math.pow(Math.max(0, d - 16) / 26, 2) * 0.55;
+      p1 += (p1 ? 'L' : 'M') + X(d).toFixed(1) + ',' + Y(pr).toFixed(1) + ' ';
+      p2 += (p2 ? 'L' : 'M') + X(d).toFixed(1) + ',' + Y(hu).toFixed(1) + ' ';
+    }
+    $('#klSvg').innerHTML =
+      `<line stroke="var(--border-strong)" x1="45" y1="190" x2="628" y2="190"/><line stroke="var(--border-strong)" x1="45" y1="10" x2="45" y2="190"/>` +
+      `<path class="r1" d="${p1}"/><path class="r2" d="${p2}"/>` +
+      `<line class="mark" x1="${X(drift)}" y1="10" x2="${X(drift)}" y2="190"/>` +
+      `<circle cx="${X(drift)}" cy="${Y(proxy)}" r="5" fill="var(--green)"/><circle cx="${X(drift)}" cy="${Y(clamp(human, 0, 1))}" r="5" fill="var(--red)"/>` +
+      `<text x="300" y="210">KL divergence from the reference policy →</text><text x="2" y="14">quality</text>` +
+      `<text x="420" y="42" style="fill:var(--green)">reward-model score (the proxy)</text>` +
+      `<text x="420" y="150" style="fill:var(--red)">actual human preference</text>`;
+    $('#klInfo p').innerHTML = b > 0.35
+      ? `🔒 <b>Tight leash.</b> The policy barely moves from the SFT model, so alignment gains are small — but nothing degenerates. A reasonable starting point when your reward model is weak or trained on little data.`
+      : b > 0.04
+        ? `✅ <b>Healthy range.</b> Both curves are still rising together: the proxy and real quality agree, which is exactly the region where RLHF earns its keep.`
+        : `🚨 <b>Reward hacking.</b> The reward model score keeps climbing while true quality falls — the policy has wandered into territory where the proxy was never valid. Symptoms: repetitive phrasing, padded answers, strange formatting that happens to score well.`;
+  }
+  $('#klB').addEventListener('input', kl);
+  kl();
+})();
+</script>
+</body>
+</html>

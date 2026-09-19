@@ -1,0 +1,271 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Mock Interview</title>
+<link rel="stylesheet" href="assets/style.css">
+<script>try{var t=JSON.parse(localStorage.getItem('ml-theme'));if(t)document.documentElement.setAttribute('data-theme',t)}catch(e){}</script>
+<style>
+  .prompt-card { border:1px solid var(--border); border-radius:20px; background:linear-gradient(135deg,var(--accent-soft),transparent 60%),var(--surface); box-shadow:var(--shadow-lg); padding:24px; }
+  .prompt-card h2 { margin:6px 0 10px !important; font-size:30px !important; letter-spacing:-.02em; }
+  .prompt-card .tags { display:flex; gap:6px; flex-wrap:wrap; margin-top:10px; }
+  .prompt-card .tags span { font-size:11.5px; font-family:var(--mono); padding:2px 8px; border-radius:99px; background:var(--surface-2); color:var(--text-2); border:1px solid var(--border); }
+  .clock { font-family:var(--mono); font-size:52px; font-weight:800; letter-spacing:-.03em; line-height:1; }
+  .phases { display:flex; gap:4px; height:46px; border-radius:12px; overflow:hidden; margin-top:12px; }
+  .phase { display:grid; place-items:center; font-size:11.5px; font-weight:800; color:var(--text-2); background:var(--surface-2); border:1px solid var(--border); border-radius:9px; position:relative; overflow:hidden; text-align:center; line-height:1.15; padding:0 4px; }
+  .phase i { position:absolute; left:0; top:0; bottom:0; background:var(--accent-soft); width:0; }
+  .phase span { position:relative; }
+  .phase.cur { border-color:var(--accent); color:var(--accent); box-shadow:inset 0 0 0 2px var(--accent-soft); }
+  .phase.done { background:var(--green-soft); color:var(--green); border-color:transparent; }
+  .rubric { display:grid; gap:8px; }
+  .rub { display:grid; grid-template-columns:1fr 150px; gap:12px; align-items:center; padding:10px 12px; border-radius:12px; background:var(--surface-2); border:1px solid var(--border); }
+  .rub b { font-size:14px; } .rub small { display:block; color:var(--muted); font-size:12px; margin-top:2px; }
+  .scoreset { display:flex; gap:4px; }
+  .scoreset button { flex:1; border:1.5px solid var(--border); background:var(--surface); border-radius:8px; padding:6px 0; font-weight:700; font-size:12.5px; cursor:pointer; color:var(--text-2); }
+  .scoreset button.on { background:var(--accent); border-color:var(--accent); color:#fff; }
+  .hist { display:grid; gap:8px; }
+  .hist div { display:grid; grid-template-columns:1fr auto auto; gap:10px; align-items:center; padding:9px 12px; border-radius:10px; background:var(--surface-2); border:1px solid var(--border); font-size:13.5px; }
+  .hist .sc { font-family:var(--mono); font-weight:800; }
+  textarea.notes { width:100%; min-height:170px; font-size:14px; line-height:1.6; resize:vertical; }
+</style>
+</head>
+<body>
+<main class="content">
+
+  <section class="hero">
+    <div class="eyebrow"><span class="pill accent">Study tool</span><span class="pill">🎤 45-minute drill</span></div>
+    <h1>Mock Interview</h1>
+    <p class="lead">Draw a problem, start the clock, and design out loud — ideally on paper or a whiteboard, not in your head. The phases follow the ML design structure from Chapter 40: framing before modelling, metrics before architecture, production before cleverness. The rubric afterwards tells you what you skipped, and scoring yourself honestly is where the improvement comes from.</p>
+  </section>
+
+  <div class="prompt-card" id="prompt"></div>
+
+  <div class="controls" style="margin-top:16px">
+    <button class="btn primary" id="draw">🎲 Draw a problem</button>
+    <div class="seg" id="diff"><button data-v="" class="active">Any level</button><button data-v="e">Starter</button><button data-v="m">Medium</button><button data-v="h">Hard</button></div>
+    <select class="inp" id="tagSel" aria-label="Filter by concept"></select>
+  </div>
+
+  <div class="split" style="margin-top:24px;grid-template-columns:minmax(0,.8fr) minmax(0,1.2fr)">
+    <div class="card" style="margin:0">
+      <div class="clock" id="clock">00:00</div>
+      <div class="small muted" id="phaseLeft">Not started</div>
+      <div class="controls" style="margin-top:12px">
+        <button class="btn primary sm" id="start">▶ Start</button>
+        <button class="btn sm" id="skip">⏭ Next phase</button>
+        <button class="btn sm" id="reset">↺ Reset</button>
+      </div>
+      <div class="seg" id="len" style="margin-top:10px"><button data-v="35">35 min</button><button data-v="45" class="active">45 min</button><button data-v="60">60 min</button></div>
+    </div>
+    <div class="card" style="margin:0">
+      <div style="font-weight:800" id="phaseTitle">👋 Draw a problem and press start</div>
+      <ul class="small" id="phasePrompts" style="margin-top:8px"></ul>
+    </div>
+  </div>
+  <div class="phases" id="phases"></div>
+
+  <h2>Notes</h2>
+  <p class="small muted">Jot your requirements, estimates and design decisions here — or use it as a checklist while you talk. Saved in this browser as you type.</p>
+  <textarea class="inp notes" id="notes" placeholder="The decision this model informs…&#10;Prediction task: inputs → output…&#10;Labels, splits, leakage…&#10;Primary metric + guardrails…&#10;Baseline, then the model…&#10;Features at training and serving time…&#10;Serving: latency budget, capacity, cost…&#10;Deep dives, skew, drift, rollout…"></textarea>
+
+  <h2>Score yourself</h2>
+  <p class="small muted">0 = didn't do it · 1 = touched on it · 2 = solid · 3 = what a strong senior candidate does. Be strict; the point is to find gaps.</p>
+  <div class="rubric" id="rubric"></div>
+  <div class="stats">
+    <div class="stat acc"><div class="k">Score</div><div class="v" id="scoreV">0 <small>/ 24</small></div></div>
+    <div class="stat"><div class="k">Reads as</div><div class="v" id="scoreBand" style="font-size:16px">–</div></div>
+    <div class="stat good"><div class="k">Strongest</div><div class="v" id="scoreBest" style="font-size:14px">–</div></div>
+    <div class="stat bad"><div class="k">Weakest</div><div class="v" id="scoreWorst" style="font-size:14px">–</div></div>
+  </div>
+  <div class="controls">
+    <button class="btn primary" id="save">💾 Save this session</button>
+    <button class="btn" id="copy">📋 Copy write-up</button>
+    <button class="btn ghost" id="clearAll">Clear history</button>
+  </div>
+
+  <h2>Session history</h2>
+  <div class="hist" id="hist"></div>
+  <div id="weakSpots"></div>
+
+  <div class="callout interview" style="margin-top:40px"><div class="ico">🎤</div><div class="body"><div class="title">How to practise so it actually transfers</div><p>Speak <b>out loud</b> — silent thinking is the most common thing that separates people who know the material from people who pass interviews. Draw the diagram. When the timer moves to a new phase, move on even if you're not finished; running out of time in the deep-dive phase is the classic failure. Afterwards, look up the one thing you were least sure about and read that chapter section again.</p></div></div>
+</main>
+<script src="assets/app.js"></script>
+<script>
+(function(){
+  const { $, $$, LS, CHAPTERS } = ML;
+
+  /* ================= Problem bank ================= */
+  const P = [
+    ['a spam / abuse classifier', 'e', ['classification', 'imbalance', 'metrics'], 7, 'Millions of messages a day, heavy class imbalance, adversarial senders.'],
+    ['churn prediction for a subscription product', 'e', ['tabular', 'features', 'metrics'], 6, 'Who cancels next month, and what does the business do with the score?'],
+    ['a credit-risk scorecard', 'e', ['tabular', 'fairness', 'calibration'], 37, 'Regulated, explainable, calibrated — and audited.'],
+    ['an ETA predictor for deliveries', 'm', ['regression', 'features', 'streaming'], 28, 'Live traffic and courier signals; being late is worse than being early.'],
+    ['a recommendation feed', 'm', ['retrieval', 'ranking', 'feedback loops'], 41, 'Millions of items, cold start, freshness, and feedback loops.'],
+    ['e-commerce search and ranking', 'm', ['retrieval', 'ranking', 'query understanding'], 42, 'Query understanding, hybrid retrieval, learning-to-rank, business rules.'],
+    ['ad click-through prediction at 1M QPS', 'h', ['ranking', 'calibration', 'latency'], 43, 'Sparse features, online learning, auctions, a 10 ms budget.'],
+    ['real-time fraud detection', 'h', ['streaming', 'imbalance', 'adversarial'], 44, 'Streaming features, delayed labels, adversaries, human review.'],
+    ['an LLM chat assistant platform', 'h', ['llm serving', 'caching', 'cost'], 45, 'Streaming, growing context, routing, safety, cost per conversation.'],
+    ['an enterprise RAG assistant', 'h', ['rag', 'permissions', 'freshness'], 46, '10M documents, per-user permissions, citations, hallucination control.'],
+    ['a code assistant', 'h', ['llm serving', 'latency', 'evaluation'], 47, 'Fill-in-the-middle, repo context, sub-200 ms, acceptance metrics.'],
+    ['an image generation service', 'h', ['gpu', 'queueing', 'safety'], 48, 'Diffusion serving, step budgets, GPU fair share, abuse control.'],
+    ['a voice assistant', 'h', ['speech', 'latency', 'streaming'], 49, 'Streaming ASR, endpointing, barge-in, full-duplex audio.'],
+    ['self-driving perception', 'h', ['perception', 'data engine', 'edge'], 50, 'Sensor fusion, the long tail, edge compute, the safety case.'],
+    ['content moderation at scale', 'h', ['classification', 'thresholds', 'adversarial'], 51, 'Multimodal classifiers, policy thresholds, human review, appeals.'],
+    ['training a frontier LLM', 'h', ['distributed training', 'scaling laws', 'cost'], 52, '10,000 GPUs for 90 days: data, parallelism, failures, the launch call.'],
+    ['a feature store for a 40-model organisation', 'm', ['features', 'platform', 'consistency'], 29, 'Point-in-time correctness, online/offline parity, ownership.'],
+    ['an ML platform for 200 data scientists', 'h', ['platform', 'mlops', 'cost'], 39, 'Notebooks to production, quotas, model registry, golden paths.'],
+    ['an experimentation platform for ML models', 'm', ['experiments', 'metrics', 'stats'], 33, 'Shadow, canary, A/B and interleaving with honest readouts.'],
+    ['a model monitoring and drift system', 'm', ['monitoring', 'drift', 'alerting'], 34, 'Delayed labels, proxy metrics, and alerts that are not noise.'],
+    ['a document understanding pipeline', 'm', ['cv', 'ocr', 'pipelines'], 12, 'Invoices and forms at scale: layout, extraction, human correction.'],
+    ['a semantic search system over 100M documents', 'm', ['retrieval', 'vector search', 'latency'], 20, 'Recall versus latency, hybrid scoring, filtering, sharding.'],
+    ['an LLM evaluation system', 'm', ['evaluation', 'llm', 'quality'], 35, 'Golden sets, rubric grading, judges, regression suites, eval drift.'],
+    ['a customer-support agent with tools', 'h', ['agents', 'tools', 'safety'], 22, 'Tool calling, permissions, sandboxing, escalation and failure modes.'],
+    ['an inference gateway for many model tiers', 'h', ['serving', 'routing', 'cost'], 39, 'Routing, quotas, caching, fallbacks, tenancy isolation.'],
+    ['a demand forecasting system', 'm', ['time series', 'features', 'backtesting'], 7, 'Thousands of series, seasonality, promotions, honest backtests.'],
+    ['a medical imaging triage model', 'h', ['cv', 'safety', 'fairness'], 37, 'High stakes, scarce labels, distribution shift across hospitals.'],
+    ['a translation service for 50 languages', 'h', ['llm serving', 'evaluation', 'cost'], 26, 'Quality per language, latency, and uneven data volumes.'],
+    ['a personalization system with a cold start', 'm', ['recommenders', 'features', 'experiments'], 30, 'New users and new items on day one, with no interaction history.'],
+    ['an anomaly detection system for infrastructure', 'm', ['unsupervised', 'streaming', 'alerting'], 34, 'Millions of series, no labels, and an on-call team that will mute you.'],
+    ['a resume–job matching system', 'm', ['retrieval', 'fairness', 'ranking'], 37, 'Two-sided matching where bias is a legal and ethical problem.'],
+    ['an on-device ML feature', 'h', ['edge', 'compression', 'privacy'], 27, 'Quantization, latency and battery on a phone, with no cloud round trip.'],
+  ];
+  const LEVELS = { e: ['Starter', 'e'], m: ['Medium', 'm'], h: ['Hard', 'h'] };
+  const tags = [...new Set(P.flatMap(p => p[2]))].sort();
+  $('#tagSel').innerHTML = '<option value="">Any concept</option>' + tags.map(t => `<option>${t}</option>`).join('');
+
+  let cur = null;
+  function draw() {
+    const d = $('#diff').dataset.value, tg = $('#tagSel').value;
+    const pool = P.filter(p => (!d || p[1] === d) && (!tg || p[2].includes(tg)));
+    if (!pool.length) { ML.toast('No problems match those filters'); return; }
+    cur = pool[Math.floor(Math.random() * pool.length)];
+    const ch = cur[3] ? CHAPTERS.find(c => c.n === cur[3]) : null;
+    $('#prompt').innerHTML = `
+      <div class="eyebrow"><span class="pill ${cur[1] === 'h' ? 'red' : cur[1] === 'm' ? 'amber' : 'green'}">${LEVELS[cur[1]][0]}</span><span class="pill">🎤 design it out loud</span></div>
+      <h2>Design ${cur[0]}</h2>
+      <p class="small" style="margin:0;color:var(--text-2)">${cur[4]}</p>
+      <div class="tags">${cur[2].map(t => `<span>${t}</span>`).join('')}</div>
+      ${ch ? `<p class="small" style="margin:12px 0 0">📘 Worked solution afterwards: <a href="${ch.file}">Chapter ${ch.n} — ${ch.title}</a></p>` : '<p class="small muted" style="margin:12px 0 0">No worked chapter for this one — compare with a friend or write your own notes.</p>'}`;
+    reset();
+  }
+  $('#draw').onclick = draw;
+  $('#diff').addEventListener('segchange', draw);
+  $('#tagSel').addEventListener('change', draw);
+
+  /* ================= Timer ================= */
+  const PLANS = {
+    35: [['Framing', 5], ['Data & labels', 5], ['Metrics', 4], ['Model & features', 6], ['Serving & scale', 6], ['Deep dives', 6], ['Wrap-up', 3]],
+    45: [['Framing', 6], ['Data & labels', 6], ['Metrics', 5], ['Model & features', 7], ['Serving & scale', 8], ['Deep dives', 9], ['Wrap-up', 4]],
+    60: [['Framing', 8], ['Data & labels', 8], ['Metrics', 6], ['Model & features', 9], ['Serving & scale', 11], ['Deep dives', 13], ['Wrap-up', 5]],
+  };
+  const PROMPTS = {
+    'Framing': ['What is the product decision this model informs, and who acts on it?', 'State the prediction task: inputs, output, and one training example', 'Does this need ML at all — what does the rules baseline do?', 'Constraints: latency, scale, budget, regulation. What is out of scope?'],
+    'Data & labels': ['Where do labels come from, and how delayed or noisy are they?', 'Splits: random, temporal or by entity — and why', 'Leakage check: could any feature encode the answer?', 'Volume, imbalance, and how you would bootstrap with none of it'],
+    'Metrics': ['One primary metric tied to the product outcome', 'Offline proxies, and how well they track it', 'Guardrails that must not regress', 'Where the threshold sits, and which error costs more'],
+    'Model & features': ['Baseline first, then what you would try next and why', 'Features and how they are computed at training and serving time', 'Training cadence: batch, incremental, or continuous', 'Cold start, and the long tail'],
+    'Serving & scale': ['Online or batch? Latency budget, broken down by stage', 'Capacity: QPS, hardware, cost per prediction', 'Caching, batching, and what you precompute', 'Failure and fallback: what serves when the model does not?'],
+    'Deep dives': ['Go deep on the hardest component — retrieval, drift, or the feedback loop', 'Training/serving skew: how would you detect it?', 'What breaks at 10×, and what breaks first?', 'Name the alternatives you rejected and why'],
+    'Wrap-up': ['Summarise the design and its main risk in 60 seconds', 'Rollout: shadow, canary, experiment — and the rollback trigger', 'Monitoring, retraining trigger, and who is on call', 'Cost, and what you would build next'],
+  };
+  let tm = { elapsed: 0, running: false };
+  const plan = () => PLANS[$('#len').dataset.value];
+  const fmt = s => `${String(Math.floor(s / 60)).padStart(2, '0')}:${String(Math.floor(s % 60)).padStart(2, '0')}`;
+  function phaseAt(sec) { let acc = 0; const p = plan(); for (let i = 0; i < p.length; i++) { acc += p[i][1] * 60; if (sec < acc) return { i, left: acc - sec }; } return { i: p.length, left: 0 }; }
+  function tick() {
+    const p = plan(), total = p.reduce((s, x) => s + x[1], 0) * 60;
+    const { i, left } = phaseAt(tm.elapsed);
+    $('#phases').innerHTML = p.map(([n, m], j) => {
+      const start = p.slice(0, j).reduce((s, x) => s + x[1], 0) * 60, frac = ML.clamp((tm.elapsed - start) / (m * 60), 0, 1);
+      return `<div class="phase ${j < i ? 'done' : j === i && (tm.elapsed > 0 || tm.running) ? 'cur' : ''}" style="flex:${m}"><i style="width:${j === i ? frac * 100 : 0}%"></i><span>${n}<br><small>${m}m</small></span></div>`;
+    }).join('');
+    $('#clock').textContent = fmt(tm.elapsed);
+    $('#clock').style.color = tm.elapsed >= total ? 'var(--red)' : '';
+    if (!tm.elapsed && !tm.running) { $('#phaseLeft').textContent = 'Not started'; return; }
+    if (i >= p.length) { $('#phaseTitle').textContent = '⏰ Time — now score yourself below'; $('#phasePrompts').innerHTML = ''; $('#phaseLeft').textContent = 'Session complete'; return; }
+    $('#phaseTitle').textContent = `${i + 1}. ${p[i][0]}`;
+    $('#phaseLeft').textContent = `${fmt(left)} left in this phase · ${fmt(Math.max(0, total - tm.elapsed))} total`;
+    $('#phasePrompts').innerHTML = PROMPTS[p[i][0]].map(x => `<li>${x}</li>`).join('');
+  }
+  let last = Date.now();
+  setInterval(() => { const now = Date.now(), dt = (now - last) / 1000; last = now; if (tm.running) { tm.elapsed += dt; tick(); } }, 250);
+  function reset() { tm = { elapsed: 0, running: false }; $('#start').textContent = '▶ Start'; $('#phaseTitle').textContent = cur ? 'Ready — press start and talk through it' : '👋 Draw a problem and press start'; $('#phasePrompts').innerHTML = ''; tick(); }
+  $('#start').onclick = () => { if (!cur) { draw(); } tm.running = !tm.running; $('#start').textContent = tm.running ? '⏸ Pause' : '▶ Resume'; tick(); };
+  $('#skip').onclick = () => { const p = plan(), { i } = phaseAt(tm.elapsed); tm.elapsed = p.slice(0, Math.min(i + 1, p.length)).reduce((s, x) => s + x[1], 0) * 60; tick(); };
+  $('#reset').onclick = reset;
+  $('#len').addEventListener('segchange', reset);
+
+  /* ================= Rubric ================= */
+  const RUB = [
+    ['Problem framing', 'Turned a vague ask into a prediction task with a clear decision behind it'],
+    ['Data & labels', 'Label source, splits, leakage, imbalance — and the cold-start plan'],
+    ['Metrics & evaluation', 'Primary metric tied to the product, honest proxies, guardrails, thresholds'],
+    ['Modelling', 'Sensible baseline first, justified escalation, features that exist at serving time'],
+    ['Systems & serving', 'Latency budget, capacity, cost per prediction, caching and fallbacks'],
+    ['Depth', 'Went properly deep on the hardest part rather than staying broad'],
+    ['Production thinking', 'Skew, drift, retraining, monitoring, rollout and failure modes'],
+    ['Communication', 'Drove the session, thought out loud, adapted when challenged'],
+  ];
+  let scores = new Array(RUB.length).fill(0);
+  function rubric() {
+    $('#rubric').innerHTML = RUB.map(([n, d], i) => `<div class="rub"><span><b>${n}</b><small>${d}</small></span>
+      <span class="scoreset">${[0, 1, 2, 3].map(v => `<button class="${scores[i] === v ? 'on' : ''}" data-i="${i}" data-v="${v}">${v}</button>`).join('')}</span></div>`).join('');
+    $$('#rubric button').forEach(b => b.onclick = () => { scores[+b.dataset.i] = +b.dataset.v; rubric(); });
+    const total = scores.reduce((a, b) => a + b, 0);
+    $('#scoreV').innerHTML = `${total} <small>/ ${RUB.length * 3}</small>`;
+    const band = total >= 20 ? '🏆 strong senior+' : total >= 15 ? '✅ solid senior' : total >= 10 ? '🙂 mid-level' : total ? '📚 keep drilling' : '–';
+    $('#scoreBand').textContent = band;
+    const idx = scores.map((s, i) => [s, i]);
+    const best = idx.slice().sort((a, b) => b[0] - a[0])[0], worst = idx.slice().sort((a, b) => a[0] - b[0])[0];
+    $('#scoreBest').textContent = total ? RUB[best[1]][0] : '–';
+    $('#scoreWorst').textContent = total ? RUB[worst[1]][0] : '–';
+  }
+  rubric();
+
+  /* ================= Notes, history ================= */
+  const notes = $('#notes');
+  notes.value = LS.get('ml-mock-notes', '');
+  notes.addEventListener('input', () => LS.set('ml-mock-notes', notes.value));
+
+  function writeUp() {
+    const total = scores.reduce((a, b) => a + b, 0);
+    return `# Mock interview — ${cur ? cur[0] : '(no problem drawn)'}\n` +
+      `Date: ${new Date().toISOString().slice(0, 10)}   Length: ${$('#len').dataset.value} min   Score: ${total}/${RUB.length * 3}\n\n` +
+      RUB.map((r, i) => `- ${r[0]}: ${scores[i]}/3`).join('\n') +
+      `\n\n## Notes\n${notes.value || '(none)'}\n`;
+  }
+  function renderHist() {
+    const h = LS.get('ml-mock-hist', []);
+    $('#hist').innerHTML = h.length ? h.slice().reverse().map(x =>
+      `<div><span><b>${x.p}</b><br><span class="muted small">${x.d} · ${x.len} min</span></span><span class="sc">${x.s}/24</span><span class="small muted">${x.worst}</span></div>`).join('')
+      : '<div class="small muted">No sessions saved yet.</div>';
+    // aggregate weak spots
+    if (h.length >= 2) {
+      const sums = new Array(RUB.length).fill(0);
+      h.forEach(x => (x.all || []).forEach((v, i) => sums[i] += v));
+      const avg = sums.map((s, i) => [s / h.length, i]).sort((a, b) => a[0] - b[0]);
+      $('#weakSpots').innerHTML = `<div class="callout warn" style="margin-top:14px"><div class="ico">🎯</div><div class="body"><div class="title">Your pattern across ${h.length} sessions</div><p>Weakest areas: <b>${avg.slice(0, 2).map(a => RUB[a[1]][0] + ' (' + a[0].toFixed(1) + '/3)').join(', ')}</b>. Strongest: ${avg[avg.length - 1] ? RUB[avg[avg.length - 1][1]][0] : '–'}. Target the weak ones deliberately in your next two sessions.</p></div></div>`;
+    } else $('#weakSpots').innerHTML = '';
+  }
+  $('#save').onclick = () => {
+    if (!cur) { ML.toast('Draw a problem first'); return; }
+    const total = scores.reduce((a, b) => a + b, 0);
+    const idx = scores.map((s, i) => [s, i]).sort((a, b) => a[0] - b[0]);
+    const h = LS.get('ml-mock-hist', []);
+    h.push({ p: cur[0], d: new Date().toISOString().slice(0, 10), len: $('#len').dataset.value, s: total, all: scores.slice(), worst: 'weakest: ' + RUB[idx[0][1]][0] });
+    LS.set('ml-mock-hist', h.slice(-40));
+    scores = new Array(RUB.length).fill(0); rubric(); renderHist();
+    ML.toast('Session saved — draw another problem when you are ready');
+  };
+  $('#copy').onclick = async () => {
+    const text = writeUp();
+    try { await navigator.clipboard.writeText(text); ML.toast('Write-up copied to clipboard'); }
+    catch (e) { const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([text], { type: 'text/markdown' })); a.download = 'mock-interview.md'; a.click(); ML.toast('Downloaded as Markdown'); }
+  };
+  $('#clearAll').onclick = () => { if (confirm('Delete saved mock-interview history?')) { LS.set('ml-mock-hist', []); renderHist(); } };
+  renderHist();
+  draw();
+})();
+</script>
+</body>
+</html>

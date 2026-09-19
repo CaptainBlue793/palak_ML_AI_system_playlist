@@ -1,0 +1,255 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Glossary</title>
+<link rel="stylesheet" href="assets/style.css">
+<script>try{var t=JSON.parse(localStorage.getItem('ml-theme'));if(t)document.documentElement.setAttribute('data-theme',t)}catch(e){}</script>
+<style>
+  .alpha { display:flex; flex-wrap:wrap; gap:4px; margin:14px 0; }
+  .alpha button { width:32px; height:32px; border-radius:8px; border:1px solid var(--border); background:var(--surface-2); color:var(--text-2); font-weight:700; font-size:13px; cursor:pointer; }
+  .alpha button:hover:not(:disabled) { border-color:var(--accent); color:var(--accent); }
+  .alpha button.on { background:var(--accent); border-color:var(--accent); color:#fff; }
+  .alpha button:disabled { opacity:.25; cursor:default; }
+  .gl-group { margin-top:26px; }
+  .gl-letter { font-family:var(--mono); font-size:13px; font-weight:800; color:var(--accent); letter-spacing:.1em; border-bottom:1px solid var(--border); padding-bottom:4px; margin-bottom:10px; }
+  .gl { display:grid; gap:8px; }
+  .gt { display:grid; grid-template-columns:230px 1fr auto; gap:14px; align-items:baseline; padding:10px 12px; border-radius:12px; background:var(--surface); border:1px solid var(--border); animation:fadeUp .2s; }
+  @media (max-width:760px){ .gt { grid-template-columns:1fr; gap:4px; } }
+  .gt b { font-size:14.5px; }
+  .gt .def { color:var(--text-2); font-size:14px; line-height:1.55; }
+  .gt .ch { font-size:11.5px; font-family:var(--mono); white-space:nowrap; }
+  .gt mark { background:var(--amber-soft); color:var(--text); border-radius:3px; padding:0 2px; }
+</style>
+</head>
+<body>
+<main class="content">
+
+  <section class="hero">
+    <div class="eyebrow"><span class="pill accent">Study tool</span><span class="pill">📖 <span id="count"></span> terms</span></div>
+    <h1>Glossary</h1>
+    <p class="lead">Every term this course uses, in one sentence each, linked to the chapter that explains it properly. Useful the night before an interview — and when someone drops a word in a design review and you'd rather not nod along.</p>
+  </section>
+
+  <div class="controls" style="margin-top:8px">
+    <input class="inp" id="gq" placeholder="Filter terms… (e.g. LoRA, KV cache, drift)" style="flex:1;min-width:220px" autocomplete="off">
+    <select class="inp" id="glevel" aria-label="Filter by level"><option value="">All levels</option></select>
+  </div>
+  <div class="alpha" id="alpha"></div>
+  <div id="glist"></div>
+
+  <div class="callout tip" style="margin-top:40px"><div class="ico">🔎</div><div class="body"><div class="title">Looking for something specific?</div><p>Press <kbd class="kbd">Ctrl</kbd>+<kbd class="kbd">K</kbd> anywhere in the course to search every chapter, section and simulator by name.</p></div></div>
+</main>
+<script src="assets/app.js"></script>
+<script>
+(function(){
+  const { $, $$, CHAPTERS } = ML;
+  // [term, one-line definition, chapter number]
+  const T = [
+    ['A/B test', 'Randomly splitting live traffic between variants to measure a causal effect on a metric you care about.', 33],
+    ['Ablation', 'Removing or changing one component to measure how much it actually contributed.', 16],
+    ['Acceptance rate', 'Share of shown suggestions a user takes — easy to game, which is why retention is the better metric.', 47],
+    ['Activation', 'The non-linearity (ReLU, GELU, SiLU) that lets stacked layers represent more than one big linear map.', 8],
+    ['Activation checkpointing', 'Recomputing activations in the backward pass instead of storing them — compute traded for memory.', 23],
+    ['Adam', 'The default optimizer for deep nets: per-parameter step sizes from running estimates of gradient mean and variance.', 9],
+    ['Agent loop', 'Observe, decide, call a tool, read the result, repeat — the control loop behind any tool-using model.', 22],
+    ['Alignment', 'Making a model behave as intended — helpful, honest and harmless — rather than merely predicting text well.', 18],
+    ['ANN (approximate nearest neighbour)', 'Trading exactness for speed in vector search; recall becomes a tunable rather than a guarantee.', 20],
+    ['Attention', 'Each token builds a weighted average of other tokens, with weights computed from query–key similarity.', 13],
+    ['Auto-labelling', 'Labelling data with a large offline model that may use future context and unlimited compute, then auditing a sample.', 50],
+    ['Autodiff', 'Automatic differentiation: the framework records operations and replays them backwards to get gradients.', 11],
+    ['Backpropagation', 'The chain rule applied efficiently over a computation graph to get every parameter’s gradient.', 8],
+    ['Bagging', 'Training many models on bootstrap samples and averaging them to cut variance — the idea behind random forests.', 6],
+    ['Batch normalization', 'Normalizing activations using batch statistics to stabilise and speed up training.', 9],
+    ['Batch size', 'How many examples contribute to one parameter update; sets gradient noise, memory use and hardware efficiency.', 9],
+    ['Beam search', 'Decoding that keeps the k best partial sequences instead of greedily taking the top token each step.', 14],
+    ['BEV (bird’s-eye view)', 'A shared top-down space where features from all cameras and sensors are fused consistently.', 50],
+    ['Bias–variance trade-off', 'Underfitting versus overfitting: error from a model too simple, against error from fitting noise.', 6],
+    ['BLEU / ROUGE', 'N-gram overlap metrics for generated text; cheap, reproducible, and weakly related to usefulness.', 35],
+    ['BPE (byte-pair encoding)', 'Building a vocabulary by repeatedly merging the most frequent adjacent symbol pair.', 15],
+    ['Calibration', 'Whether a predicted probability of 0.7 actually happens 70% of the time; separate from accuracy and often worse.', 7],
+    ['Candidate generation', 'The cheap first stage of a recommender that reduces millions of items to hundreds.', 30],
+    ['Canary release', 'Sending a small slice of traffic to a new version and watching guardrails before going further.', 33],
+    ['Catastrophic forgetting', 'Fine-tuning on a narrow task erasing capabilities the model previously had.', 17],
+    ['Chain of thought', 'Prompting the model to produce intermediate reasoning before its answer.', 19],
+    ['Checkpoint', 'A saved snapshot of weights, optimizer state, data position and RNG — everything needed to resume exactly.', 25],
+    ['Chinchilla-optimal', 'The model-size / token-count split that minimises training loss for a fixed compute budget.', 16],
+    ['Chunking', 'Splitting documents for retrieval; structure-aware chunks with heading context beat fixed character counts.', 21],
+    ['CI/CD/CT', 'Continuous integration, delivery and training — the automated path from a code or data change to a deployed model.', 32],
+    ['Class imbalance', 'When one label is far rarer than another, so accuracy is meaningless and sampling or weighting is required.', 3],
+    ['Concept drift', 'The relationship between features and label changes, so a still-accurate-looking model quietly becomes wrong.', 34],
+    ['Context window', 'The maximum number of tokens a model can attend over in one forward pass.', 19],
+    ['Continuous batching', 'Admitting new requests into a running generation batch as others finish, instead of waiting for the whole batch.', 26],
+    ['Contrastive learning', 'Training embeddings by pulling related pairs together and pushing unrelated ones apart.', 15],
+    ['Convolution', 'A small learned filter slid across an image, giving translation equivariance and heavy weight sharing.', 12],
+    ['Cosine similarity', 'Similarity as the angle between two vectors — the usual scoring function for embeddings.', 15],
+    ['Cross-encoder', 'A reranker that reads query and document together; far more accurate than embeddings, far too slow for first-stage retrieval.', 21],
+    ['Cross-validation', 'Rotating which fold is held out so every example is evaluated once, giving a more stable estimate on small data.', 7],
+    ['Curriculum', 'Ordering training data deliberately — general first, high-quality and long-context later.', 16],
+    ['Data engine', 'The loop that mines failures from a fleet, labels them and feeds them back — the real product in perception systems.', 50],
+    ['Data drift', 'The input distribution changes while the underlying relationship may not; detectable without labels.', 34],
+    ['Data parallelism', 'Every worker holds the whole model and a different data slice; gradients are all-reduced each step.', 23],
+    ['Dead-letter queue', 'Where items that fail processing go, so failures are visible and owned rather than silent.', 46],
+    ['Debouncing', 'Waiting for a pause before firing a request — the cheapest way to cut load in a keystroke-driven product.', 47],
+    ['Decoder-only', 'A transformer that attends only leftwards and generates one token at a time; the standard LLM architecture.', 14],
+    ['Deduplication', 'Removing exact and near-duplicate training documents; saves compute, reduces memorisation, protects evaluations.', 16],
+    ['Diffusion model', 'A generator that starts from noise and denoises step by step; each step is a full network pass.', 48],
+    ['Distillation', 'Training a small student to match a large teacher’s outputs, keeping most quality at a fraction of the cost.', 27],
+    ['Distributed shuffle', 'Randomising order across shards so each worker sees an unbiased stream of a corpus too large to fit anywhere.', 28],
+    ['DPO', 'Direct preference optimization: learning from preference pairs directly, without training a separate reward model.', 18],
+    ['Early stopping', 'Halting training when validation loss stops improving, to avoid fitting noise.', 9],
+    ['Embedding', 'A dense vector whose geometry encodes meaning, so similarity in space means similarity in content.', 15],
+    ['Endpointing', 'Deciding that a speaker has finished; needs acoustic and semantic signals, and it is where voice systems feel broken.', 49],
+    ['Ensemble', 'Combining several models’ predictions to beat any one of them, usually by reducing variance.', 6],
+    ['Entity error rate', 'Recognition error measured on names, numbers and addresses — it predicts task failure where overall WER does not.', 49],
+    ['Epoch', 'One full pass over the training set; frontier pretraining runs often do less than one.', 9],
+    ['Evaluation harness', 'The code that runs a model against a benchmark; a change here can move scores with no model change at all.', 35],
+    ['Expert routing', 'The gating function in a mixture-of-experts model that sends each token to a small subset of experts.', 24],
+    ['Exploding gradients', 'Gradients growing through depth until training destabilises; handled with clipping and careful initialization.', 9],
+    ['F1 score', 'The harmonic mean of precision and recall — a reasonable summary only when both errors cost the same.', 7],
+    ['Feature crossing', 'Combining features so a model can learn interactions a linear model could not express alone.', 4],
+    ['Feature store', 'A system giving the same feature definitions to training and serving, to keep the two from diverging.', 29],
+    ['Federated learning', 'Training across devices that keep their data locally, sharing only model updates.', 37],
+    ['Few-shot prompting', 'Giving examples in the prompt so the model infers the task without any weight updates.', 19],
+    ['FIM (fill in the middle)', 'Training a model to complete text given both the prefix and the suffix — what a cursor position actually looks like.', 47],
+    ['Fine-tuning', 'Continuing training on your own data to adapt a pretrained model to a task, domain or style.', 17],
+    ['FLOPs', 'Floating-point operations: the compute currency. Training cost is roughly 6 × parameters × tokens.', 10],
+    ['FSDP', 'Fully sharded data parallel: shard parameters, gradients and optimizer state across workers, gathering as needed.', 23],
+    ['Gradient accumulation', 'Summing gradients over several micro-batches before stepping, to simulate a larger batch than memory allows.', 23],
+    ['Gradient descent', 'Repeatedly stepping parameters downhill along the loss gradient — the engine under nearly all of this.', 5],
+    ['Gradient boosting', 'Fitting each new tree to the residual errors of the ensemble so far; still the best default on tabular data.', 6],
+    ['Grounding', 'Requiring generated claims to be supported by retrieved sources, with citations that can be checked.', 21],
+    ['Guardrail metric', 'A metric that must not get worse, even when the primary metric improves.', 33],
+    ['Hallucination', 'Fluent, confident output unsupported by any source or fact.', 35],
+    ['Hidden technical debt', 'The glue, config, pipelines and coupling around a model — usually far larger than the model code itself.', 1],
+    ['HNSW', 'A navigable small-world graph index that walks from coarse to fine neighbours; fast and memory-hungry.', 20],
+    ['Hybrid search', 'Combining dense retrieval with BM25 so paraphrase and exact-token matches both work.', 21],
+    ['Hyperparameter', 'Anything you choose rather than learn: learning rate, depth, batch size, regularization strength.', 9],
+    ['Idempotency', 'Designing an operation so a retry has no extra effect — essential in any pipeline that retries.', 28],
+    ['Indirect prompt injection', 'Instructions hidden in retrieved content or tool output that the model then follows.', 36],
+    ['Inference', 'Running a trained model to produce predictions; usually where most lifetime cost lives.', 26],
+    ['Instruction tuning', 'Fine-tuning on instruction–response pairs so a base model follows requests instead of continuing text.', 17],
+    ['Int8 / fp8', 'Low-precision numeric formats that shrink memory and raise throughput at some accuracy cost.', 27],
+    ['Interleaving', 'Mixing two rankers’ results in one list and observing which side gets clicks — far more sensitive than an A/B test.', 33],
+    ['Judge model', 'Using an LLM to grade outputs against a rubric; scalable, biased, and requiring calibration against humans.', 35],
+    ['KV cache', 'Stored keys and values from earlier tokens so generation does not recompute them; usually the memory limit on concurrency.', 14],
+    ['Label leakage', 'A feature that encodes the answer, giving brilliant offline metrics and useless production performance.', 3],
+    ['Latent space', 'The compressed representation a model actually operates in — where diffusion denoising happens.', 48],
+    ['Layer normalization', 'Normalizing across features within one example; the transformer’s stabiliser of choice.', 14],
+    ['Learning rate', 'The step size of gradient descent, and the hyperparameter most likely to ruin a run.', 5],
+    ['Learning-rate schedule', 'How the step size changes over training — typically warm-up then cosine or linear decay.', 9],
+    ['Lineage', 'The recorded chain from raw data through features and code to a deployed model.', 31],
+    ['Logistic regression', 'Linear model with a sigmoid output, trained with cross-entropy; the baseline every classifier must beat.', 5],
+    ['LoRA', 'Fine-tuning by learning small low-rank update matrices while the base weights stay frozen.', 17],
+    ['Loss function', 'The scalar being minimised; it defines what the model is actually trying to do.', 5],
+    ['Loss spike', 'A sudden jump in training loss, often traceable to pathological data; handled by rewinding and skipping batches.', 25],
+    ['MFU', 'Model FLOPs utilization: achieved FLOPs over peak. At frontier scale it is a financial metric.', 10],
+    ['Micro-batching', 'Splitting a batch into pieces that flow through a pipeline to keep every stage busy.', 24],
+    ['Mixed precision', 'Computing in bf16/fp16 while keeping an fp32 master copy for stability.', 9],
+    ['Mixture of experts (MoE)', 'Many expert sub-networks with only a few active per token — large capacity at modest inference cost.', 24],
+    ['Model card', 'A document stating a model’s intended use, training data, evaluation results and known limitations.', 37],
+    ['Model registry', 'The system of record for model versions, their lineage, approvals and deployment status.', 31],
+    ['Monosemanticity', 'Whether a learned feature corresponds to one human-legible concept rather than a tangle of several.', 15],
+    ['Multi-head attention', 'Running attention several times in parallel with different projections, then concatenating.', 14],
+    ['nDCG', 'A ranking metric that rewards putting the most relevant items highest, discounted by position.', 30],
+    ['Negative sampling', 'Training retrieval models against sampled non-matches; hard negatives matter far more than random ones.', 30],
+    ['Observability', 'Being able to answer new questions about a live system without shipping new code to do it.', 34],
+    ['Offline / online gap', 'The routine gap between a metric that improved on held-out data and one that did not move in production.', 33],
+    ['One-hot encoding', 'Representing a category as a vector with a single 1 — simple, and explosive for high-cardinality features.', 4],
+    ['Operating point', 'The chosen threshold on a model’s score curve, which decides which kind of error you make more of.', 51],
+    ['Overfitting', 'Fitting the training set’s noise, so training error keeps falling while validation error rises.', 6],
+    ['PagedAttention', 'Managing the KV cache in fixed pages like virtual memory, so fragmentation stops wasting GPU memory.', 26],
+    ['Pareto front', 'The set of options where improving one objective necessarily worsens another.', 7],
+    ['PEFT', 'Parameter-efficient fine-tuning: adapting a model by training a small number of new parameters.', 17],
+    ['Perplexity', 'Exponentiated average loss per token; a training-health signal, not a product metric.', 16],
+    ['Pipeline parallelism', 'Splitting a model by layers across devices; simple to reason about, prone to bubbles.', 24],
+    ['Point-in-time correctness', 'Building training rows from only the feature values that existed at the label’s timestamp.', 29],
+    ['Positional encoding', 'Injecting token order into attention, which is otherwise permutation invariant.', 14],
+    ['Post-training', 'Everything after pretraining — instruction tuning, preference optimization, safety work.', 18],
+    ['Precision / recall', 'Of what you flagged, how much was right; of what was there, how much you caught.', 7],
+    ['Prefill vs decode', 'Processing the prompt (compute-bound, parallel) versus generating tokens (memory-bound, sequential).', 26],
+    ['Prefix caching', 'Reusing the KV cache of a shared prompt prefix so repeated context is not recomputed.', 26],
+    ['Prevalence', 'The share of views that violate policy, measured on randomly sampled traffic — the one moderation metric that cannot be gamed.', 51],
+    ['Prompt caching', 'Provider-side reuse of a repeated prompt prefix, cutting both latency and cost.', 19],
+    ['Pruning', 'Removing weights or whole structures from a trained network to make it smaller and faster.', 27],
+    ['Quantization', 'Storing and computing weights and activations at lower precision to cut memory and raise throughput.', 27],
+    ['Query understanding', 'Turning a raw query into intent, entities and constraints before retrieval runs.', 42],
+    ['RAG', 'Retrieval-augmented generation: fetch relevant context at query time and generate an answer grounded in it.', 21],
+    ['Random forest', 'A bagged ensemble of decorrelated decision trees; a strong, nearly tuning-free baseline.', 6],
+    ['Recall@k', 'The share of relevant items that appear in the top k — the metric that caps everything downstream in retrieval.', 20],
+    ['Regularization', 'Anything that constrains a model to reduce overfitting: weight decay, dropout, augmentation, early stopping.', 9],
+    ['Reranker', 'A second-stage model that reorders a shortlist more accurately than retrieval could afford to.', 21],
+    ['Resimulation', 'Replaying logged real-world data against a new model version and diffing the outputs.', 50],
+    ['Reward hacking', 'A policy maximising the reward model’s score in ways that do not reflect what humans actually wanted.', 18],
+    ['Reward model', 'A model trained on human preferences that scores outputs, standing in for a human during RL.', 18],
+    ['RLHF', 'Reinforcement learning from human feedback: optimise a policy against a learned reward model.', 18],
+    ['ROC / PR curve', 'Two views of a classifier across all thresholds; PR is the honest one under heavy class imbalance.', 7],
+    ['Scaling law', 'The empirical power-law relating loss to model size, data and compute — and the basis for planning a run.', 16],
+    ['Self-attention', 'Attention where queries, keys and values all come from the same sequence.', 13],
+    ['Semantic search', 'Retrieval by embedding similarity rather than keyword match.', 20],
+    ['Sequence parallelism', 'Sharding along the sequence dimension to fit very long contexts in memory.', 24],
+    ['Serving skew', 'Training and serving computing features differently, so the model sees inputs it was never trained on.', 29],
+    ['Shadow deployment', 'Running a new model on live traffic without acting on its outputs, to compare safely.', 33],
+    ['Sharding', 'Splitting data, an index or model state across machines so no single machine has to hold it all.', 20],
+    ['SGD', 'Stochastic gradient descent: update from a small random batch rather than the whole dataset.', 5],
+    ['Softmax', 'Turning a vector of scores into a probability distribution — attention weights and classifier outputs both use it.', 2],
+    ['Speculative decoding', 'A small draft model proposes tokens that the large model verifies in one pass, cutting decode latency.', 27],
+    ['Straggler', 'One slow worker that sets the pace for a synchronous cluster — invisible without per-rank monitoring.', 25],
+    ['Streaming ASR', 'Speech recognition that emits and revises partial transcripts as audio arrives.', 49],
+    ['Tensor core', 'Specialised matrix-multiply hardware; using it well is most of what makes a GPU fast.', 10],
+    ['Tensor parallelism', 'Splitting individual matrix multiplications across devices; extremely communication-hungry, so keep it inside a node.', 24],
+    ['Test-time compute', 'Spending more compute per request — sampling, search, longer reasoning — to buy quality without retraining.', 19],
+    ['Tokenizer', 'The reversible mapping between text and model tokens; frozen for a model’s lifetime and a permanent tax if bad.', 15],
+    ['Tool calling', 'A model emitting a structured call that your code executes, with the result fed back into context.', 22],
+    ['Training/serving skew', 'Any difference between training and production inputs — the most common cause of models that work offline only.', 29],
+    ['Transfer learning', 'Reusing representations learned on one task as the starting point for another.', 12],
+    ['Two-tower model', 'Separate encoders for query and item so item vectors can be precomputed and searched at scale.', 30],
+    ['Vector database', 'A store for embeddings with an ANN index, metadata filtering and, ideally, permission-aware retrieval.', 20],
+    ['Vision transformer (ViT)', 'Applying a transformer to image patches instead of using convolutions.', 12],
+    ['Watermarking', 'Embedding a detectable signal in generated content so its origin can later be evidenced.', 48],
+    ['Weight decay', 'Penalising large weights during training; a simple and reliable regularizer.', 9],
+    ['WER', 'Word error rate: the standard ASR metric, and one whose average hides the errors that actually fail the task.', 49],
+    ['Zero-shot', 'Asking a model to do a task with no examples, relying entirely on pretraining and instructions.', 19],
+    ['ZeRO', 'Sharding optimizer state, gradients and parameters across data-parallel workers to remove redundant memory.', 23],
+  ];
+
+  const levels = [...new Set(CHAPTERS.map(c => c.level))];
+  $('#glevel').innerHTML = '<option value="">All levels</option>' + levels.map(l => `<option>${l}</option>`).join('');
+  $('#count').textContent = T.length;
+
+  let letter = '';
+  const esc = s => String(s).replace(/[&<>]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
+  function hl(text, q) {
+    if (!q) return esc(text);
+    const i = text.toLowerCase().indexOf(q);
+    return i < 0 ? esc(text) : esc(text.slice(0, i)) + '<mark>' + esc(text.slice(i, i + q.length)) + '</mark>' + esc(text.slice(i + q.length));
+  }
+  function render() {
+    const q = $('#gq').value.trim().toLowerCase(), lv = $('#glevel').value;
+    const rows = T.filter(([t, d, n]) => {
+      const ch = CHAPTERS.find(c => c.n === n);
+      if (lv && (!ch || ch.level !== lv)) return false;
+      if (letter && t[0].toUpperCase() !== letter) return false;
+      if (q && !(t.toLowerCase().includes(q) || d.toLowerCase().includes(q))) return false;
+      return true;
+    });
+    const groups = {};
+    rows.forEach(r => { const L = r[0][0].toUpperCase(); (groups[L] = groups[L] || []).push(r); });
+    $('#glist').innerHTML = Object.keys(groups).sort().map(L => `<div class="gl-group"><div class="gl-letter">${L}</div><div class="gl">` +
+      groups[L].map(([t, d, n]) => {
+        const ch = CHAPTERS.find(c => c.n === n);
+        return `<div class="gt"><b>${hl(t, q)}</b><span class="def">${hl(d, q)}</span>${ch ? `<a class="ch" href="${ch.file}">Ch ${n} →</a>` : ''}</div>`;
+      }).join('') + '</div></div>').join('') || '<p class="muted" style="margin-top:20px">No terms match that filter.</p>';
+    const present = new Set(T.map(t => t[0][0].toUpperCase()));
+    $('#alpha').innerHTML = `<button class="${letter === '' ? 'on' : ''}" data-l="">All</button>` +
+      'ABCDEFGHIJKLMNOPQRSTUVWXYZ'.split('').map(L => `<button class="${letter === L ? 'on' : ''}" data-l="${L}" ${present.has(L) ? '' : 'disabled'}>${L}</button>`).join('');
+    $$('#alpha button').forEach(b => b.onclick = () => { letter = b.dataset.l; render(); });
+  }
+  $('#gq').addEventListener('input', () => { letter = ''; render(); });
+  $('#glevel').addEventListener('change', render);
+  render();
+})();
+</script>
+</body>
+</html>

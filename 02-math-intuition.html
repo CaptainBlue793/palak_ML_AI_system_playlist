@@ -1,0 +1,468 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Math &amp; Intuition You Actually Need</title>
+<link rel="stylesheet" href="assets/style.css">
+<script>try{var t=JSON.parse(localStorage.getItem('ml-theme'));if(t)document.documentElement.setAttribute('data-theme',t)}catch(e){}</script>
+<style>
+  .vec-wrap { display:grid; grid-template-columns:1fr 280px; gap:16px; align-items:start; }
+  @media (max-width:820px){ .vec-wrap{ grid-template-columns:1fr; } }
+  .vec-svg { touch-action:none; cursor:grab; width:100%; }
+  .vec-svg .grid { stroke:var(--border); stroke-width:1; }
+  .vec-svg .axis { stroke:var(--border-strong); stroke-width:1.5; }
+  .vec-svg .handle { cursor:grab; }
+  .vec-svg .handle:active { cursor:grabbing; }
+  .readout { font-family:var(--mono); font-size:13px; line-height:2; color:var(--text-2); }
+  .readout b { color:var(--text); }
+  .readout .big { font-size:26px; font-weight:800; letter-spacing:-.02em; display:block; margin:4px 0 2px; }
+  .verdict-box { border-radius:12px; padding:10px 12px; font-size:13.5px; margin-top:8px; border:1px solid var(--border); background:var(--surface-2); }
+
+  .curve { width:100%; height:230px; }
+  .curve .ln { fill:none; stroke:var(--accent); stroke-width:2.5; }
+  .curve .ax { stroke:var(--border-strong); }
+  .curve .gridl { stroke:var(--border); stroke-dasharray:2 4; }
+  .curve .dot { fill:var(--pink); }
+  .curve .tan { stroke:var(--amber); stroke-width:2.5; stroke-dasharray:6 4; }
+  .curve text { font-size:11px; fill:var(--muted); font-family:var(--mono); }
+
+  .shape-q { font-family:var(--mono); font-size:15px; padding:12px 14px; border-radius:12px; background:var(--surface-2); border:1px solid var(--border); margin-bottom:8px; }
+  .shape-q.right { border-color:var(--green); background:var(--green-soft); }
+  .shape-q.wrongc { border-color:var(--red); background:var(--red-soft); }
+  .shape-q .opts { display:flex; gap:6px; flex-wrap:wrap; margin-top:8px; }
+  .shape-q .opts button { font-family:var(--mono); font-size:12.5px; padding:5px 10px; border-radius:8px; border:1.5px solid var(--border); background:var(--surface); color:var(--text); cursor:pointer; }
+  .shape-q .opts button:hover { border-color:var(--accent); }
+  .shape-q .note { font-family:var(--font); font-size:13px; color:var(--text-2); margin-top:6px; display:none; }
+  .shape-q.right .note, .shape-q.wrongc .note { display:block; }
+  .mx { display:inline-grid; gap:2px; vertical-align:middle; margin:0 4px; }
+  .mx i { font-style:normal; font-family:var(--mono); font-size:11px; width:30px; height:24px; display:grid; place-items:center; background:var(--surface-2); border:1px solid var(--border); border-radius:5px; }
+  .mx.on i { background:var(--accent-soft); border-color:var(--accent); color:var(--accent); }
+</style>
+</head>
+<body data-chapter="2">
+<main class="content">
+
+  <section class="hero">
+    <div class="eyebrow"><span class="pill accent">Chapter 2</span><span class="pill green">Beginner</span><span class="pill">⏱ 35 min</span></div>
+    <h1>The Math You <span class="grad">Actually Need</span></h1>
+    <p class="lead">You do not need a maths degree to build ML systems. You need four ideas — vectors, matrices, derivatives and probability — held as pictures rather than symbols. This chapter builds those pictures, and you can drag most of them.</p>
+    <ul class="objectives">
+      <li>Read a dot product as “how much do these two things agree?”</li>
+      <li>See a matrix as a machine that transforms vectors, and get its shapes right</li>
+      <li>Understand a derivative as a slope and a gradient as a direction downhill</li>
+      <li>Interpret probabilities, likelihood and cross-entropy loss</li>
+      <li>Debug the error you will hit most: a shape mismatch</li>
+    </ul>
+  </section>
+
+  <h2>Everything is a vector</h2>
+  <p>A <strong>vector</strong> is just an ordered list of numbers. A user is <code>[age, days_since_signup, orders, avg_basket]</code>. A word is a list of 1,536 numbers produced by an embedding model. A 224×224 colour image is 150,528 numbers. Once something is a vector, geometry applies to it — and geometry is where the intuition lives.</p>
+
+  <div class="callout analogy">
+    <div class="ico">🧭</div>
+    <div class="body"><div class="title">Analogy: directions on a map</div>
+      <p>Two vectors pointing the same way are “about the same thing”, even if one is much longer. That is the whole idea behind embedding similarity: <b>direction carries meaning, length carries intensity</b>. “king” and “queen” point in similar directions; “king” and “photosynthesis” do not.</p></div>
+  </div>
+
+  <h3>The dot product: agreement in one number</h3>
+  <p>The dot product multiplies matching components and adds them up: <code>a·b = a₁b₁ + a₂b₂ + …</code>. Big positive means “these agree”, zero means “unrelated”, negative means “they oppose”. Divide by both lengths and you get <strong>cosine similarity</strong>, which ignores magnitude and keeps only direction — the score behind every vector database in Chapter 20.</p>
+
+  <div class="panel">
+    <div class="panel-head"><div class="dots"><i></i><i></i><i></i></div><span class="p-title">Drag the vectors</span><span class="p-tag">Interactive</span></div>
+    <div class="panel-body">
+      <div class="vec-wrap">
+        <div class="svg-scroll">
+          <svg id="vecSvg" class="diagram vec-svg" viewBox="0 0 420 320">
+            <g id="vecGrid"></g>
+            <line class="axis" x1="20" y1="160" x2="400" y2="160"/>
+            <line class="axis" x1="210" y1="20" x2="210" y2="300"/>
+            <path id="vProj" stroke="var(--amber)" stroke-width="8" stroke-linecap="round" opacity=".35" d=""/>
+            <line id="vA" x1="210" y1="160" x2="330" y2="80" stroke="var(--accent)" stroke-width="3.5" marker-end="url(#vah)"/>
+            <line id="vB" x1="210" y1="160" x2="300" y2="220" stroke="var(--accent-2)" stroke-width="3.5" marker-end="url(#vbh)"/>
+            <defs>
+              <marker id="vah" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--accent)"/></marker>
+              <marker id="vbh" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--accent-2)"/></marker>
+            </defs>
+            <circle id="hA" class="handle" cx="330" cy="80" r="11" fill="var(--accent)" opacity=".85"/>
+            <circle id="hB" class="handle" cx="300" cy="220" r="11" fill="var(--accent-2)" opacity=".85"/>
+            <text x="336" y="72" font-size="13" font-weight="700" fill="var(--accent)">a</text>
+            <text x="306" y="238" font-size="13" font-weight="700" fill="var(--accent-2)">b</text>
+          </svg>
+        </div>
+        <div>
+          <div class="readout" id="vecOut"></div>
+          <div class="verdict-box" id="vecVerdict"></div>
+          <div class="controls" style="margin-top:10px">
+            <button class="btn sm" data-preset="same">Same direction</button>
+            <button class="btn sm" data-preset="orth">Orthogonal</button>
+            <button class="btn sm" data-preset="opp">Opposite</button>
+          </div>
+        </div>
+      </div>
+      <div class="legend"><span><i style="background:var(--accent)"></i>vector a</span><span><i style="background:var(--accent-2)"></i>vector b</span><span><i style="background:var(--amber)"></i>projection of a onto b — the dot product, geometrically</span></div>
+    </div>
+  </div>
+
+  <div class="callout tip">
+    <div class="ico">💡</div>
+    <div class="body"><div class="title">Where you'll meet this</div>
+      <p>A single neuron computes <code>dot(weights, inputs) + bias</code>. Attention scores a query against every key with a dot product. A vector index ranks documents by cosine similarity. Learn to read <code>a·b</code> as “<b>how strongly does this pattern fire on this input?</b>” and half of deep learning stops looking like symbols.</p></div>
+  </div>
+
+  <h2>Matrices: many dot products at once</h2>
+  <p>A <strong>matrix</strong> is a stack of vectors, and multiplying by one is doing a whole batch of dot products in a single operation. That's it. A linear layer with 512 inputs and 256 outputs is a 512×256 matrix: each of the 256 output numbers is one dot product against the input.</p>
+
+  <div class="table-wrap">
+    <table class="t">
+      <thead><tr><th>Expression</th><th>Shapes</th><th>Read it as</th></tr></thead>
+      <tbody>
+        <tr><td><code>y = Wx</code></td><td>(256×512)·(512) → (256)</td><td>One example through one layer</td></tr>
+        <tr><td><code>Y = XW</code></td><td>(32×512)·(512×256) → (32×256)</td><td>A batch of 32 examples through one layer</td></tr>
+        <tr><td><code>A = QKᵀ</code></td><td>(T×d)·(d×T) → (T×T)</td><td>Every token scored against every token (attention, Ch 14)</td></tr>
+        <tr><td><code>E[ids]</code></td><td>(V×d) indexed by (T) → (T×d)</td><td>Token ids looked up in an embedding table (Ch 15)</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="callout warn">
+    <div class="ico">📐</div>
+    <div class="body"><div class="title">The rule that causes 80% of your errors</div>
+      <p>For <code>A·B</code>, the <b>inner dimensions must match</b>: (m×<b>k</b>)·(<b>k</b>×n) → (m×n). When a stack trace says <code>mat1 and mat2 shapes cannot be multiplied (32x512 and 256x512)</code>, you transposed something or your batch dimension is in the wrong place. Read shapes left to right and say them out loud.</p></div>
+  </div>
+
+  <div class="panel">
+    <div class="panel-head"><div class="dots"><i></i><i></i><i></i></div><span class="p-title">Shape drill</span><span class="p-tag">Practice</span><span style="margin-left:auto" class="badge" id="shapeScore">0 / 5</span></div>
+    <div class="panel-body" id="shapeGame"></div>
+  </div>
+
+  <h2>Derivatives: which way is downhill?</h2>
+  <p>Training is a search for parameters that make the loss small. The <strong>derivative</strong> tells you the slope of the loss at your current point: if it is positive, moving right increases loss, so move left. A <strong>gradient</strong> is just that slope computed for millions of parameters at once — a vector pointing in the direction of steepest increase, which you then step against.</p>
+
+  <div class="panel">
+    <div class="panel-head"><div class="dots"><i></i><i></i><i></i></div><span class="p-title">Slope of a loss curve</span><span class="p-tag">Interactive</span></div>
+    <div class="panel-body">
+      <div class="svg-scroll"><svg id="slopeSvg" class="diagram curve" viewBox="0 0 640 230"></svg></div>
+      <div class="range-row"><label for="slopeX">Parameter w</label><input type="range" id="slopeX" min="-3" max="3" step="0.02" value="-2.2"><output id="slopeXv"></output></div>
+      <div class="stats">
+        <div class="stat"><div class="k">Loss L(w)</div><div class="v" id="slopeL">–</div></div>
+        <div class="stat acc"><div class="k">Gradient dL/dw</div><div class="v" id="slopeG">–</div></div>
+        <div class="stat good"><div class="k">Step direction</div><div class="v" id="slopeD" style="font-size:16px">–</div></div>
+      </div>
+      <div class="controls"><button class="btn sm primary" id="slopeStep">↓ Take one gradient step</button><button class="btn sm" id="slopeRun">▶ Run 25 steps</button><button class="btn sm ghost" id="slopeReset">↺ Reset</button></div>
+      <p class="small muted" style="margin-top:8px">The update is <code>w ← w − η·dL/dw</code>. Here η = 0.15. Notice the steps get smaller near the bottom automatically — because the gradient itself shrinks.</p>
+    </div>
+  </div>
+
+  <div class="callout tip">
+    <div class="ico">⛰️</div>
+    <div class="body"><div class="title">The fog analogy</div>
+      <p>You're on a hillside in thick fog and want the valley. You can't see the landscape, but you can feel the slope under your feet. So you step downhill, re-feel, step again. That's gradient descent. The <b>learning rate</b> is your stride: too small and you're there all week, too large and you stride straight over the valley onto the opposite slope.</p></div>
+  </div>
+
+  <h3>The chain rule, in one line</h3>
+  <p>Networks are functions of functions: <code>loss(head(block(embed(x))))</code>. The chain rule says the derivative of a composition is the product of the derivatives — so you can compute the gradient for a 100-layer network by multiplying local slopes backwards from the loss. That is <b>backpropagation</b> (Chapter 8), and it is why deep learning is computationally feasible at all.</p>
+
+  <pre class="code"><span class="c"># forward</span>
+z = w * x        <span class="c"># local: dz/dw = x</span>
+a = relu(z)      <span class="c"># local: da/dz = 1 if z &gt; 0 else 0</span>
+L = (a - y)**2   <span class="c"># local: dL/da = 2(a - y)</span>
+
+<span class="c"># backward — multiply the local slopes</span>
+dL/dw = 2(a - y) * (1 if z &gt; 0 else 0) * x</pre>
+
+  <h2>Probability: models output beliefs, not answers</h2>
+  <p>A classifier does not say “spam”. It says <code>P(spam | this email) = 0.93</code>. Everything downstream — thresholds, calibration, expected cost — is probability. Four ideas cover nearly all of it.</p>
+
+  <div class="grid c4">
+    <div class="flip reveal"><div class="flip-inner"><div class="face front"><div class="big">🎲</div><h4>Distribution</h4><small>click to flip</small></div><div class="face back"><div><b>How probability is spread over outcomes.</b> A model's output layer <i>is</i> a distribution: softmax over 50,000 tokens, or one number for a yes/no.</div></div></div></div>
+    <div class="flip reveal"><div class="flip-inner"><div class="face front"><div class="big">📊</div><h4>Expectation</h4><small>click to flip</small></div><div class="face back"><div><b>The average outcome, weighted by probability.</b> Expected cost = P(fraud)×loss − (1−P)×friction. This is how a probability becomes a decision.</div></div></div></div>
+    <div class="flip reveal"><div class="flip-inner"><div class="face front"><div class="big">🔁</div><h4>Conditional / Bayes</h4><small>click to flip</small></div><div class="face back"><div><b>P(A|B) — belief after seeing evidence.</b> Bayes: posterior ∝ likelihood × prior. Rare things stay rare: a 99%-accurate test for a 1-in-10,000 disease is usually wrong when positive.</div></div></div></div>
+    <div class="flip reveal"><div class="flip-inner"><div class="face front"><div class="big">🌀</div><h4>Entropy</h4><small>click to flip</small></div><div class="face back"><div><b>How uncertain a distribution is.</b> Low entropy = confident. Cross-entropy measures how far your predicted distribution is from the true one — the loss for nearly every classifier and every LLM.</div></div></div></div>
+  </div>
+
+  <h3>Cross-entropy: the loss you'll use most</h3>
+  <p>For classification, the loss for one example is <code>−log(p)</code>, where <code>p</code> is the probability your model assigned to the <i>correct</i> answer. Confidently right costs nothing; confidently wrong costs enormously. Drag the slider and watch the asymmetry.</p>
+
+  <div class="panel">
+    <div class="panel-head"><div class="dots"><i></i><i></i><i></i></div><span class="p-title">−log(p): the price of being wrong</span><span class="p-tag">Interactive</span></div>
+    <div class="panel-body">
+      <div class="svg-scroll"><svg id="ceSvg" class="diagram curve" viewBox="0 0 640 230"></svg></div>
+      <div class="range-row"><label for="ceP">Probability assigned to the true class</label><input type="range" id="ceP" min="0.01" max="0.99" step="0.01" value="0.6"><output id="cePv"></output></div>
+      <div class="stats">
+        <div class="stat acc"><div class="k">Cross-entropy loss</div><div class="v" id="ceL">–</div></div>
+        <div class="stat"><div class="k">In “perplexity” terms</div><div class="v" id="cePP">–</div></div>
+        <div class="stat good"><div class="k">Reads as</div><div class="v" id="ceMsg" style="font-size:15px">–</div></div>
+      </div>
+      <p class="small muted" style="margin-top:8px">A language model's <b>perplexity</b> is <code>e^(mean cross-entropy)</code> — roughly “how many equally-likely options is the model effectively choosing between?”. Perplexity 1 means certainty; perplexity 50,000 means it has learned nothing.</p>
+    </div>
+  </div>
+
+  <div class="callout warn">
+    <div class="ico">🧮</div>
+    <div class="body"><div class="title">Why logs are everywhere</div>
+      <p>Probabilities multiply and underflow fast: 1,000 tokens at p=0.5 each is 10⁻³⁰¹. Logs turn multiplication into addition, keep numbers in a sane range, and make gradients well-behaved. Whenever you see <code>logits</code>, <code>log_softmax</code> or <code>logsumexp</code>, that's the reason.</p></div>
+  </div>
+
+  <h2>Linear algebra you'll see in shapes, not symbols</h2>
+  <p>Three more terms show up constantly in ML systems work, and each has a one-line meaning worth carrying.</p>
+
+  <div class="table-wrap">
+    <table class="t">
+      <thead><tr><th>Term</th><th>One-line meaning</th><th>Where it bites</th></tr></thead>
+      <tbody>
+        <tr><td><b>Norm</b> (‖v‖)</td><td>Length of a vector.</td><td>Gradient clipping by global norm; normalizing embeddings so cosine = dot (Ch 9, 20)</td></tr>
+        <tr><td><b>Rank</b></td><td>How many independent directions a matrix really uses.</td><td>LoRA works because weight <i>updates</i> are close to low-rank (Ch 17)</td></tr>
+        <tr><td><b>Eigen / singular values</b></td><td>The stretch factors of a transformation.</td><td>PCA, whitening, and why some initializations explode (Ch 9)</td></tr>
+        <tr><td><b>Softmax</b></td><td>Turns any vector of scores into a probability distribution.</td><td>Classifier heads, attention weights, MoE routing (Ch 14, 24)</td></tr>
+        <tr><td><b>Variance</b></td><td>How spread out values are.</td><td>Initialization schemes and normalization layers exist to keep it near 1 (Ch 9)</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="callout danger"><div class="ico">⚠️</div><div class="body"><div class="title">Common mistakes</div>
+    <ul class="mb0">
+      <li><b>Comparing raw dot products across vectors of different lengths.</b> A long, mediocre vector can beat a short, perfect one. Normalize, or use cosine, when you mean “similar”.</li>
+      <li><b>Feeding probabilities where logits are expected.</b> <code>CrossEntropyLoss</code> in most frameworks applies its own softmax; passing softmaxed values applies it twice and silently kills training.</li>
+      <li><b>Averaging probabilities in log space or vice versa.</b> The mean of logs is a geometric mean; mixing the two quietly changes what you are measuring.</li>
+      <li><b>Assuming a high-accuracy test means a high-probability positive.</b> Base rates dominate: with a 1-in-10,000 event and a 1% false-positive rate, most positives are false. Say it in expected counts, not percentages.</li>
+    </ul></div></div>
+
+  <div class="callout interview"><div class="ico">🎤</div><div class="body"><div class="title">Interview drill</div>
+    <p class="small" style="margin:10px 0 0"><b>Warm-up:</b> Explain cosine similarity to a product manager in two sentences, and say when it is the wrong choice.</p>
+    <details class="ans"><summary>How a strong answer sounds</summary><div>It measures whether two items point the same way in feature space, ignoring how big they are — so a short document and a long one about the same topic score as similar. It's the wrong choice when magnitude carries meaning (counts, spend, intensity) or when embeddings are already normalized and the extra division just costs compute — in which case a plain dot product is identical and faster.</div></details>
+    <p class="small" style="margin:10px 0 0"><b>Numeracy:</b> A fraud model outputs P(fraud)=0.02 for a £500 transaction. Blocking a legitimate customer costs you about £8 of goodwill; letting fraud through costs the full £500. Block or allow?</p>
+    <details class="ans"><summary>How a strong answer sounds</summary><div>Expected cost of allowing = 0.02 × 500 = £10. Expected cost of blocking = 0.98 × 8 ≈ £7.84. Block — but only just, so the decision is sensitive to calibration: if the model's 2% is really 1.5%, allowing wins. This is exactly why calibration (Chapter 7) matters more than raw AUC when a probability feeds a monetary decision, and why thresholds get tuned per amount band rather than set globally.</div></details>
+  </div></div>
+
+  <div class="takeaways">
+    <h3>🧠 Key takeaways</h3>
+    <ul>
+      <li>A dot product measures agreement; cosine similarity measures agreement ignoring magnitude.</li>
+      <li>A matrix multiply is a batch of dot products — get the inner dimensions to match and most bugs vanish.</li>
+      <li>A gradient points uphill; training steps against it, with the learning rate as stride length.</li>
+      <li>Cross-entropy <code>−log(p)</code> punishes confident mistakes brutally and is the default classification loss.</li>
+      <li>Model outputs are probabilities; turning them into decisions requires expected cost, not just a threshold.</li>
+    </ul>
+  </div>
+
+  <div class="quiz-wrap">
+    <h2>Check your understanding</h2>
+    <div class="quiz-score"></div>
+
+    <div class="quiz" data-answer="1">
+      <p class="q">Two embedding vectors have a dot product of 0. What does that tell you?</p>
+      <div class="opts">
+        <button class="opt">They are identical</button>
+        <button class="opt">They are orthogonal — no shared direction</button>
+        <button class="opt">They point in opposite directions</button>
+        <button class="opt">At least one of them is the zero vector</button>
+      </div>
+      <div class="explain">Zero dot product means a 90° angle: the vectors share no component. Opposite directions give a large <i>negative</i> dot product.</div>
+    </div>
+
+    <div class="quiz" data-answer="2">
+      <p class="q">You multiply a batch <code>X</code> of shape (64, 300) by weights <code>W</code>. What shape must <code>W</code> have to produce (64, 128)?</p>
+      <div class="opts">
+        <button class="opt">(64, 128)</button>
+        <button class="opt">(128, 300)</button>
+        <button class="opt">(300, 128)</button>
+        <button class="opt">(128, 64)</button>
+      </div>
+      <div class="explain">Inner dimensions must match: (64×<b>300</b>)·(<b>300</b>×128) → (64×128). The batch dimension passes through untouched.</div>
+    </div>
+
+    <div class="quiz" data-answer="0">
+      <p class="q">The gradient of the loss with respect to a weight is +4.0 and the learning rate is 0.1. What is the update?</p>
+      <div class="opts">
+        <button class="opt">Decrease the weight by 0.4</button>
+        <button class="opt">Increase the weight by 0.4</button>
+        <button class="opt">Decrease the weight by 4.0</button>
+        <button class="opt">Leave it — the gradient is positive, so loss is already minimal</button>
+      </div>
+      <div class="explain"><code>w ← w − η·g = w − 0.1×4.0</code>. A positive gradient means increasing the weight increases loss, so you step the other way.</div>
+    </div>
+
+    <div class="quiz" data-answer="3">
+      <p class="q">Your classifier assigns probability 0.01 to the correct class. Roughly what is the cross-entropy loss for that example?</p>
+      <div class="opts">
+        <button class="opt">0.01</button>
+        <button class="opt">0.99</button>
+        <button class="opt">1.0</button>
+        <button class="opt">About 4.6</button>
+      </div>
+      <div class="explain"><code>−ln(0.01) ≈ 4.6</code>. Confidently wrong is enormously expensive — which is why a few mislabelled examples can dominate a training batch.</div>
+    </div>
+
+    <div class="quiz" data-answer="1">
+      <p class="q">A disease affects 1 in 10,000 people. A test has a 1% false-positive rate and catches every true case. You test positive. Roughly what is the chance you have it?</p>
+      <div class="opts">
+        <button class="opt">About 99%</button>
+        <button class="opt">About 1%</button>
+        <button class="opt">About 50%</button>
+        <button class="opt">About 10%</button>
+      </div>
+      <div class="explain">Per million people: 100 true cases, ~10,000 false positives. So ≈100/10,100 ≈ 1%. Base rates dominate — the same arithmetic explains why a “99% accurate” fraud or moderation model can still drown reviewers in false alarms.</div>
+    </div>
+  </div>
+</main>
+<script src="assets/app.js"></script>
+<script>
+(function(){
+  const { $, $$, clamp } = ML;
+
+  /* ---------------- vector playground ---------------- */
+  const svg = $('#vecSvg'), O = { x: 210, y: 160 }, S = 40;  // 1 unit = 40px
+  let A = { x: 3, y: 2 }, B = { x: 2.25, y: -1.5 };
+  // grid
+  let g = '';
+  for (let i = -4; i <= 4; i++) {
+    g += `<line class="grid" x1="${O.x + i * S}" y1="20" x2="${O.x + i * S}" y2="300"/>`;
+    if (O.y + i * S > 20 && O.y + i * S < 300) g += `<line class="grid" x1="20" y1="${O.y + i * S}" x2="400" y2="${O.y + i * S}"/>`;
+  }
+  $('#vecGrid').innerHTML = g;
+
+  const toPx = (v) => ({ x: O.x + v.x * S, y: O.y - v.y * S });
+  const toUnit = (px, py) => ({ x: clamp((px - O.x) / S, -4.5, 4.5), y: clamp((O.y - py) / S, -3.4, 3.4) });
+
+  function drawVec() {
+    const pa = toPx(A), pb = toPx(B);
+    $('#vA').setAttribute('x2', pa.x); $('#vA').setAttribute('y2', pa.y);
+    $('#vB').setAttribute('x2', pb.x); $('#vB').setAttribute('y2', pb.y);
+    $('#hA').setAttribute('cx', pa.x); $('#hA').setAttribute('cy', pa.y);
+    $('#hB').setAttribute('cx', pb.x); $('#hB').setAttribute('cy', pb.y);
+
+    const dot = A.x * B.x + A.y * B.y;
+    const la = Math.hypot(A.x, A.y), lb = Math.hypot(B.x, B.y);
+    const cos = la && lb ? dot / (la * lb) : 0;
+    const ang = Math.acos(clamp(cos, -1, 1)) * 180 / Math.PI;
+
+    // projection of a onto b
+    const k = lb ? dot / (lb * lb) : 0;
+    const pp = toPx({ x: B.x * k, y: B.y * k });
+    $('#vProj').setAttribute('d', `M${O.x},${O.y} L${pp.x},${pp.y}`);
+
+    $('#vecOut').innerHTML =
+      `a = <b>[${A.x.toFixed(2)}, ${A.y.toFixed(2)}]</b><br>` +
+      `b = <b>[${B.x.toFixed(2)}, ${B.y.toFixed(2)}]</b><br>` +
+      `‖a‖ = ${la.toFixed(2)} &nbsp; ‖b‖ = ${lb.toFixed(2)}<br>` +
+      `a·b <span class="big" style="color:var(--accent)">${dot.toFixed(2)}</span>` +
+      `cosine <b>${cos.toFixed(3)}</b> &nbsp; angle <b>${ang.toFixed(0)}°</b>`;
+    const v = $('#vecVerdict');
+    if (cos > 0.85) v.innerHTML = '🟢 <b>Nearly identical direction.</b> In a vector search these two would be a top match for each other.';
+    else if (cos > 0.3) v.innerHTML = '🔵 <b>Related.</b> Shared topic, different emphasis — typical of two documents about the same subject.';
+    else if (cos > -0.3) v.innerHTML = '⚪ <b>Roughly unrelated.</b> Near-orthogonal vectors carry independent information. High-dimensional spaces are mostly like this.';
+    else v.innerHTML = '🔴 <b>Opposed.</b> Negative similarity — these actively disagree along the same axis.';
+  }
+  function drag(handle, target) {
+    const el = $(handle);
+    el.addEventListener('pointerdown', (e) => {
+      el.setPointerCapture(e.pointerId);
+      const move = (ev) => {
+        const pt = svg.createSVGPoint(); pt.x = ev.clientX; pt.y = ev.clientY;
+        const p = pt.matrixTransform(svg.getScreenCTM().inverse());
+        const u = toUnit(p.x, p.y);
+        target.x = u.x; target.y = u.y;
+        drawVec();
+      };
+      const up = () => { el.removeEventListener('pointermove', move); el.removeEventListener('pointerup', up); };
+      el.addEventListener('pointermove', move); el.addEventListener('pointerup', up);
+    });
+  }
+  drag('#hA', A); drag('#hB', B);
+  $$('[data-preset]').forEach(b => b.onclick = () => {
+    const p = b.dataset.preset;
+    A = { x: 3, y: 2 };
+    B = p === 'same' ? { x: 2.1, y: 1.4 } : p === 'orth' ? { x: 1.6, y: -2.4 } : { x: -2.7, y: -1.8 };
+    drawVec();
+  });
+  drawVec();
+
+  /* ---------------- slope explorer ---------------- */
+  const L = (w) => 0.6 * w * w + 0.15 * w * w * w * 0 + 0.8 * Math.cos(2.2 * w) + 1.2;
+  const dL = (w) => 1.2 * w - 1.76 * Math.sin(2.2 * w);
+  const sSvg = $('#slopeSvg');
+  const SX = (w) => 60 + (w + 3.2) * 90, SY = (l) => 200 - l * 22;
+  function drawSlope(w) {
+    let path = '';
+    for (let x = -3.2; x <= 3.2; x += 0.05) path += (path ? 'L' : 'M') + SX(x).toFixed(1) + ',' + SY(L(x)).toFixed(1) + ' ';
+    const g = dL(w), px = SX(w), py = SY(L(w));
+    const dx = 55, slopePx = -g * 22 / 90 * dx;
+    sSvg.innerHTML =
+      `<line class="ax" x1="40" y1="200" x2="620" y2="200"/><line class="ax" x1="40" y1="20" x2="40" y2="200"/>` +
+      `<text x="600" y="218">w</text><text x="12" y="30">loss</text>` +
+      `<path class="ln" d="${path}"/>` +
+      `<line class="tan" x1="${px - dx}" y1="${py - slopePx}" x2="${px + dx}" y2="${py + slopePx}"/>` +
+      `<circle class="dot" cx="${px}" cy="${py}" r="7"/>` +
+      `<text x="${px - 14}" y="${py - 16}" style="fill:var(--pink);font-weight:700">w</text>`;
+    $('#slopeL').textContent = L(w).toFixed(3);
+    $('#slopeG').textContent = (g >= 0 ? '+' : '') + g.toFixed(3);
+    $('#slopeD').innerHTML = Math.abs(g) < 0.02 ? '🎯 at a minimum' : g > 0 ? '← move left' : 'move right →';
+    $('#slopeXv').textContent = w.toFixed(2);
+  }
+  const wIn = $('#slopeX');
+  const readW = () => +wIn.value;
+  wIn.addEventListener('input', () => drawSlope(readW()));
+  $('#slopeStep').onclick = () => { const w = readW(); wIn.value = clamp(w - 0.15 * dL(w), -3.2, 3.2); drawSlope(readW()); };
+  $('#slopeReset').onclick = () => { wIn.value = -2.2; drawSlope(readW()); };
+  $('#slopeRun').onclick = async () => {
+    for (let i = 0; i < 25; i++) {
+      const w = readW();
+      wIn.value = clamp(w - 0.15 * dL(w), -3.2, 3.2);
+      drawSlope(readW());
+      await ML.sleep(70);
+    }
+    ML.toast('Converged to a local minimum — note it is not always the global one');
+  };
+  drawSlope(readW());
+
+  /* ---------------- cross-entropy curve ---------------- */
+  const ceSvg = $('#ceSvg');
+  function drawCE(p) {
+    const X = (q) => 60 + q * 550, Y = (l) => 200 - Math.min(l, 4.8) * 37;
+    let path = '';
+    for (let q = 0.01; q <= 1; q += 0.005) path += (path ? 'L' : 'M') + X(q).toFixed(1) + ',' + Y(-Math.log(q)).toFixed(1) + ' ';
+    const l = -Math.log(p);
+    ceSvg.innerHTML =
+      `<line class="ax" x1="55" y1="200" x2="620" y2="200"/><line class="ax" x1="55" y1="15" x2="55" y2="200"/>` +
+      [0.25, 0.5, 0.75, 1].map(q => `<line class="gridl" x1="${X(q)}" y1="15" x2="${X(q)}" y2="200"/><text x="${X(q) - 10}" y="216">${q}</text>`).join('') +
+      `<text x="12" y="26">−log p</text>` +
+      `<path class="ln" d="${path}"/>` +
+      `<line class="tan" x1="${X(p)}" y1="${Y(l)}" x2="${X(p)}" y2="200"/>` +
+      `<circle class="dot" cx="${X(p)}" cy="${Y(l)}" r="7"/>` +
+      `<text x="${X(p) + 10}" y="${Math.max(24, Y(l) - 8)}" style="fill:var(--pink);font-weight:700">${l.toFixed(2)}</text>`;
+    $('#cePv').textContent = p.toFixed(2);
+    $('#ceL').textContent = l.toFixed(3);
+    $('#cePP').textContent = Math.exp(l).toFixed(1);
+    $('#ceMsg').textContent = p > 0.9 ? '😌 confident & right — almost free' : p > 0.5 ? '🙂 right but unsure' : p > 0.2 ? '😬 probably wrong' : '🔥 confidently wrong — huge gradient';
+  }
+  const ceIn = $('#ceP');
+  ceIn.addEventListener('input', () => drawCE(+ceIn.value));
+  drawCE(+ceIn.value);
+
+  /* ---------------- shape drill ---------------- */
+  const SHAPES = [
+    ['X (32, 784) · W (784, 128) = ?', ['(32, 128)', '(784, 128)', '(32, 784)', 'error'], 0, 'Inner dims 784 match and cancel; batch 32 and output 128 remain.'],
+    ['X (16, 512) · W (256, 512) = ?', ['(16, 256)', '(16, 512)', '(512, 256)', 'error'], 3, 'Inner dims are 512 and 256 — they do not match. You need W transposed: (512, 256).'],
+    ['Q (8, 64) · Kᵀ (64, 8) = ?', ['(8, 8)', '(64, 64)', '(8, 64)', 'error'], 0, 'This is the attention score matrix: every one of 8 tokens scored against all 8.'],
+    ['Embedding table (50000, 768), input ids (4, 1024) → ?', ['(4, 1024, 768)', '(50000, 768)', '(4, 768)', 'error'], 0, 'Each id becomes a 768-dim row, so you gain a dimension: batch × sequence × model width.'],
+    ['h (32, 128) + b (128,) = ?', ['(32, 128)', '(128, 128)', 'error', '(32,)'], 0, 'Broadcasting: the bias is added to every row of the batch. This is why biases are shaped like the output, not the batch.'],
+  ];
+  const sg = $('#shapeGame'); let sc = 0, sdone = 0;
+  SHAPES.forEach(([q, opts, ans, why]) => {
+    const d = document.createElement('div'); d.className = 'shape-q';
+    d.innerHTML = `<div>${q}</div><div class="opts">${opts.map((o, i) => `<button data-i="${i}">${o}</button>`).join('')}</div><div class="note"></div>`;
+    d.querySelectorAll('button').forEach(b => b.onclick = () => {
+      if (d.dataset.done) return; d.dataset.done = 1; sdone++;
+      const ok = +b.dataset.i === ans; if (ok) sc++;
+      d.classList.add(ok ? 'right' : 'wrongc');
+      d.querySelector('.note').innerHTML = (ok ? '✅ ' : `❌ It is <b>${opts[ans]}</b> — `) + why;
+      $('#shapeScore').textContent = `${sc} / ${SHAPES.length}`;
+      if (sdone === SHAPES.length) ML.toast(sc === SHAPES.length ? 'Shapes mastered 📐' : `${sc}/${SHAPES.length} — shapes take practice`);
+    });
+    sg.appendChild(d);
+  });
+})();
+</script>
+</body>
+</html>

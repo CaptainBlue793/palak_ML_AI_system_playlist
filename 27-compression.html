@@ -1,0 +1,373 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Making Models Cheap &amp; Fast</title>
+<link rel="stylesheet" href="assets/style.css">
+<script>try{var t=JSON.parse(localStorage.getItem('ml-theme'));if(t)document.documentElement.setAttribute('data-theme',t)}catch(e){}</script>
+<style>
+  .q-svg, .spec-svg { width:100% }
+  .q-svg { height:210px }
+  .q-svg .bar { fill:var(--accent); opacity:.8 }
+  .q-svg .lvl { stroke:var(--pink); stroke-width:1; stroke-dasharray:3 3 }
+  .q-svg .out { fill:var(--red) }
+  .q-svg text, .spec-svg text { font-size:10.5px; fill:var(--muted); font-family:var(--mono) }
+  .spec-svg { height:170px }
+  .spec-svg .tok { rx:4 }
+  .spec-svg .acc { fill:var(--green) }
+  .spec-svg .rej { fill:var(--red-soft); stroke:var(--red) }
+  .spec-svg .draft { fill:var(--accent-2-soft); stroke:var(--accent-2) }
+  .ladder { display:grid; gap:8px }
+  .ladder .r { display:grid; grid-template-columns:150px 1fr; gap:12px; align-items:center; padding:10px 12px; border-radius:12px; background:var(--surface-2); border:1px solid var(--border); font-size:13.5px }
+  .ladder .r b { font-family:var(--mono) }
+</style>
+</head>
+<body data-chapter="27">
+<main class="content">
+
+  <section class="hero">
+    <div class="eyebrow"><span class="pill accent">Chapter 27</span><span class="pill">Advanced</span><span class="pill">⏱ 45 min</span></div>
+    <h1>Making Models <span class="grad">Cheap &amp; Fast</span></h1>
+    <p class="lead">The same answer, for a fifth of the money. Quantization, distillation, pruning and speculative decoding each attack a different part of the bill — and each trades away something you must measure rather than assume.</p>
+    <ul class="objectives">
+      <li>Quantize weights and activations, and know what breaks</li>
+      <li>Distil a large model into a small one that's good enough</li>
+      <li>Explain speculative decoding and estimate its speedup</li>
+      <li>Use cascades and routing so most traffic never touches the big model</li>
+      <li>Build a regression suite that catches compression damage</li>
+    </ul>
+  </section>
+
+  <h2>Know which cost you're attacking</h2>
+  <div class="table-wrap">
+    <table class="t">
+      <thead><tr><th>Technique</th><th>Attacks</th><th>Typical gain</th><th>Risk</th></tr></thead>
+      <tbody>
+        <tr><td><b>Weight quantization</b></td><td>Memory &amp; bandwidth (decode is memory-bound)</td><td>2–4× smaller, 1.5–3× faster decode</td><td>Small quality loss, task-dependent</td></tr>
+        <tr><td><b>Activation/KV quantization</b></td><td>KV cache → concurrency</td><td>~2× more concurrent requests</td><td>More sensitive than weights; measure</td></tr>
+        <tr><td><b>Distillation</b></td><td>Parameter count</td><td>5–20× smaller for a narrow task</td><td>Loses generality; needs training data</td></tr>
+        <tr><td><b>Pruning / sparsity</b></td><td>Parameters &amp; FLOPs</td><td>1.5–2× with structured 2:4</td><td>Unstructured sparsity rarely speeds anything up</td></tr>
+        <tr><td><b>Speculative decoding</b></td><td>Sequential decode latency</td><td>1.5–3× faster, <b>identical outputs</b></td><td>Extra memory for the draft; poor on hard text</td></tr>
+        <tr><td><b>Cascades / routing</b></td><td>How often the big model runs at all</td><td>Often the largest single win</td><td>Needs a reliable difficulty signal</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h2>Quantization</h2>
+  <p>Store weights in fewer bits. A tensor is divided into groups; each group gets a scale (and maybe a zero point) so its values map onto the available levels. Fewer bits means fewer levels, and the error shows up wherever the distribution has long tails.</p>
+
+  <div class="panel">
+    <div class="panel-head"><div class="dots"><i></i><i></i><i></i></div><span class="p-title">Quantization explorer</span><span class="p-tag">Interactive</span></div>
+    <div class="panel-body">
+      <div class="range-row"><label for="qBits">Bits per weight</label><input type="range" id="qBits" min="2" max="16" step="1" value="4"><output id="qBitsV"></output></div>
+      <div class="range-row"><label for="qGroup">Group size (weights per scale)</label><input type="range" id="qGroup" min="16" max="1024" step="16" value="128"><output id="qGroupV"></output></div>
+      <div class="seg" id="qOut"><button data-v="none" class="active">Naive (no outlier handling)</button><button data-v="keep">Keep outlier channels in fp16</button></div>
+      <div class="svg-scroll"><svg id="qSvg" class="diagram q-svg" viewBox="0 0 640 210"></svg></div>
+      <div class="stats">
+        <div class="stat acc"><div class="k">Model size (7B)</div><div class="v" id="qSize" style="font-size:18px">–</div></div>
+        <div class="stat"><div class="k">Quantization error</div><div class="v" id="qErr" style="font-size:18px">–</div></div>
+        <div class="stat good"><div class="k">Decode speedup</div><div class="v" id="qSpeed" style="font-size:18px">–</div></div>
+        <div class="stat warn"><div class="k">Expected quality</div><div class="v" id="qQual" style="font-size:18px">–</div></div>
+      </div>
+      <div class="callout" id="qInfo" style="margin-top:12px"><div class="ico">🗜️</div><div class="body"><p style="margin:0"></p></div></div>
+    </div>
+  </div>
+
+  <div class="callout warn">
+    <div class="ico">📈</div>
+    <div class="body"><div class="title">Outliers are the whole problem</div>
+      <p>Transformer activations contain a few channels with values 10–100× larger than the rest. A single scale per tensor then has to cover that range, and every ordinary weight collapses into a couple of levels. Every good quantization method is an answer to this: smaller groups, per-channel scales, keeping outlier channels in high precision (LLM.int8), smoothing the scale between activations and weights (SmoothQuant), or using calibration data to minimise output error layer by layer (GPTQ, AWQ).</p></div>
+  </div>
+
+  <div class="ladder" style="margin-top:14px">
+    <div class="r"><b>fp16 / bf16</b><span>The baseline. 2 bytes per weight, no quality question to answer.</span></div>
+    <div class="r"><b>fp8</b><span>Native on recent GPUs, ~2× smaller with negligible loss for most models. Increasingly the default for serving.</span></div>
+    <div class="r"><b>int8 weight-only</b><span>Reliable, ~4× smaller than fp32, quality loss usually under a point. A safe production default.</span></div>
+    <div class="r"><b>int4 (GPTQ / AWQ)</b><span>~8× smaller; excellent for single-user latency, where memory bandwidth is everything. Measure per task — reasoning and code suffer first.</span></div>
+    <div class="r"><b>2–3 bit</b><span>Research territory. Large quality loss without aggressive compensation; rarely worth it in production.</span></div>
+    <div class="r"><b>QAT</b><span>Train with quantization simulated in the forward pass. Best quality at low bit widths, and it costs a training run.</span></div>
+  </div>
+
+  <h2>Distillation</h2>
+  <p>Train a small <b>student</b> to imitate a large <b>teacher</b>. Crucially, the student learns from the teacher's full output distribution — its “soft labels” carry far more information than a hard answer, including how the teacher ranked the alternatives it rejected.</p>
+
+  <div class="grid c3">
+    <div class="card feature reveal"><div class="f-ico">🗣️</div><h4>Response distillation</h4><p>Generate teacher outputs for your real traffic, then fine-tune the student on them. Simple, effective, and the standard approach for narrowing a general model to your task.</p></div>
+    <div class="card feature reveal"><div class="f-ico" style="background:var(--accent-2-soft)">📊</div><h4>Logit / KL distillation</h4><p>Match the teacher's full next-token distribution with a KL loss. More sample-efficient, but needs access to logits — so usually only for models you host.</p></div>
+    <div class="card feature reveal"><div class="f-ico" style="background:var(--green-soft)">🧠</div><h4>Reasoning distillation</h4><p>Have the teacher produce step-by-step traces, keep only the ones that reach verified-correct answers, and train the student on those. Surprisingly strong on maths and code.</p></div>
+  </div>
+
+  <div class="callout tip">
+    <div class="ico">🎯</div>
+    <div class="body"><div class="title">Distil on your own traffic, not a benchmark</div>
+      <p>The student only needs to be good at what your users actually ask. Sample real production prompts (with permission and PII handling), generate teacher answers, filter them with a verifier or a judge, and train. A 3B student trained on 50k of your real queries routinely matches a 70B model <i>on that distribution</i> — and is no substitute for it anywhere else. Keep the big model as a fallback for the tail.</p></div>
+  </div>
+
+  <h2>Pruning and sparsity</h2>
+  <p>Remove weights that contribute least. The catch is that hardware doesn't speed up for randomly scattered zeros — you save memory but not time.</p>
+
+  <div class="split">
+    <div class="card"><h4 class="mt0">Unstructured</h4><p class="small mb0">Zero out the smallest weights anywhere. High sparsity is achievable with little quality loss, but you need specialised kernels to see any speedup, and usually you don't.</p></div>
+    <div class="card"><h4 class="mt0">Structured (2:4, heads, layers)</h4><p class="small mb0">Remove whole heads, layers or a fixed pattern (2 of every 4 weights) that tensor cores support natively. Real 1.5–2× gains, larger quality cost, and usually a recovery fine-tune afterwards.</p></div>
+  </div>
+
+  <h2>Speculative decoding</h2>
+  <p>Decode is sequential and memory-bound, so the GPU is idle most of the step. A small <b>draft</b> model proposes k tokens cheaply; the big model then verifies all k <i>in a single forward pass</i> — the same cost as producing one token. Accepted tokens are kept; the first rejection resets. The output distribution is provably identical to the target model's.</p>
+
+  <div class="panel">
+    <div class="panel-head"><div class="dots"><i></i><i></i><i></i></div><span class="p-title">Speculative decoding calculator</span><span class="p-tag">Interactive</span></div>
+    <div class="panel-body">
+      <div class="range-row"><label for="spK">Draft tokens per round (k)</label><input type="range" id="spK" min="1" max="12" step="1" value="4"><output id="spKV"></output></div>
+      <div class="range-row"><label for="spAcc">Per-token acceptance rate</label><input type="range" id="spAcc" min="0.2" max="0.95" step="0.05" value="0.75"><output id="spAccV"></output></div>
+      <div class="range-row"><label for="spCost">Draft model cost (% of target)</label><input type="range" id="spCost" min="2" max="40" step="1" value="10"><output id="spCostV"></output></div>
+      <div class="svg-scroll"><svg id="spSvg" class="diagram spec-svg" viewBox="0 0 640 170"></svg></div>
+      <div class="stats">
+        <div class="stat acc"><div class="k">Expected tokens per round</div><div class="v" id="spTok" style="font-size:18px">–</div></div>
+        <div class="stat good"><div class="k">Speedup</div><div class="v" id="spSpeed" style="font-size:18px">–</div></div>
+        <div class="stat"><div class="k">Output quality change</div><div class="v" id="spQual" style="font-size:16px">none — identical distribution</div></div>
+      </div>
+      <div class="callout" id="spInfo" style="margin-top:12px"><div class="ico">⚡</div><div class="body"><p style="margin:0"></p></div></div>
+      <p class="small muted">Acceptance depends on the text: boilerplate, code and formatting are highly predictable (0.8–0.9), while dense reasoning is not (0.4–0.6). Variants such as Medusa or EAGLE attach extra prediction heads to the target model itself, removing the separate draft model entirely.</p>
+    </div>
+  </div>
+
+  <h2>Cascades and routing: the biggest lever</h2>
+  <p>Most production traffic is easy. Running every request through your largest model is usually the most expensive design decision in the system.</p>
+
+  <pre class="code">1. cheap classifier / heuristic  → is this simple?
+2. small model answers            → confidence or verifier check
+3. if unsure, escalate to big     → the expensive path, now rare
+
+<span class="c"># 70% handled by the small model at 1/15th the cost</span>
+<span class="c"># blended cost ≈ 0.7·(1/15) + 0.3·1 ≈ 0.35× the all-big baseline</span></pre>
+
+  <div class="callout warn">
+    <div class="ico">🎚️</div>
+    <div class="body"><div class="title">The escalation signal is the hard part</div>
+      <p>Routing only works if you can tell, cheaply and before answering, that a request is hard — or tell afterwards that the cheap answer is unreliable. Options: a small trained classifier on the prompt, the small model's own confidence (weak but usable), a verifier (unit tests, a schema check, a retrieval-support check), or a judge model on a sample. Measure the <b>escalation rate and the quality of the non-escalated answers</b>, or you're silently shipping the cheap model's mistakes.</p></div>
+  </div>
+
+  <h2>Measuring the damage</h2>
+  <p>Every compression technique is a quality change. Treat it exactly like a model change (Chapters 33, 35):</p>
+
+  <div class="table-wrap">
+    <table class="t">
+      <thead><tr><th>Check</th><th>Why</th></tr></thead>
+      <tbody>
+        <tr><td><b>Task-specific eval set</b></td><td>Aggregate benchmarks hide the regression that matters to your users</td></tr>
+        <tr><td><b>Per-capability slices</b></td><td>Quantization hits reasoning, long-context and code before it hits chat</td></tr>
+        <tr><td><b>Long-context probe</b></td><td>KV quantization degrades with context length — test at your maximum, not at 1k</td></tr>
+        <tr><td><b>Non-English</b></td><td>Low-resource languages degrade first and are least likely to be in your eval set</td></tr>
+        <tr><td><b>Output format compliance</b></td><td>Small models break JSON contracts more often — measure parse failures</td></tr>
+        <tr><td><b>Side-by-side in production</b></td><td>Shadow traffic, then a canary with a quality guardrail (Chapter 33)</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="callout danger"><div class="ico">⚠️</div><div class="body"><div class="title">Common mistakes</div>
+    <ul class="mb0">
+      <li><b>Accepting a vendor's “no quality loss”.</b> It means no loss on <i>their</i> benchmark; run yours.</li>
+      <li><b>Quantizing everything uniformly.</b> Embedding, first/last layers and outlier channels usually need higher precision.</li>
+      <li><b>Expecting speedups from unstructured sparsity.</b> Without matching kernels, scattered zeros save memory and no time.</li>
+      <li><b>Distilling only on benchmark data.</b> The student ends up good at the benchmark and weak on your traffic.</li>
+      <li><b>Using speculative decoding at very large batch sizes.</b> It helps most when you're memory-bound; at high batch the GPU is already busy and the draft is overhead.</li>
+      <li><b>Compressing before measuring.</b> Establish the quality baseline and the cost baseline first, or you can't tell whether the trade was good.</li>
+    </ul></div></div>
+
+  <div class="callout interview"><div class="ico">🎤</div><div class="body"><div class="title">Interview drill</div>
+    <p class="small" style="margin:10px 0 0"><b>Warm-up:</b> Why does int4 weight quantization speed up single-user decoding so much?</p>
+    <details class="ans"><summary>How a strong answer sounds</summary><div>Because decoding at batch 1 is memory-bandwidth bound: every step reads all the weights from HBM to produce one token, so time is essentially bytes-moved divided by bandwidth. Quartering the bytes roughly quarters that time. It does not help much at large batch, where the weight read is amortised across many sequences and the kernel is closer to compute-bound — which is exactly why quantization is a bigger win for interactive single-stream latency than for bulk throughput.</div></details>
+    <p class="small" style="margin:10px 0 0"><b>Deeper:</b> Your serving bill is $180k/month for a 70B model. Where do you start?</p>
+    <details class="ans"><summary>How a strong answer sounds</summary><div>Measure first: the split between prefill and decode tokens, the distribution of request difficulty, and the prefix-cache hit rate. Then in order of expected payoff: (1) routing — if 60–70% of traffic is simple, a distilled small model plus escalation cuts the bill more than any kernel work; (2) prompt-caching and context trimming, which reduce prefill directly; (3) fp8 or int8 weights and a quantized KV cache, which raise concurrency per GPU; (4) speculative decoding for the interactive path; (5) batching and scheduling tuning. Each step ships behind a quality guardrail with a task-specific eval and a canary, and I'd track cost per successful request rather than cost per token — the metric that rewards not calling the big model at all.</div></details>
+  </div></div>
+
+  <div class="takeaways">
+    <h3>🧠 Key takeaways</h3>
+    <ul>
+      <li>Match the technique to the bottleneck: bandwidth (quantization), parameters (distillation), sequential latency (speculation), volume (routing).</li>
+      <li>Quantization quality is decided by outlier handling and group size, not just bit width.</li>
+      <li>Distillation on your own traffic gives large models' quality on your distribution — and nowhere else.</li>
+      <li>Speculative decoding is free quality: identical outputs, 1.5–3× faster when memory-bound.</li>
+      <li>Cascades usually beat every micro-optimisation; the hard part is a trustworthy escalation signal.</li>
+    </ul>
+  </div>
+
+  <div class="quiz-wrap">
+    <h2>Check your understanding</h2>
+    <div class="quiz-score"></div>
+
+    <div class="quiz" data-answer="2">
+      <p class="q">Why does speculative decoding not change output quality?</p>
+      <div class="opts">
+        <button class="opt">Because the draft model is trained on the same data</button>
+        <button class="opt">Because it only runs when confidence is high</button>
+        <button class="opt">Because the target model verifies each token and rejects any that don't match its own distribution</button>
+        <button class="opt">It does change quality slightly</button>
+      </div>
+      <div class="explain">The acceptance test is constructed so the resulting samples come from exactly the target model's distribution. The draft only proposes; the target decides.</div>
+    </div>
+
+    <div class="quiz" data-answer="0">
+      <p class="q">What makes transformer weights hard to quantize to very low bit widths?</p>
+      <div class="opts">
+        <button class="opt">A few outlier channels with much larger magnitudes dominate the scale</button>
+        <button class="opt">The weights are all identical</button>
+        <button class="opt">GPUs don't support integer arithmetic</button>
+        <button class="opt">Attention requires floating point</button>
+      </div>
+      <div class="explain">One shared scale must cover the outliers, crushing everything else into a couple of levels. Per-group scales, outlier isolation and calibration-based methods all attack this.</div>
+    </div>
+
+    <div class="quiz" data-answer="3">
+      <p class="q">You prune 60% of weights unstructured and see no speedup. Why?</p>
+      <div class="opts">
+        <button class="opt">The pruning didn't take effect</button>
+        <button class="opt">You need to retrain</button>
+        <button class="opt">Sparsity only helps at large batch sizes</button>
+        <button class="opt">Dense kernels still multiply the zeros — scattered sparsity needs special hardware/kernels</button>
+      </div>
+      <div class="explain">Memory falls if stored sparsely, but the matmul is unchanged. Structured patterns like 2:4, which tensor cores accelerate natively, are what produce real speedups.</div>
+    </div>
+
+    <div class="quiz" data-answer="1">
+      <p class="q">Which change most reduces cost when 70% of your traffic is simple FAQ-style questions?</p>
+      <div class="opts">
+        <button class="opt">int4 quantizing the large model</button>
+        <button class="opt">Routing easy traffic to a small distilled model with escalation</button>
+        <button class="opt">Increasing the batch size</button>
+        <button class="opt">Adding more GPUs</button>
+      </div>
+      <div class="explain">Not running the big model at all beats making it cheaper. Quantization multiplies savings on the remaining 30%.</div>
+    </div>
+
+    <div class="quiz" data-answer="2">
+      <p class="q">After quantizing to int4, which evaluation is most likely to reveal a problem that chat benchmarks miss?</p>
+      <div class="opts">
+        <button class="opt">Response length distribution</button>
+        <button class="opt">Tokens per second</button>
+        <button class="opt">Multi-step reasoning, code and long-context tasks</button>
+        <button class="opt">Model file size</button>
+      </div>
+      <div class="explain">Precision loss compounds over long dependency chains. Casual chat quality can look unchanged while maths, code and long-context retrieval degrade measurably.</div>
+    </div>
+  </div>
+</main>
+<script src="assets/app.js"></script>
+<script>
+(function(){
+  const { $, $$, clamp } = ML;
+
+  /* ================= quantization ================= */
+  const W = [];
+  let s = 11;
+  const rnd = () => { s = (s * 1103515245 + 12345) % 2147483648; return s / 2147483648; };
+  for (let i = 0; i < 4000; i++) {
+    const g = (rnd() + rnd() + rnd() + rnd() - 2) * 0.45;
+    W.push(g);
+  }
+  for (let i = 0; i < 24; i++) W.push((rnd() > .5 ? 1 : -1) * (2.6 + rnd() * 1.8));  // outliers
+
+  function quant() {
+    const bits = +$('#qBits').value, group = +$('#qGroup').value;
+    const outMode = $('#qOut').dataset.value || 'none';
+    $('#qBitsV').textContent = bits + '-bit';
+    $('#qGroupV').textContent = group + ' weights/scale';
+    const levels = Math.pow(2, bits);
+    // simulate group-wise quantization error
+    let err = 0, n = 0;
+    const kept = new Set();
+    if (outMode === 'keep') W.forEach((w, i) => { if (Math.abs(w) > 2.2) kept.add(i); });
+    for (let g0 = 0; g0 < W.length; g0 += group) {
+      const grp = W.slice(g0, g0 + group);
+      const idxs = grp.map((_, k) => g0 + k).filter(i => !kept.has(i));
+      if (!idxs.length) continue;
+      const vals = idxs.map(i => W[i]);
+      const mx = Math.max(...vals.map(Math.abs)) || 1e-6;
+      const step = 2 * mx / (levels - 1);
+      vals.forEach(v => { const q = Math.round(v / step) * step; err += (q - v) ** 2; n++; });
+    }
+    const rmse = Math.sqrt(err / Math.max(1, n));
+    const sd = Math.sqrt(W.reduce((a, b) => a + b * b, 0) / W.length);
+    const rel = rmse / sd;
+
+    // histogram + levels
+    const B = 50, hist = new Array(B).fill(0);
+    W.forEach(w => hist[clamp(Math.floor((w + 4) / 8 * B), 0, B - 1)]++);
+    const mxh = Math.max(...hist);
+    let g = '';
+    hist.forEach((h, i) => {
+      g += `<rect class="bar" x="${28 + i * (590 / B)}" y="${170 - h / mxh * 150}" width="${590 / B - 1.5}" height="${h / mxh * 150}"/>`;
+    });
+    if (bits <= 6) {
+      const mx = 4;
+      for (let l = 0; l < levels; l++) {
+        const v = -mx + l * (2 * mx / (levels - 1));
+        const x = 28 + (v + 4) / 8 * 590;
+        g += `<line class="lvl" x1="${x.toFixed(1)}" y1="20" x2="${x.toFixed(1)}" y2="170"/>`;
+      }
+    }
+    g += `<line stroke="var(--border-strong)" x1="28" y1="170" x2="620" y2="170"/>` +
+      `<text x="28" y="186">−4</text><text x="580" y="186">+4</text><text x="270" y="186">weight value</text>` +
+      `<text x="420" y="34" style="fill:var(--pink)">${bits <= 6 ? levels + ' quantization levels (dashed)' : 'levels too dense to draw'}</text>` +
+      `<text x="30" y="34" style="fill:var(--red)">◀ outlier channels ▶</text>`;
+    $('#qSvg').innerHTML = g;
+
+    const bytesPerW = bits / 8 + (outMode === 'keep' ? 0.06 : 0) + 2 / group;
+    $('#qSize').textContent = (7e9 * bytesPerW / 1e9).toFixed(1) + ' GB';
+    $('#qErr').textContent = (rel * 100).toFixed(1) + '% of σ';
+    $('#qSpeed').textContent = (16 / (bits + 16 / group * 8)).toFixed(1) + '×';
+    const qual = clamp(100 - rel * 100 * (outMode === 'keep' ? 0.35 : 1.1), 55, 100);
+    $('#qQual').textContent = qual.toFixed(1) + '%';
+    $('#qInfo p').innerHTML = bits >= 8
+      ? `✅ <b>${bits}-bit is comfortably safe.</b> Error is a small fraction of the weight distribution's spread; quality loss is typically under a point on most tasks. int8 weight-only is a reasonable production default with essentially no measurement anxiety.`
+      : bits >= 4
+        ? (outMode === 'keep'
+          ? `✅ <b>${bits}-bit with outlier channels kept in fp16.</b> This is what GPTQ/AWQ-style methods do in spirit: the handful of extreme channels no longer dictate the scale for everyone else, so error drops sharply for a tiny memory cost. The standard recipe for 4-bit serving.`
+          : `⚠️ <b>${bits}-bit naive.</b> Look at the dashed levels against the histogram: the outliers stretch the range so the bulk of weights collapse onto a few levels. Switch on outlier handling, or use a smaller group size, and watch the error fall.`)
+        : `🚩 <b>${bits}-bit.</b> Only a handful of levels for the entire distribution. Expect visible quality loss on reasoning, code and long context even with good outlier handling — this range needs quantization-aware training to be usable.`;
+  }
+  ['#qBits', '#qGroup'].forEach(id => $(id).addEventListener('input', quant));
+  $('#qOut').addEventListener('segchange', quant);
+  quant();
+
+  /* ================= speculative decoding ================= */
+  function spec() {
+    const k = +$('#spK').value, a = +$('#spAcc').value, c = +$('#spCost').value / 100;
+    $('#spKV').textContent = k;
+    $('#spAccV').textContent = (a * 100).toFixed(0) + '%';
+    $('#spCostV').textContent = (c * 100).toFixed(0) + '%';
+    // expected accepted tokens = (1 - a^(k+1)) / (1 - a), capped at k+1
+    const expected = a === 1 ? k + 1 : (1 - Math.pow(a, k + 1)) / (1 - a);
+    const costPerRound = 1 + k * c;        // one target pass + k draft passes
+    const speedup = expected / costPerRound;
+    $('#spTok').textContent = expected.toFixed(2);
+    $('#spSpeed').textContent = speedup.toFixed(2) + '×';
+
+    // visual
+    let g = '';
+    let accepted = 0;
+    for (let i = 0; i < k; i++) {
+      const acc = Math.pow(a, i + 1) > 0.5;
+      if (acc) accepted++;
+      g += `<rect class="tok ${acc ? 'acc' : 'rej'}" x="${40 + i * 56}" y="60" width="48" height="34"/>` +
+        `<text x="${40 + i * 56 + 12}" y="82" style="fill:${acc ? '#fff' : 'var(--red)'}">${acc ? '✓' : '✗'} d${i + 1}</text>`;
+    }
+    g += `<rect class="tok draft" x="${40 + k * 56}" y="60" width="48" height="34"/><text x="${40 + k * 56 + 6}" y="82" style="fill:var(--accent-2)">target</text>`;
+    g += `<text x="40" y="44">draft proposes ${k} tokens → target verifies all of them in ONE forward pass</text>`;
+    g += `<text x="40" y="128">expected accepted per round: ${expected.toFixed(2)} tokens for the cost of ${costPerRound.toFixed(2)} target passes</text>`;
+    g += `<text x="40" y="148" style="fill:${speedup > 1.4 ? 'var(--green)' : speedup > 1 ? 'var(--amber)' : 'var(--red)'}">net speedup ${speedup.toFixed(2)}×</text>`;
+    $('#spSvg').innerHTML = g;
+
+    $('#spInfo p').innerHTML = speedup < 1.05
+      ? `❌ <b>Not worth it here.</b> Either acceptance is too low (the draft model disagrees too often) or the draft is too expensive. Rules of thumb: the draft should cost under ~10% of the target, and acceptance above ~0.6 before speculation pays.`
+      : speedup < 1.6
+        ? `⚠️ <b>Modest ${speedup.toFixed(2)}× gain.</b> Try a larger k if acceptance is high, or a better-matched draft model — a draft distilled from the target accepts far more often than an unrelated small model.`
+        : `✅ <b>${speedup.toFixed(2)}× faster with identical outputs.</b> This is the appealing property: it is a pure latency win, not a quality trade. Note that k has a sweet spot — beyond it, the extra drafts are usually rejected and you pay for them anyway.`;
+  }
+  ['#spK', '#spAcc', '#spCost'].forEach(id => $(id).addEventListener('input', spec));
+  spec();
+})();
+</script>
+</body>
+</html>

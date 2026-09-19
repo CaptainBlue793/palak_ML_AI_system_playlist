@@ -1,0 +1,380 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Data: Sourcing, Labeling &amp; Quality</title>
+<link rel="stylesheet" href="assets/style.css">
+<script>try{var t=JSON.parse(localStorage.getItem('ml-theme'));if(t)document.documentElement.setAttribute('data-theme',t)}catch(e){}</script>
+<style>
+  .split-strip { height:54px; border-radius:12px; overflow:hidden; display:flex; border:1px solid var(--border); font-size:12px; font-weight:700; }
+  .split-strip div { display:grid; place-items:center; color:#fff; transition:flex .4s, background .3s; }
+  .split-strip .tr { background:var(--accent); }
+  .split-strip .va { background:var(--accent-2); }
+  .split-strip .te { background:var(--pink); }
+  .ts { display:flex; gap:2px; margin-top:10px; }
+  .ts i { flex:1; height:30px; border-radius:4px; background:var(--surface-3); position:relative; }
+  .ts i.tr { background:var(--accent); } .ts i.va { background:var(--accent-2); } .ts i.te { background:var(--pink); }
+  .ts i small { position:absolute; bottom:-16px; left:0; font-size:9px; color:var(--muted); font-family:var(--mono); }
+
+  .leak-item { display:flex; align-items:center; gap:12px; padding:12px 14px; border-radius:12px; border:1px solid var(--border); background:var(--surface-2); margin-bottom:8px; flex-wrap:wrap; }
+  .leak-item .txt { flex:1; min-width:230px; font-size:14.5px; }
+  .leak-item.right { border-color:var(--green); background:var(--green-soft); }
+  .leak-item.wrongc { border-color:var(--red); background:var(--red-soft); }
+  .leak-item .why { width:100%; font-size:13.5px; color:var(--text-2); display:none; }
+  .leak-item.right .why, .leak-item.wrongc .why { display:block; }
+
+  .noise-bars { display:grid; gap:6px; margin-top:12px; }
+  .noise-bars .nb { display:grid; grid-template-columns:130px 1fr 60px; gap:10px; align-items:center; font-size:13px; }
+  .noise-bars .tk { height:12px; border-radius:99px; background:var(--surface-3); overflow:hidden; }
+  .noise-bars .tk i { display:block; height:100%; border-radius:99px; transition:width .4s; }
+  .noise-bars .val { font-family:var(--mono); text-align:right; font-weight:700; }
+
+  .imb { display:flex; flex-wrap:wrap; gap:2px; margin:10px 0; }
+  .imb i { width:9px; height:9px; border-radius:2px; background:var(--surface-3); }
+  .imb i.pos { background:var(--red); }
+</style>
+</head>
+<body data-chapter="3">
+<main class="content">
+
+  <section class="hero">
+    <div class="eyebrow"><span class="pill accent">Chapter 3</span><span class="pill green">Beginner</span><span class="pill">⏱ 40 min</span></div>
+    <h1>Data: Sourcing, Labeling <span class="grad">&amp; Quality</span></h1>
+    <p class="lead">Models are a compression of their training data. Everything the data gets wrong — missing groups, noisy labels, accidental future information — the model will faithfully reproduce and then amplify. This is the chapter that saves you the most pain later.</p>
+    <ul class="objectives">
+      <li>Compare where training data comes from, and what each source costs you</li>
+      <li>Produce labels that are good enough, and measure how good they are</li>
+      <li>Split data so your offline number predicts online reality</li>
+      <li>Spot data leakage — the single most common cause of “too good” results</li>
+      <li>Handle class imbalance and validate data automatically</li>
+    </ul>
+  </section>
+
+  <h2>Where does training data come from?</h2>
+  <p>There are five realistic sources, and most production systems use several. The question is never “which is best” but “what does each cost, and what does it bias?”.</p>
+
+  <div class="table-wrap">
+    <table class="t">
+      <thead><tr><th>Source</th><th>Example</th><th>Strength</th><th>What it costs you</th></tr></thead>
+      <tbody>
+        <tr><td><b>Product logs</b></td><td>Clicks, purchases, watch time</td><td>Free, huge, matches production exactly</td><td>Biased by what you already showed (feedback loops, Ch 30)</td></tr>
+        <tr><td><b>Human labelling</b></td><td>Annotators marking toxic comments</td><td>Exactly the label you want</td><td>Slow, £1–£10 per item, and noisy on subjective tasks</td></tr>
+        <tr><td><b>Implicit feedback</b></td><td>“User scrolled past without clicking”</td><td>Enormous volume, no annotation cost</td><td>A weak, ambiguous proxy — no click ≠ not relevant</td></tr>
+        <tr><td><b>Public / licensed corpora</b></td><td>Common Crawl, ImageNet, purchased panels</td><td>Instant scale, strong for pretraining</td><td>Licence and provenance risk; duplicated, dirty, dated</td></tr>
+        <tr><td><b>Synthetic / model-generated</b></td><td>LLM-written instruction pairs, simulated sensors</td><td>Cheap coverage of rare cases</td><td>Inherits the generator's errors; collapse if you loop it back naively</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="callout warn">
+    <div class="ico">⚖️</div>
+    <div class="body"><div class="title">Provenance is an engineering requirement, not paperwork</div>
+      <p>For every dataset, record <b>where it came from, when, under what licence or consent, and who can be deleted from it</b>. The day someone exercises a deletion right, or legal asks whether a corpus may be used commercially, “we scraped it in 2023” is not an answer. Chapter 37 covers the governance side; the engineering side is simply: version datasets and keep lineage.</p></div>
+  </div>
+
+  <h2>Labels: the expensive part</h2>
+  <p>A label is the answer you're teaching the model to produce. Getting them is usually the bottleneck, so people trade quality for volume in four standard ways.</p>
+
+  <div class="grid c4">
+    <div class="card feature reveal"><div class="f-ico">👩‍⚖️</div><h4>Expert labels</h4><p>Radiologists, lawyers, senior agents. Highest quality, lowest volume, highest cost. Reserve for your <b>evaluation set</b>.</p></div>
+    <div class="card feature reveal"><div class="f-ico" style="background:var(--accent-2-soft)">👥</div><h4>Crowd labels</h4><p>Many cheap annotators, 3–5 per item, majority vote. Needs clear guidelines and gold questions to catch bad workers.</p></div>
+    <div class="card feature reveal"><div class="f-ico" style="background:var(--green-soft)">🔖</div><h4>Weak supervision</h4><p>Heuristics, regexes and existing systems vote on labels; a model learns to reconcile them. Noisy but nearly free at scale.</p></div>
+    <div class="card feature reveal"><div class="f-ico" style="background:var(--pink-soft)">🖱️</div><h4>Implicit / natural</h4><p>The world labels it for you: the transaction was charged back, the user re-ran the query, the ticket was reopened.</p></div>
+  </div>
+
+  <div class="callout tip">
+    <div class="ico">📏</div>
+    <div class="body"><div class="title">Measure your labellers before you measure your model</div>
+      <p>Have two annotators label the same 300 items and compute agreement (Cohen's κ). If humans only agree 70% of the time, <b>no model will exceed roughly 70% on that task</b> — and your “model error analysis” will mostly be label disputes. Low agreement means the guidelines are ambiguous, not that the annotators are bad. Fix the definition first.</p></div>
+  </div>
+
+  <div class="panel">
+    <div class="panel-head"><div class="dots"><i></i><i></i><i></i></div><span class="p-title">Label noise sets the ceiling</span><span class="p-tag">Interactive</span></div>
+    <div class="panel-body">
+      <div class="range-row"><label for="noiseR">Label noise (% of training labels wrong)</label><input type="range" id="noiseR" min="0" max="35" step="1" value="8"><output id="noiseV"></output></div>
+      <div class="range-row"><label for="sizeR">Training examples</label><input type="range" id="sizeR" min="1000" max="500000" step="1000" value="50000"><output id="sizeV"></output></div>
+      <div class="noise-bars">
+        <div class="nb"><span>Achievable accuracy</span><div class="tk"><i id="barAcc" style="background:var(--accent)"></i></div><span class="val" id="valAcc"></span></div>
+        <div class="nb"><span>Ceiling from noise</span><div class="tk"><i id="barCeil" style="background:var(--red)"></i></div><span class="val" id="valCeil"></span></div>
+        <div class="nb"><span>Gain from 2× more data</span><div class="tk"><i id="barGain" style="background:var(--green)"></i></div><span class="val" id="valGain"></span></div>
+      </div>
+      <div class="verdict-box callout" style="margin-top:12px"><div class="ico">🧭</div><div class="body"><div class="title">What to do next</div><p id="noiseAdvice" style="margin:0"></p></div></div>
+      <p class="small muted">Rough model: accuracy rises with the log of dataset size but is capped by label quality. The lesson is robust even if the curve isn't exact — <b>past a point, cleaning beats collecting</b>.</p>
+    </div>
+  </div>
+
+  <h2>Splits: the contract with your future self</h2>
+  <p>You split data into <strong>train</strong> (fit parameters), <strong>validation</strong> (choose hyperparameters and models) and <strong>test</strong> (one honest estimate, touched as rarely as possible). How you split matters more than the ratio.</p>
+
+  <div class="panel">
+    <div class="panel-head"><div class="dots"><i></i><i></i><i></i></div><span class="p-title">Choose a splitting strategy</span><span class="p-tag">Interactive</span></div>
+    <div class="panel-body">
+      <div class="seg" id="splitSeg"><button data-v="random" class="active">🎲 Random</button><button data-v="time">📅 Temporal</button><button data-v="group">👥 Grouped</button><button data-v="strat">⚖️ Stratified</button></div>
+      <div class="ts" id="tsStrip" style="margin-top:14px"></div>
+      <div class="split-strip" style="margin-top:26px" id="splitStrip"><div class="tr" style="flex:70">train 70%</div><div class="va" style="flex:15">val 15%</div><div class="te" style="flex:15">test 15%</div></div>
+      <div class="callout" style="margin-top:14px" id="splitInfo"><div class="ico">📘</div><div class="body"><div class="title"></div><p></p></div></div>
+    </div>
+  </div>
+
+  <div class="callout danger">
+    <div class="ico">⏱️</div>
+    <div class="body"><div class="title">If time matters, split by time. Always.</div>
+      <p>Any system that predicts the future — churn, demand, fraud, recommendations — must be validated on data from <i>after</i> the training window. A random split lets the model learn from Tuesday to predict Monday, which it will never be able to do in production. The offline number will look wonderful and the launch will be a disappointment.</p></div>
+  </div>
+
+  <h2>Leakage: why your model looks brilliant</h2>
+  <p><strong>Data leakage</strong> is any information in training that will not be available — or will not be honest — at prediction time. It is the single most common reason an offline result fails to reproduce online, and it is embarrassingly easy to introduce.</p>
+
+  <div class="panel">
+    <div class="panel-head"><div class="dots"><i></i><i></i><i></i></div><span class="p-title">Spot the leak</span><span class="p-tag">Practice</span><span style="margin-left:auto" class="badge" id="leakScore">0 / 7</span></div>
+    <div class="panel-body" id="leakGame"></div>
+  </div>
+
+  <div class="callout tip">
+    <div class="ico">🔍</div>
+    <div class="body"><div class="title">The leak-detector heuristics</div>
+      <ul class="mb0">
+        <li><b>Suspiciously good.</b> 0.999 AUC on a hard problem is a bug until proven otherwise.</li>
+        <li><b>One feature dominates.</b> Check feature importance — if a single column carries the model, ask when that column is written relative to the label.</li>
+        <li><b>Ask “when is this known?” for every feature.</b> Write the timestamp next to each one. Anything stamped after the prediction moment is out.</li>
+        <li><b>Preprocess inside the fold.</b> Scalers, imputers, target encoders and vocabularies must be fitted on training data only, then applied to validation.</li>
+      </ul></div>
+  </div>
+
+  <h2>Imbalance: when the interesting class is 0.2%</h2>
+  <p>Fraud, disease, defects, clicks on ads — the positive class is rare. Accuracy becomes meaningless (predict “no” and score 99.8%), and gradients are dominated by negatives.</p>
+
+  <div class="panel">
+    <div class="panel-head"><div class="dots"><i></i><i></i><i></i></div><span class="p-title">1,000 transactions, 0.4% fraudulent</span><span class="p-tag">Illustration</span></div>
+    <div class="panel-body">
+      <div class="imb" id="imbGrid"></div>
+      <div class="stats">
+        <div class="stat"><div class="k">“Always predict legit” accuracy</div><div class="v">99.6%</div></div>
+        <div class="stat bad"><div class="k">Fraud caught</div><div class="v">0</div></div>
+        <div class="stat acc"><div class="k">Useful metric instead</div><div class="v" style="font-size:16px">PR-AUC / recall@fixed-precision</div></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="grid c3">
+    <div class="card"><h4 class="mt0">⬆️ Resample</h4><p class="small mb0">Oversample positives (or SMOTE), undersample negatives. Cheap, but changes the base rate — you must <b>recalibrate</b> probabilities afterwards (Ch 7).</p></div>
+    <div class="card"><h4 class="mt0">⚖️ Reweight</h4><p class="small mb0">Give rare-class examples a larger loss weight. Keeps all the data and usually beats resampling. Watch for overfitting to a handful of positives.</p></div>
+    <div class="card"><h4 class="mt0">🎯 Change the metric</h4><p class="small mb0">Often the real fix. Optimise and report PR-AUC, recall at a precision you can staff, or expected monetary loss — not accuracy.</p></div>
+  </div>
+
+  <h2>Data quality, automated</h2>
+  <p>You cannot eyeball a table that grows by 40 million rows a day. Treat data like code: define expectations, test them in the pipeline, and fail loudly.</p>
+
+  <div class="table-wrap">
+    <table class="t">
+      <thead><tr><th>Check</th><th>Example expectation</th><th>Action on failure</th></tr></thead>
+      <tbody>
+        <tr><td><b>Schema</b></td><td>Column <code>amount</code> exists, is float, non-null</td><td>Hard fail the pipeline — never train on it</td></tr>
+        <tr><td><b>Range / validity</b></td><td><code>0 &lt; age &lt; 120</code>, currency in enum</td><td>Quarantine bad rows, alert, continue</td></tr>
+        <tr><td><b>Volume</b></td><td>Row count within ±25% of the 7-day median</td><td>Alert: upstream job probably failed</td></tr>
+        <tr><td><b>Distribution</b></td><td>Mean and null-rate within tolerance of last week</td><td>Warn — this is early drift detection (Ch 34)</td></tr>
+        <tr><td><b>Uniqueness / keys</b></td><td>One row per (user_id, event_id)</td><td>Fail: duplicates silently reweight your training set</td></tr>
+        <tr><td><b>Freshness</b></td><td>Max event timestamp within 2 hours</td><td>Alert: stale features are worse than missing ones</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="callout tip">
+    <div class="ico">🗂️</div>
+    <div class="body"><div class="title">Version datasets like code</div>
+      <p>A model is only reproducible if the exact data is. Use immutable snapshots (a table version, a partition date, a content hash) and record that identifier next to every training run (Ch 31). “We trained on the users table” is not reproducible; “<code>users@2026-04-02T00:00Z, sha 9f3c…</code>” is.</p></div>
+  </div>
+
+  <div class="callout danger"><div class="ico">⚠️</div><div class="body"><div class="title">Common mistakes</div>
+    <ul class="mb0">
+      <li><b>Random-splitting time-dependent data.</b> Instant leakage, wildly optimistic offline metrics, disappointing launch.</li>
+      <li><b>Fitting the scaler on all the data before splitting.</b> The validation set's statistics have now leaked into training. Fit inside the fold.</li>
+      <li><b>Deduplicating after splitting.</b> Near-duplicate rows land in both train and test, and your test set is partly a memory test. Dedupe first, split second.</li>
+      <li><b>Cleaning the test set.</b> If you fix labels only where the model disagrees, you have optimised your evaluation, not your model. Fix systematically or not at all.</li>
+      <li><b>Not looking at 50 random rows.</b> Ten minutes reading raw examples finds encoding bugs, truncated fields and mislabelled classes that no summary statistic surfaces.</li>
+    </ul></div></div>
+
+  <div class="callout interview"><div class="ico">🎤</div><div class="body"><div class="title">Interview drill</div>
+    <p class="small" style="margin:10px 0 0"><b>Warm-up:</b> Your churn model hits 0.97 AUC offline and does nothing in the A/B test. Walk through your debugging.</p>
+    <details class="ans"><summary>How a strong answer sounds</summary><div>First suspect leakage: list every feature with the timestamp at which it is written, and look for anything derived from the cancellation event itself (support contacts about closing, a downgrade flag, the refund record). Second, check the split — if it was random over a time-ordered table, redo it temporally and see how much of the AUC survives. Third, check train/serving parity: are the online feature values computed the same way as offline? Only after those three would I look at the model. And separately: even a perfect predictor changes nothing if the intervention doesn't work — so I'd check whether the treatment, not the prediction, is the weak link.</div></details>
+    <p class="small" style="margin:10px 0 0"><b>Design:</b> You need 100,000 labelled examples of “is this support reply helpful?” with a budget for 5,000 human labels. What do you do?</p>
+    <details class="ans"><summary>How a strong answer sounds</summary><div>Spend the human budget on a clean, expert-labelled <i>evaluation</i> set plus enough to measure agreement (say 2,000 eval, 500 double-labelled for κ, 2,500 seed training). Generate the bulk via weak supervision — implicit signals like thread reopened, thumbs-down, escalation, customer reply sentiment — and reconcile those noisy sources into probabilistic labels. Then train on the weak labels and evaluate <b>only</b> on the clean set. If agreement on the human set is poor, stop and rewrite the guidelines: the task definition is the bug.</div></details>
+  </div></div>
+
+  <div class="takeaways">
+    <h3>🧠 Key takeaways</h3>
+    <ul>
+      <li>Every data source biases the model in a predictable way — name the bias when you pick the source.</li>
+      <li>Human agreement is your accuracy ceiling; measure it before blaming the model.</li>
+      <li>Split by time for anything predicting the future, and by group when rows share an entity.</li>
+      <li>Leakage is the default explanation for surprisingly good results — check when each feature becomes known.</li>
+      <li>Automate schema, volume, distribution and freshness checks; version datasets so runs are reproducible.</li>
+    </ul>
+  </div>
+
+  <div class="quiz-wrap">
+    <h2>Check your understanding</h2>
+    <div class="quiz-score"></div>
+
+    <div class="quiz" data-answer="2">
+      <p class="q">You're predicting whether a loan will default. Which feature is leakage?</p>
+      <div class="opts">
+        <button class="opt">Applicant's income at application time</button>
+        <button class="opt">Credit score at application time</button>
+        <button class="opt">Number of collections calls made to the customer</button>
+        <button class="opt">Loan amount requested</button>
+      </div>
+      <div class="explain">Collections calls only happen <i>after</i> payments are missed — the feature is a consequence of the label. At prediction time (application) it is always zero, so the model learns nothing usable.</div>
+    </div>
+
+    <div class="quiz" data-answer="1">
+      <p class="q">Two annotators agree on only 65% of your toxicity labels. What should you do first?</p>
+      <div class="opts">
+        <button class="opt">Train a bigger model to average out the noise</button>
+        <button class="opt">Rewrite the labelling guidelines and re-run agreement</button>
+        <button class="opt">Drop all disputed examples and train on the rest</button>
+        <button class="opt">Accept it — 65% is normal for subjective tasks</button>
+      </div>
+      <div class="explain">65% agreement caps model performance and means the task definition is ambiguous. Dropping disputes biases the dataset toward easy cases; a bigger model cannot learn a rule humans can't state.</div>
+    </div>
+
+    <div class="quiz" data-answer="0">
+      <p class="q">Your dataset has 1,000 images per patient from 200 patients. What split is correct?</p>
+      <div class="opts">
+        <button class="opt">Grouped by patient — all of a patient's images in one split</button>
+        <button class="opt">Random over all 200,000 images</button>
+        <button class="opt">Stratified by image label only</button>
+        <button class="opt">80/20 within each patient</button>
+      </div>
+      <div class="explain">Random splitting puts images of the same patient in both train and test, so the model can memorise the patient rather than the pathology. Group by the entity that repeats.</div>
+    </div>
+
+    <div class="quiz" data-answer="3">
+      <p class="q">Fraud is 0.3% of transactions. Your model reports 99.7% accuracy. What has it most likely learned?</p>
+      <div class="opts">
+        <button class="opt">A strong fraud signal</button>
+        <button class="opt">To rank fraud above legitimate transactions</button>
+        <button class="opt">Nothing — accuracy is undefined here</button>
+        <button class="opt">To predict “legitimate” for everything</button>
+      </div>
+      <div class="explain">The majority-class baseline is 99.7%. Report PR-AUC or recall at an operable precision instead — and never let accuracy be the headline metric on imbalanced data.</div>
+    </div>
+
+    <div class="quiz" data-answer="2">
+      <p class="q">Which pipeline step order avoids leakage?</p>
+      <div class="opts">
+        <button class="opt">Impute missing values → split → train</button>
+        <button class="opt">Fit a target encoder on all rows → split → train</button>
+        <button class="opt">Deduplicate → split by time → fit transforms on train only</button>
+        <button class="opt">Split → fit the scaler on the test set for a fair comparison</button>
+      </div>
+      <div class="explain">Dedupe before splitting (so near-duplicates don't span splits), split by time, and fit every transform on training data only — then apply it to validation and test.</div>
+    </div>
+  </div>
+</main>
+<script src="assets/app.js"></script>
+<script>
+(function(){
+  const { $, $$, fmt } = ML;
+
+  /* ---------------- label noise ---------------- */
+  function noise() {
+    const n = +$('#noiseR').value, size = +$('#sizeR').value;
+    $('#noiseV').textContent = n + '%';
+    $('#sizeV').textContent = fmt(size, 0);
+    const ceiling = 100 - n * 1.15;
+    const dataTerm = 62 + 7.2 * Math.log10(size);         // rises with log(size)
+    const acc = Math.min(ceiling, dataTerm);
+    const acc2 = Math.min(ceiling, 62 + 7.2 * Math.log10(size * 2));
+    const gain = acc2 - acc;
+    $('#barAcc').style.width = acc + '%'; $('#valAcc').textContent = acc.toFixed(1) + '%';
+    $('#barCeil').style.width = ceiling + '%'; $('#valCeil').textContent = ceiling.toFixed(1) + '%';
+    $('#barGain').style.width = Math.min(100, gain * 20) + '%'; $('#valGain').textContent = '+' + gain.toFixed(2) + '%';
+    $('#noiseAdvice').innerHTML = gain < 0.15
+      ? `You are <b>capped by label noise</b>, not by data volume. Doubling the dataset buys ${gain.toFixed(2)} points. Spend the money on relabelling, clearer guidelines or adjudicating disagreements instead.`
+      : acc < ceiling - 3
+        ? `You are <b>data-limited</b>: doubling the dataset is worth about ${gain.toFixed(2)} points and the noise ceiling is still ${(ceiling - acc).toFixed(1)} points away. Collect more before cleaning.`
+        : `Balanced. More data and cleaner labels are worth roughly the same right now — a good moment to do a small cleaning pass on the <i>evaluation</i> set so your measurements are trustworthy.`;
+  }
+  $('#noiseR').addEventListener('input', noise);
+  $('#sizeR').addEventListener('input', noise);
+  noise();
+
+  /* ---------------- splits ---------------- */
+  const N = 24;
+  const SPLITS = {
+    random: {
+      title: 'Random split — the default, and often wrong',
+      body: 'Shuffle rows, take 70/15/15. Correct only when examples are independent and time does not matter (one photo per object, one row per independent measurement). For anything with users, sessions or time, it leaks.',
+      assign: (i) => (i % 7 === 3 ? 'va' : i % 7 === 6 ? 'te' : 'tr'),
+    },
+    time: {
+      title: 'Temporal split — for anything predicting the future',
+      body: 'Train on the past, validate on the next slice, test on the most recent. This is the only split that answers the real question: “would this model have worked last month?” Expect the number to drop — that drop is the truth.',
+      assign: (i) => (i < N * 0.7 ? 'tr' : i < N * 0.85 ? 'va' : 'te'),
+    },
+    group: {
+      title: 'Grouped split — when rows share an entity',
+      body: 'All rows belonging to one patient, user, seller or document go to the same side. Prevents the model from memorising an entity and being rewarded for it at test time.',
+      assign: (i) => { const g = Math.floor(i / 4); return g % 5 === 3 ? 'va' : g % 5 === 4 ? 'te' : 'tr'; },
+    },
+    strat: {
+      title: 'Stratified split — when the positive class is rare',
+      body: 'Sample within each class so every split contains a representative share of the rare class. With 0.3% positives, a naive split can leave the test set with almost none — making the metric pure noise. Combine with temporal: stratify inside each time window.',
+      assign: (i) => (i % 8 === 5 ? 'va' : i % 8 === 7 ? 'te' : 'tr'),
+    },
+  };
+  function drawSplit() {
+    const key = $('#splitSeg').dataset.value || 'random';
+    const s = SPLITS[key];
+    let strip = '', counts = { tr: 0, va: 0, te: 0 };
+    for (let i = 0; i < N; i++) {
+      const c = s.assign(i); counts[c]++;
+      strip += `<i class="${c}">${i % 4 === 0 ? `<small>wk${Math.floor(i / 4) + 1}</small>` : ''}</i>`;
+    }
+    $('#tsStrip').innerHTML = strip;
+    $('#splitStrip').innerHTML =
+      `<div class="tr" style="flex:${counts.tr}">train ${Math.round(counts.tr / N * 100)}%</div>` +
+      `<div class="va" style="flex:${counts.va}">val ${Math.round(counts.va / N * 100)}%</div>` +
+      `<div class="te" style="flex:${counts.te}">test ${Math.round(counts.te / N * 100)}%</div>`;
+    $('#splitInfo .title').textContent = s.title;
+    $('#splitInfo p').textContent = s.body;
+  }
+  $('#splitSeg').addEventListener('segchange', drawSplit);
+  drawSplit();
+
+  /* ---------------- leak game ---------------- */
+  const LEAKS = [
+    ['Predicting 30-day churn using “days since last login” computed today', 'L', 'Computed at scoring time it is fine — but if it is computed after the churn window closed, it encodes the outcome. Always pin features to the prediction timestamp.'],
+    ['Predicting click-through using the ad’s historical CTR including today', 'L', 'Today’s CTR contains this very impression’s outcome. Use CTR up to (but excluding) the prediction moment.'],
+    ['Predicting house price from square footage and postcode', 'N', 'Both are known before the sale and do not depend on the price. A legitimate feature set.'],
+    ['Normalising all rows with the mean and std of the full dataset before splitting', 'L', 'Test-set statistics have leaked into training. Fit the scaler on train, then apply it.'],
+    ['Predicting disease from scan images, with the same patient in train and test', 'L', 'The model can memorise the patient’s anatomy or scanner artefacts. Split by patient.'],
+    ['Predicting delivery time from restaurant, courier count and weather at order time', 'N', 'All known at the moment of prediction. This is the correct shape for a feature set.'],
+    ['Using tomorrow’s stock price movement as a feature for today’s trade signal', 'L', 'The cartoon version, but it appears constantly in subtler forms whenever a table is joined without a time condition.'],
+  ];
+  const lg = $('#leakGame'); let ls = 0, ldone = 0;
+  LEAKS.forEach(([txt, ans, why]) => {
+    const row = document.createElement('div'); row.className = 'leak-item';
+    row.innerHTML = `<span class="txt">${txt}</span><div class="seg" style="flex:none"><button data-v="L">🚨 Leakage</button><button data-v="N">✅ Fine</button></div><div class="why"></div>`;
+    row.querySelectorAll('button').forEach(b => b.onclick = () => {
+      if (row.dataset.done) return; row.dataset.done = 1; ldone++;
+      b.classList.add('active');
+      const ok = b.dataset.v === ans; if (ok) ls++;
+      row.classList.add(ok ? 'right' : 'wrongc');
+      row.querySelector('.why').innerHTML = (ok ? '✅ ' : `❌ This one is <b>${ans === 'L' ? 'leakage' : 'fine'}</b> — `) + why;
+      $('#leakScore').textContent = `${ls} / ${LEAKS.length}`;
+      if (ldone === LEAKS.length) ML.toast(ls === LEAKS.length ? 'Leak-proof 🔍' : `${ls}/${LEAKS.length} — re-read the ones you missed`);
+    });
+    lg.appendChild(row);
+  });
+
+  /* ---------------- imbalance grid ---------------- */
+  const cells = [];
+  for (let i = 0; i < 1000; i++) cells.push(`<i class="${i % 250 === 17 ? 'pos' : ''}"></i>`);
+  $('#imbGrid').innerHTML = cells.join('');
+})();
+</script>
+</body>
+</html>

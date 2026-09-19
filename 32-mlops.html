@@ -1,0 +1,340 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>MLOps: CI/CD/CT Pipelines</title>
+<link rel="stylesheet" href="assets/style.css">
+<script>try{var t=JSON.parse(localStorage.getItem('ml-theme'));if(t)document.documentElement.setAttribute('data-theme',t)}catch(e){}</script>
+<style>
+  .matrix { display:grid; gap:4px; margin-top:12px }
+  .matrix .hd { font-size:11px; color:var(--muted); font-family:var(--mono); text-transform:uppercase; letter-spacing:.05em }
+  .matrix .row { display:grid; grid-template-columns:230px repeat(5,1fr); gap:4px; align-items:center; font-size:12.5px }
+  .matrix .cell { height:30px; border-radius:6px; background:var(--surface-3); display:grid; place-items:center; font-size:13px }
+  .matrix .cell.hit { background:var(--green-soft); color:var(--green); font-weight:700 }
+  .matrix .cell.miss { background:var(--red-soft); color:var(--red) }
+  .trig-svg { width:100%; height:230px }
+  .trig-svg .perf { fill:none; stroke:var(--accent); stroke-width:2.4 }
+  .trig-svg .thr { stroke:var(--red); stroke-dasharray:5 4 }
+  .trig-svg .rt { stroke:var(--green); stroke-width:2 }
+  .trig-svg text { font-size:10.5px; fill:var(--muted); font-family:var(--mono) }
+  .ladder2 { display:grid; gap:8px }
+  .ladder2 .r { display:grid; grid-template-columns:70px 1fr; gap:12px; padding:11px 13px; border-radius:12px; background:var(--surface-2); border:1px solid var(--border); font-size:13.5px }
+  .ladder2 .r b { font-family:var(--mono); color:var(--accent) }
+</style>
+</head>
+<body data-chapter="32">
+<main class="content">
+
+  <section class="hero">
+    <div class="eyebrow"><span class="pill accent">Chapter 32</span><span class="pill amber">Expert</span><span class="pill">⏱ 45 min</span></div>
+    <h1>MLOps: CI/CD/CT <span class="grad">Pipelines</span></h1>
+    <p class="lead">Software CI answers “does this code still work?”. ML has three moving parts — code, data and model — and any one of them can break the system while the other two look fine. That's why there's a third letter: continuous <i>training</i>.</p>
+    <ul class="objectives">
+      <li>Design a test suite that catches ML-specific failures</li>
+      <li>Build a CI pipeline that's fast enough that people keep it</li>
+      <li>Choose retraining triggers and the guardrails around them</li>
+      <li>Promote models through environments with automated gates</li>
+      <li>Place your team honestly on the maturity ladder</li>
+    </ul>
+  </section>
+
+  <h2>Three things change, not one</h2>
+  <div class="grid c3">
+    <div class="card feature reveal"><div class="f-ico">💻</div><h4>Code</h4><p>Feature transforms, training script, serving handler. Tested like any software — and it must be the <i>same</i> transform code in both paths (Chapter 29).</p></div>
+    <div class="card feature reveal"><div class="f-ico" style="background:var(--accent-2-soft)">🧱</div><h4>Data</h4><p>Changes continuously without a deploy. Needs contracts, validation and distribution checks in the pipeline itself (Chapters 3, 28).</p></div>
+    <div class="card feature reveal"><div class="f-ico" style="background:var(--green-soft)">🧠</div><h4>Model</h4><p>A learned artefact whose behaviour can regress on a slice while aggregate metrics improve. Needs behavioural tests and slice gates.</p></div>
+  </div>
+
+  <h2>The ML test suite</h2>
+  <p>Toggle tests on and off, then inject a failure and see whether your suite would have caught it before production.</p>
+
+  <div class="panel">
+    <div class="panel-head"><div class="dots"><i></i><i></i><i></i></div><span class="p-title">Would your CI catch it?</span><span class="p-tag">Interactive</span></div>
+    <div class="panel-body">
+      <div class="chip-row" id="testChips"></div>
+      <div class="matrix" id="testMatrix" style="margin-top:14px"></div>
+      <div class="stats" style="margin-top:12px">
+        <div class="stat good"><div class="k">Failures caught in CI</div><div class="v" id="tCaught">–</div></div>
+        <div class="stat bad"><div class="k">Reaching production</div><div class="v" id="tMissed">–</div></div>
+        <div class="stat"><div class="k">CI runtime</div><div class="v" id="tTime" style="font-size:18px">–</div></div>
+      </div>
+      <div class="callout" id="tInfo" style="margin-top:12px"><div class="ico">🧪</div><div class="body"><p style="margin:0"></p></div></div>
+    </div>
+  </div>
+
+  <div class="table-wrap">
+    <table class="t">
+      <thead><tr><th>Test type</th><th>Example</th><th>Runs</th></tr></thead>
+      <tbody>
+        <tr><td><b>Unit: transforms</b></td><td>“log1p of a negative raises”; “unseen category maps to UNK”</td><td>Every commit, seconds</td></tr>
+        <tr><td><b>Data validation</b></td><td>Schema, ranges, null rates, volume, freshness (Chapter 3)</td><td>Every pipeline run</td></tr>
+        <tr><td><b>Training smoke test</b></td><td>Train on 500 rows for 2 minutes; loss must fall; artifact must load</td><td>Every commit</td></tr>
+        <tr><td><b>Behavioural tests</b></td><td>Invariance (“renaming the user shouldn't change the score”), directional (“higher amount should not lower fraud risk”), minimum functionality on known cases</td><td>Every model build</td></tr>
+        <tr><td><b>Slice gates</b></td><td>No slice regresses more than X% versus the current production model</td><td>Before promotion</td></tr>
+        <tr><td><b>Parity test</b></td><td>Offline features == online features for sampled entities (Chapter 29)</td><td>Nightly + before promotion</td></tr>
+        <tr><td><b>Serving contract test</b></td><td>Latency, payload schema, error handling, fallback path</td><td>Before deploy</td></tr>
+        <tr><td><b>Load test</b></td><td>p99 under peak concurrency with a realistic token mix</td><td>Before a capacity-changing release</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="callout tip">
+    <div class="ico">⚡</div>
+    <div class="body"><div class="title">CI has to be fast or it gets bypassed</div>
+      <p>Keep the per-commit path under ten minutes: unit tests, a data-validation run on a fixed sample, and a tiny training smoke test with a fixed seed. Push full training, full eval and load tests to a nightly or pre-promotion pipeline. A twenty-minute CI becomes a skipped CI, and a skipped CI is worse than none because it creates false confidence.</p></div>
+  </div>
+
+  <h2>Continuous training</h2>
+  <p>Models decay because the world moves (Chapter 34). Retraining should be an automated, gated pipeline — not a quarterly project someone remembers.</p>
+
+  <div class="panel">
+    <div class="panel-head"><div class="dots"><i></i><i></i><i></i></div><span class="p-title">Retraining triggers</span><span class="p-tag">Interactive</span></div>
+    <div class="panel-body">
+      <div class="seg" id="trigSeg"><button data-v="none">Never retrain</button><button data-v="sched" class="active">Fixed schedule</button><button data-v="drift">Drift / performance triggered</button><button data-v="both">Schedule + trigger</button></div>
+      <div class="range-row" style="margin-top:8px"><label for="trigRate">Decay rate (how fast the world moves)</label><input type="range" id="trigRate" min="1" max="10" step="1" value="5"><output id="trigRateV"></output></div>
+      <div class="range-row"><label for="trigCost">Cost per retraining run</label><input type="range" id="trigCost" min="50" max="20000" step="50" value="1200"><output id="trigCostV"></output></div>
+      <div class="svg-scroll"><svg id="trigSvg" class="diagram trig-svg" viewBox="0 0 640 230"></svg></div>
+      <div class="stats">
+        <div class="stat acc"><div class="k">Retrains in 12 months</div><div class="v" id="trN">–</div></div>
+        <div class="stat"><div class="k">Annual training cost</div><div class="v" id="trCost" style="font-size:18px">–</div></div>
+        <div class="stat good"><div class="k">Mean performance</div><div class="v" id="trPerf" style="font-size:18px">–</div></div>
+        <div class="stat bad"><div class="k">Time below threshold</div><div class="v" id="trBad" style="font-size:18px">–</div></div>
+      </div>
+      <div class="callout" id="trInfo" style="margin-top:12px"><div class="ico">♻️</div><div class="body"><p style="margin:0"></p></div></div>
+    </div>
+  </div>
+
+  <div class="callout warn">
+    <div class="ico">🚧</div>
+    <div class="body"><div class="title">Automated retraining without gates is an automated outage</div>
+      <p>A pipeline that trains and deploys on a schedule will eventually train on a corrupted upstream table and ship it at 3am. Every automatic promotion needs: data validation that <b>fails closed</b>, a comparison against the current production model on a frozen eval set, slice checks, a parity test, and a canary with automatic rollback. If any gate can't be evaluated, the pipeline stops and pages someone — it does not proceed.</p></div>
+  </div>
+
+  <h2>Environments and promotion</h2>
+  <pre class="code">dev        → developer machines and notebooks, sampled data, no gates
+staging    → full pipeline on real data, artifacts written to a staging registry
+shadow     → production traffic, model runs, output logged but not used
+canary     → 1–5% of real traffic, automatic rollback on guardrail breach
+production → full traffic, pinned version, previous version kept warm</pre>
+
+  <div class="callout tip">
+    <div class="ico">🪞</div>
+    <div class="body"><div class="title">Shadow mode is the cheapest safety net in ML</div>
+      <p>Run the new model on real production traffic, log its outputs, and act on none of them. It catches serving-time feature skew, latency regressions, unexpected input distributions and crash-inducing edge cases — all the things offline evaluation cannot see — with zero user risk. A few days of shadow before every canary should be routine.</p></div>
+  </div>
+
+  <h2>Orchestration</h2>
+  <div class="table-wrap">
+    <table class="t">
+      <thead><tr><th>Property</th><th>Why it matters for ML pipelines</th></tr></thead>
+      <tbody>
+        <tr><td><b>Idempotent tasks</b></td><td>Retries and backfills must not double-write or double-count (Chapter 28)</td></tr>
+        <tr><td><b>Data-aware scheduling</b></td><td>Run when the upstream partition <i>lands</i>, not at a hopeful fixed time</td></tr>
+        <tr><td><b>Parameterised backfills</b></td><td>Re-run a date range without editing code</td></tr>
+        <tr><td><b>Resource isolation</b></td><td>A GPU training task and a light SQL task shouldn't share a queue</td></tr>
+        <tr><td><b>Lineage emission</b></td><td>Each run records its inputs and outputs for the registry (Chapter 31)</td></tr>
+        <tr><td><b>Alerting on staleness</b></td><td>A pipeline that silently stopped is worse than one that failed loudly</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h2>The maturity ladder</h2>
+  <div class="ladder2">
+    <div class="r"><b>Level 0</b><span><b>Manual.</b> A notebook produces a model; someone copies a file to a server. Works for one model and one person, and nothing about it survives that person leaving.</span></div>
+    <div class="r"><b>Level 1</b><span><b>Reproducible training.</b> Training is a script in version control, run on a schedule, logging to a tracker. Deployment is still manual, but you can rebuild the model.</span></div>
+    <div class="r"><b>Level 2</b><span><b>Automated pipeline.</b> Data validation, training, evaluation and registration run as one orchestrated DAG. Promotion is a human decision informed by automated gates.</span></div>
+    <div class="r"><b>Level 3</b><span><b>Continuous training with gates.</b> Triggers fire retraining; gates and canaries decide promotion; rollback is automatic. Humans review exceptions rather than routine releases.</span></div>
+    <div class="r"><b>Level 4</b><span><b>Platform.</b> Multiple teams ship models through shared, self-service infrastructure with standard monitoring, governance and cost attribution (Chapter 39).</span></div>
+  </div>
+  <p class="small muted" style="margin-top:10px">Most teams should aim for level 2–3. Level 4 is a product in its own right, and building it before you have several models in production is a way to avoid shipping one.</p>
+
+  <div class="callout danger"><div class="ico">⚠️</div><div class="body"><div class="title">Common mistakes</div>
+    <ul class="mb0">
+      <li><b>Testing code but not data.</b> Most ML incidents start upstream of your repository.</li>
+      <li><b>Gates on aggregate metrics only.</b> A model that improves overall and destroys one slice passes — and that slice is someone's whole experience.</li>
+      <li><b>Automated promotion without a canary.</b> Offline gates predict the online result; they don't guarantee it.</li>
+      <li><b>CI that takes 40 minutes.</b> It gets skipped, and the skip becomes policy.</li>
+      <li><b>No fail-closed rule.</b> When validation can't run, pipelines that continue anyway ship whatever happened to be there.</li>
+      <li><b>Retraining because it's Tuesday.</b> Retrain when the data or the world justifies it, and always compare against the incumbent.</li>
+    </ul></div></div>
+
+  <div class="callout interview"><div class="ico">🎤</div><div class="body"><div class="title">Interview drill</div>
+    <p class="small" style="margin:10px 0 0"><b>Warm-up:</b> What does a CI pipeline for an ML repo test that a normal one doesn't?</p>
+    <details class="ans"><summary>How a strong answer sounds</summary><div>Data and model behaviour. Data: schema, ranges, null rates, volume and freshness against a contract, so an upstream change fails fast. Model: a tiny training smoke test that must reduce loss and produce a loadable artifact; behavioural tests — invariance, directional expectations, and known-case checks; and, before promotion, slice-level comparison against the incumbent plus a train/serve parity check. Ordinary software tests still apply to the transform code — and crucially, the same transform code must be used in training and serving, which is itself something to assert in CI.</div></details>
+    <p class="small" style="margin:10px 0 0"><b>Deeper:</b> Design a safe automatic retraining pipeline for a fraud model with 60-day label lag.</p>
+    <details class="ans"><summary>How a strong answer sounds</summary><div>Trigger on a combination: a weekly schedule, plus drift on input distributions, plus a proxy-metric alarm — because true labels are 60 days late, so performance-based triggers alone react two months too slowly. The pipeline validates data and fails closed; builds the training set with point-in-time joins and a label cut-off that respects the lag; trains; evaluates against a frozen eval set and the incumbent, on aggregate and on slices; runs a parity check between offline and online features; registers the candidate. Promotion goes shadow for a few days, then canary at 5% with automatic rollback on precision-at-threshold or false-decline guardrails, then full. Labels arriving later backfill the evaluation so I can measure, retrospectively, whether each promotion was actually right — and that record is what tunes the trigger thresholds over time.</div></details>
+  </div></div>
+
+  <div class="takeaways">
+    <h3>🧠 Key takeaways</h3>
+    <ul>
+      <li>Code, data and model each change independently; the pipeline must test all three.</li>
+      <li>Keep per-commit CI under ten minutes; push heavy evaluation to pre-promotion stages.</li>
+      <li>Retraining needs triggers <i>and</i> gates — validation that fails closed, incumbent comparison, slices, canary.</li>
+      <li>Shadow mode catches serving-time problems offline evaluation cannot, at zero user risk.</li>
+      <li>Aim for maturity level 2–3; a platform is justified by several models, not by ambition.</li>
+    </ul>
+  </div>
+
+  <div class="quiz-wrap">
+    <h2>Check your understanding</h2>
+    <div class="quiz-score"></div>
+
+    <div class="quiz" data-answer="1">
+      <p class="q">Which test would catch “an upstream team renamed a column and the feature is now all nulls”?</p>
+      <div class="opts">
+        <button class="opt">A training smoke test</button>
+        <button class="opt">Data validation against a schema/contract with null-rate checks</button>
+        <button class="opt">A load test</button>
+        <button class="opt">A behavioural invariance test</button>
+      </div>
+      <div class="explain">The model still trains and still serves — only the data changed. Only data validation fails loudly at the right moment.</div>
+    </div>
+
+    <div class="quiz" data-answer="2">
+      <p class="q">What is shadow mode?</p>
+      <div class="opts">
+        <button class="opt">Serving a quantized copy of the model</button>
+        <button class="opt">Training on a copy of production data</button>
+        <button class="opt">Running the new model on real traffic and logging outputs without using them</button>
+        <button class="opt">A canary at 1% of traffic</button>
+      </div>
+      <div class="explain">It exposes the candidate to genuine production inputs — including skew, latency and edge cases — with no user impact, before any traffic depends on it.</div>
+    </div>
+
+    <div class="quiz" data-answer="0">
+      <p class="q">Your automatic retraining pipeline shipped a broken model at 3am. What was almost certainly missing?</p>
+      <div class="opts">
+        <button class="opt">Gates: data validation that fails closed, incumbent comparison and a canary with rollback</button>
+        <button class="opt">A bigger model</button>
+        <button class="opt">More training data</button>
+        <button class="opt">A GPU with more memory</button>
+      </div>
+      <div class="explain">Automation without gates just makes mistakes faster. Every promotion needs conditions that can block it and a rollback that runs without a human.</div>
+    </div>
+
+    <div class="quiz" data-answer="3">
+      <p class="q">Why is a performance-based retraining trigger insufficient when labels arrive 60 days late?</p>
+      <div class="opts">
+        <button class="opt">Because performance metrics are noisy</button>
+        <button class="opt">Because retraining is expensive</button>
+        <button class="opt">Because the model would be retrained too often</button>
+        <button class="opt">Because you'd only detect degradation two months after it started</button>
+      </div>
+      <div class="explain">With delayed labels you need leading indicators — input drift, prediction-distribution shift and proxy metrics — combined with a schedule.</div>
+    </div>
+
+    <div class="quiz" data-answer="1">
+      <p class="q">A promotion gate uses only aggregate AUC. What can slip through?</p>
+      <div class="opts">
+        <button class="opt">Increased latency</button>
+        <button class="opt">A large regression on a small but important slice</button>
+        <button class="opt">A corrupted artifact</button>
+        <button class="opt">Higher training cost</button>
+      </div>
+      <div class="explain">A 4-point gain overall can hide a 20-point loss for new users. Gates must include per-slice comparisons against the incumbent.</div>
+    </div>
+  </div>
+</main>
+<script src="assets/app.js"></script>
+<script>
+(function(){
+  const { $, $$, clamp, fmt } = ML;
+
+  /* ================= test matrix ================= */
+  const TESTS = [
+    { id: 'unit', label: 'Unit tests (transforms)', on: true, mins: 1 },
+    { id: 'data', label: 'Data validation', on: true, mins: 2 },
+    { id: 'smoke', label: 'Training smoke test', on: true, mins: 3 },
+    { id: 'behav', label: 'Behavioural tests', on: false, mins: 2 },
+    { id: 'slice', label: 'Slice gates vs incumbent', on: false, mins: 12 },
+    { id: 'parity', label: 'Train/serve parity', on: false, mins: 6 },
+    { id: 'contract', label: 'Serving contract test', on: true, mins: 2 },
+    { id: 'load', label: 'Load test', on: false, mins: 18 },
+  ];
+  const FAILURES = [
+    { n: 'Upstream column renamed → nulls', caught: ['data'] },
+    { n: 'Scaler fitted before the split (leakage)', caught: ['unit', 'slice'] },
+    { n: 'Model regresses 18% for new users', caught: ['slice'] },
+    { n: 'Online feature computed differently', caught: ['parity'] },
+    { n: 'Serving handler breaks on a null field', caught: ['contract', 'unit'] },
+    { n: 'p99 latency doubles under peak load', caught: ['load'] },
+    { n: 'Score rises when amount decreases', caught: ['behav'] },
+    { n: 'Artifact fails to load after a library bump', caught: ['smoke', 'contract'] },
+  ];
+  const on = (id) => TESTS.find(t => t.id === id).on;
+  function drawTests() {
+    $('#testChips').innerHTML = TESTS.map(t =>
+      `<button class="chip ${t.on ? 'on' : ''}" data-t="${t.id}">${t.on ? '✓' : '+'} ${t.label} <span style="opacity:.6">${t.mins}m</span></button>`).join('');
+    $$('#testChips [data-t]').forEach(b => b.onclick = () => { const t = TESTS.find(x => x.id === b.dataset.t); t.on = !t.on; drawTests(); });
+    let caught = 0;
+    $('#testMatrix').innerHTML = FAILURES.map(f => {
+      const hit = f.caught.some(c => on(c));
+      if (hit) caught++;
+      return `<div class="row"><span>${f.n}</span><div class="cell ${hit ? 'hit' : 'miss'}" style="grid-column:2 / span 5">${hit ? '✅ caught in CI by ' + f.caught.filter(c => on(c)).map(c => TESTS.find(t => t.id === c).label).join(' / ') : '❌ reaches production'}</div></div>`;
+    }).join('');
+    const mins = TESTS.filter(t => t.on).reduce((s, t) => s + t.mins, 0);
+    $('#tCaught').textContent = caught + ' / ' + FAILURES.length;
+    $('#tMissed').textContent = (FAILURES.length - caught);
+    $('#tTime').textContent = mins + ' min';
+    $('#tInfo p').innerHTML = mins > 15
+      ? `⚠️ <b>${mins} minutes</b> is too slow for a per-commit pipeline — it will be skipped or bypassed. Split it: keep unit, data validation, smoke and contract tests on every commit (usually under 10 minutes), and run slice gates, parity and load tests nightly or before promotion. Catching ${caught}/${FAILURES.length} failure classes is the goal; when they run is a scheduling decision.`
+      : caught < FAILURES.length
+        ? `You catch <b>${caught} of ${FAILURES.length}</b> failure classes in <b>${mins} minutes</b>. The uncaught ones are exactly the ML-specific failures — slice regressions, feature skew, behavioural violations — which are silent in production. Add them to a pre-promotion stage rather than to every commit.`
+        : `✅ Every failure class is covered in <b>${mins} minutes</b>. Keep the fast subset on each commit and the expensive checks as promotion gates, so the pipeline stays something people actually wait for.`;
+  }
+  drawTests();
+
+  /* ================= retraining triggers ================= */
+  function trig() {
+    const mode = $('#trigSeg').dataset.value || 'sched';
+    const rate = +$('#trigRate').value, cost = +$('#trigCost').value;
+    $('#trigRateV').textContent = rate + ' / 10';
+    $('#trigCostV').textContent = '$' + fmt(cost, 0);
+    const WEEKS = 52, decay = rate * 0.0022, thr = 0.86;
+    let perf = 1, retrains = [], series = [], below = 0;
+    let weeksSince = 0;
+    for (let w = 0; w < WEEKS; w++) {
+      perf -= decay * (0.7 + Math.random() * 0.6);
+      weeksSince++;
+      const schedDue = mode === 'sched' || mode === 'both' ? weeksSince >= 8 : false;
+      const driftDue = (mode === 'drift' || mode === 'both') ? perf < thr + 0.02 : false;
+      if (mode !== 'none' && (schedDue || driftDue)) {
+        perf = Math.min(1, perf + 0.09 + decay * weeksSince * 0.9);
+        retrains.push(w); weeksSince = 0;
+      }
+      perf = clamp(perf, 0.6, 1);
+      if (perf < thr) below++;
+      series.push(perf);
+    }
+    const X = (w) => 42 + w / WEEKS * 580, Y = (p) => 195 - (p - 0.6) / 0.42 * 170;
+    let d = '';
+    series.forEach((p, w) => { d += (d ? 'L' : 'M') + X(w).toFixed(1) + ',' + Y(p).toFixed(1) + ' '; });
+    $('#trigSvg').innerHTML =
+      `<line stroke="var(--border-strong)" x1="42" y1="195" x2="628" y2="195"/><line stroke="var(--border-strong)" x1="42" y1="10" x2="42" y2="195"/>` +
+      retrains.map(w => `<line class="rt" x1="${X(w)}" y1="16" x2="${X(w)}" y2="195" opacity=".45"/>`).join('') +
+      `<line class="thr" x1="42" y1="${Y(thr)}" x2="628" y2="${Y(thr)}"/><text x="560" y="${Y(thr) - 5}" style="fill:var(--red)">SLO floor</text>` +
+      `<path class="perf" d="${d}"/>` +
+      `<text x="280" y="215">weeks</text><text x="2" y="14">quality</text>` +
+      `<text x="440" y="30" style="fill:var(--green)">green = retraining</text>`;
+    const mean = series.reduce((a, b) => a + b, 0) / series.length;
+    $('#trN').textContent = retrains.length;
+    $('#trCost').textContent = '$' + fmt(retrains.length * cost, 0);
+    $('#trPerf').textContent = (mean * 100).toFixed(1) + '%';
+    $('#trBad').textContent = (below / WEEKS * 100).toFixed(0) + '% of the year';
+    const notes = {
+      none: `🚩 <b>No retraining.</b> Quality decays continuously and spends ${(below / WEEKS * 100).toFixed(0)}% of the year below the SLO floor. This is the default state of every model nobody owns — and the decay is invisible without monitoring, because nothing errors.`,
+      sched: `📅 <b>Fixed schedule.</b> Predictable cost ($${fmt(retrains.length * cost, 0)}/year) and no surprises, but it retrains when nothing has changed and doesn't react when something does. A reasonable baseline, especially when labels are delayed.`,
+      drift: `📡 <b>Triggered.</b> Retraining fires when quality approaches the floor, so money follows need. The risk is a trigger that never fires because the monitoring is broken — always keep a maximum interval as a backstop.`,
+      both: `✅ <b>Schedule plus trigger.</b> The schedule guarantees a floor on staleness even if monitoring fails; the trigger reacts to genuine shifts. This combination is what most mature teams converge on, and the cost difference versus schedule-only is usually small.`,
+    };
+    $('#trInfo p').innerHTML = notes[mode];
+  }
+  $('#trigSeg').addEventListener('segchange', trig);
+  ['#trigRate', '#trigCost'].forEach(id => $(id).addEventListener('input', trig));
+  trig();
+})();
+</script>
+</body>
+</html>

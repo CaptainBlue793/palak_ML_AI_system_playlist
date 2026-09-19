@@ -1,0 +1,329 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Data Engineering &amp; Streaming for ML</title>
+<link rel="stylesheet" href="assets/style.css">
+<script>try{var t=JSON.parse(localStorage.getItem('ml-theme'));if(t)document.documentElement.setAttribute('data-theme',t)}catch(e){}</script>
+<style>
+  .win-svg { width:100%; height:250px }
+  .win-svg .ev { fill:var(--accent) }
+  .win-svg .ev.late { fill:var(--amber) }
+  .win-svg .ev.dropped { fill:var(--red) }
+  .win-svg .win { fill:var(--surface-2); stroke:var(--border-strong) }
+  .win-svg .wm { stroke:var(--pink); stroke-width:2; stroke-dasharray:5 4 }
+  .win-svg text { font-size:10.5px; fill:var(--muted); font-family:var(--mono) }
+  .budget { display:grid; gap:6px }
+  .budget .r { display:grid; grid-template-columns:190px 1fr 78px; gap:10px; align-items:center; font-size:13px }
+  .budget .tk { height:16px; border-radius:6px; background:var(--surface-3); overflow:hidden }
+  .budget .tk i { display:block; height:100% }
+  .budget .v { font-family:var(--mono); text-align:right; color:var(--muted) }
+  .contract { font-family:var(--mono); font-size:12.5px; line-height:1.6; background:var(--surface-2); border:1px solid var(--border); border-radius:12px; padding:12px 14px; white-space:pre-wrap }
+</style>
+</head>
+<body data-chapter="28">
+<main class="content">
+
+  <section class="hero">
+    <div class="eyebrow"><span class="pill accent">Chapter 28</span><span class="pill">Advanced</span><span class="pill">⏱ 45 min</span></div>
+    <h1>Data Engineering &amp; <span class="grad">Streaming for ML</span></h1>
+    <p class="lead">Models are downstream of pipelines. Whether a feature is available in 50 milliseconds or 6 hours, whether a backfill reproduces history exactly, and whether a schema change breaks training silently — these decide more about your ML system's reliability than the model does.</p>
+    <ul class="objectives">
+      <li>Choose between batch and streaming for a given feature</li>
+      <li>Reason about event time, windows, watermarks and late data</li>
+      <li>Build pipelines that are idempotent and safely re-runnable</li>
+      <li>Use data contracts and schema evolution to stop silent breakage</li>
+      <li>Budget end-to-end freshness from event to prediction</li>
+    </ul>
+  </section>
+
+  <h2>Batch or streaming?</h2>
+  <p>The honest default is batch. Streaming is strictly more complex — ordering, late data, state, exactly-once semantics — and you should adopt it only where freshness changes a decision.</p>
+
+  <div class="table-wrap">
+    <table class="t">
+      <thead><tr><th>Feature</th><th>Freshness needed</th><th>Right pipeline</th></tr></thead>
+      <tbody>
+        <tr><td>“User's lifetime order count”</td><td>Hours</td><td>Nightly batch — cheap, simple, reproducible</td></tr>
+        <tr><td>“Items viewed in this session”</td><td>Seconds</td><td>Streaming, or computed from the request payload itself</td></tr>
+        <tr><td>“Card's transaction count in the last 10 minutes”</td><td>Seconds</td><td>Streaming — the fraud signal <i>is</i> the recency (Chapter 44)</td></tr>
+        <tr><td>“Product's 30-day average rating”</td><td>Daily</td><td>Batch</td></tr>
+        <tr><td>“Driver's current location”</td><td>Sub-second</td><td>Not a pipeline — read it live at request time</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="callout tip">
+    <div class="ico">🏗️</div>
+    <div class="body"><div class="title">The shape of a modern stack</div>
+      <p>Events land in a log (Kafka/Kinesis/PubSub). A stream processor computes real-time aggregates into an online store; the same events are also written to object storage as open table formats (Iceberg, Delta, Hudi) that give you ACID commits, time travel and schema evolution on cheap storage. Batch jobs and the warehouse read those tables; an orchestrator (Airflow, Dagster) runs the DAG with dependencies, retries and backfills. CDC replicates operational databases into the same lake so the model can use transactional data without querying production.</p></div>
+  </div>
+
+  <h2>Event time, windows and late data</h2>
+  <p>The moment something <i>happened</i> and the moment your system <i>saw it</i> are different — sometimes by milliseconds, sometimes by hours when a phone was offline. Aggregating by processing time is easy and wrong; aggregating by event time is correct and requires you to decide how long to wait.</p>
+
+  <div class="panel">
+    <div class="panel-head"><div class="dots"><i></i><i></i><i></i></div><span class="p-title">Windows, watermarks and late arrivals</span><span class="p-tag">Interactive</span></div>
+    <div class="panel-body">
+      <div class="seg" id="winSeg"><button data-v="tumbling" class="active">Tumbling (60s)</button><button data-v="sliding">Sliding (60s / 30s)</button><button data-v="session">Session (30s gap)</button></div>
+      <div class="range-row" style="margin-top:8px"><label for="winWm">Watermark delay (seconds)</label><input type="range" id="winWm" min="0" max="120" step="5" value="30"><output id="winWmV"></output></div>
+      <div class="svg-scroll"><svg id="winSvg" class="diagram win-svg" viewBox="0 0 640 250"></svg></div>
+      <div class="stats">
+        <div class="stat acc"><div class="k">Windows emitted</div><div class="v" id="winCount">–</div></div>
+        <div class="stat"><div class="k">Late events included</div><div class="v" id="winLate">–</div></div>
+        <div class="stat bad"><div class="k">Dropped (too late)</div><div class="v" id="winDrop">–</div></div>
+        <div class="stat good"><div class="k">Result latency</div><div class="v" id="winLat" style="font-size:17px">–</div></div>
+      </div>
+      <div class="callout" id="winInfo" style="margin-top:12px"><div class="ico">⏳</div><div class="body"><p style="margin:0"></p></div></div>
+      <div class="legend"><span><i style="background:var(--accent)"></i>on-time event</span><span><i style="background:var(--amber)"></i>late but within the watermark</span><span><i style="background:var(--red)"></i>dropped</span><span><i style="background:var(--pink)"></i>watermark</span></div>
+    </div>
+  </div>
+
+  <div class="callout warn">
+    <div class="ico">⚖️</div>
+    <div class="body"><div class="title">The watermark is a correctness/latency dial</div>
+      <p>A long watermark waits for stragglers and produces complete results slowly. A short one is fast and drops late data. Neither is “right” — pick from the decision downstream. For fraud scoring, being 30 seconds late is worse than missing 0.3% of events; for billing aggregation the reverse is true, so you emit early results and <b>correct them later</b> with an update path (and make every consumer idempotent so corrections are safe).</p></div>
+  </div>
+
+  <h2>Delivery semantics</h2>
+  <div class="grid c3">
+    <div class="card feature reveal"><div class="f-ico">1️⃣</div><h4>At-most-once</h4><p>Never duplicated, sometimes lost. Acceptable only for metrics you can afford to miss.</p></div>
+    <div class="card feature reveal"><div class="f-ico" style="background:var(--accent-2-soft)">🔁</div><h4>At-least-once</h4><p>Never lost, sometimes duplicated. The practical default — <b>pair it with idempotent consumers</b> and duplicates stop mattering.</p></div>
+    <div class="card feature reveal"><div class="f-ico" style="background:var(--green-soft)">🎯</div><h4>Exactly-once</h4><p>Achieved with transactional sinks and offset commits, or by deduplicating on an event id. Real, but it costs throughput and complexity — ask whether idempotency is enough first.</p></div>
+  </div>
+
+  <h2>Backfills: the thing you'll do constantly</h2>
+  <p>A new feature needs three years of history. A bug means last month's aggregates are wrong. A model needs retraining on corrected data. Backfilling is routine, so design for it from the start.</p>
+
+  <div class="table-wrap">
+    <table class="t">
+      <thead><tr><th>Property</th><th>Why it matters</th></tr></thead>
+      <tbody>
+        <tr><td><b>Idempotent writes</b></td><td>Re-running a partition must replace, not append. Use partition overwrite or merge-on-key, never blind insert.</td></tr>
+        <tr><td><b>Partitioned by event date</b></td><td>Lets you reprocess one day without touching the rest — the unit of both cost and blast radius.</td></tr>
+        <tr><td><b>Deterministic logic</b></td><td>No <code>now()</code>, no random seeds, no dependence on a mutable lookup table. Otherwise a backfill produces different numbers than the original run did.</td></tr>
+        <tr><td><b>Point-in-time inputs</b></td><td>A backfill must use the state <i>as of</i> that day, not today's — the single most common source of training/serving skew (Chapter 29).</td></tr>
+        <tr><td><b>Throttled and observable</b></td><td>A 3-year backfill can swamp the cluster the live pipeline shares. Rate-limit it and track progress.</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="callout danger">
+    <div class="ico">🕰️</div>
+    <div class="body"><div class="title">The classic backfill bug</div>
+      <p>You backfill “customer's account tier” for 2024 using today's tier table. Customers who upgraded in 2025 now appear premium throughout 2024 — so the model learns that premium customers were buying more, when actually buying more is what made them premium. The offline metric improves and the online result doesn't. Any dimension that changes over time must be stored as a slowly-changing dimension with validity ranges, and joined <i>as of</i> the event timestamp.</p></div>
+  </div>
+
+  <h2>Data contracts</h2>
+  <p>A pipeline breaks when an upstream team renames a column on a Tuesday. A <b>data contract</b> makes the schema and its guarantees explicit, versioned and testable in the producer's CI — so the break happens in their pull request, not in your training run.</p>
+
+  <div class="contract">contract: checkout.completed          version: 3
+owner: payments-team                 sla: p99 &lt; 60s to the lake
+fields:
+  event_id      string   required  unique
+  occurred_at   timestamp required  event time, UTC
+  user_id       string   required  pseudonymised
+  amount_minor  int64    required  &gt;= 0
+  currency      enum     required  [GBP, EUR, USD]
+  coupon_code   string   optional  nullable, may be added to
+guarantees:
+  - at-least-once delivery, deduplicate on event_id
+  - additive schema changes only within a major version
+  - breaking changes require a new topic and 90 days of dual-write
+quality:
+  - null_rate(user_id) == 0
+  - daily_volume within ±30% of the 7-day median</div>
+
+  <h2>Freshness budgets</h2>
+  <p>“Real-time” means nothing; a number does. Trace the path from event to prediction and add it up.</p>
+
+  <div class="panel">
+    <div class="panel-head"><div class="dots"><i></i><i></i><i></i></div><span class="p-title">End-to-end freshness</span><span class="p-tag">Interactive</span></div>
+    <div class="panel-body">
+      <div class="seg" id="fPipe"><button data-v="stream" class="active">Streaming</button><button data-v="micro">Micro-batch (5 min)</button><button data-v="hourly">Hourly batch</button><button data-v="nightly">Nightly batch</button></div>
+      <div class="budget" id="fBudget" style="margin-top:12px"></div>
+      <div class="callout" id="fInfo" style="margin-top:12px"><div class="ico">⏱️</div><div class="body"><p style="margin:0"></p></div></div>
+    </div>
+  </div>
+
+  <div class="callout tip">
+    <div class="ico">💰</div>
+    <div class="body"><div class="title">Where the money goes in a data platform</div>
+      <p>Not compute — <b>small files and repeated scans</b>. Thousands of tiny files per partition make every query slow and expensive; the fix is compaction and sensible partition sizing (aim for files of 128 MB–1 GB). After that: lifecycle policies to move cold data to cheaper tiers, columnar formats with predicate pushdown so queries read only what they need, and materialising the aggregates that many jobs recompute independently.</p></div>
+  </div>
+
+  <div class="callout danger"><div class="ico">⚠️</div><div class="body"><div class="title">Common mistakes</div>
+    <ul class="mb0">
+      <li><b>Aggregating by processing time.</b> Results change when a consumer lags, and a backfill produces different numbers than the live run.</li>
+      <li><b>Non-idempotent writes.</b> A retried job double-counts, and nobody notices until a metric looks odd weeks later.</li>
+      <li><b>Using current dimension values in a backfill.</b> Leakage of the future into the past — the classic silent quality killer.</li>
+      <li><b>No data contract.</b> Upstream renames a field; training silently trains on nulls.</li>
+      <li><b>Streaming everything.</b> Most features do not need it, and each streaming pipeline is a permanent operational commitment.</li>
+      <li><b>Ignoring small files.</b> The most common cause of a lake that gets slower and more expensive every month.</li>
+    </ul></div></div>
+
+  <div class="callout interview"><div class="ico">🎤</div><div class="body"><div class="title">Interview drill</div>
+    <p class="small" style="margin:10px 0 0"><b>Warm-up:</b> Why prefer event time over processing time for feature aggregation?</p>
+    <details class="ans"><summary>How a strong answer sounds</summary><div>Because event time is a property of the data and processing time is a property of your infrastructure. If a consumer lags or you replay history, processing-time windows produce different results for the same events — so training data and serving features stop agreeing, and backfills don't reproduce. Event time makes the computation deterministic; the price is that you must handle late arrivals explicitly with watermarks and an update path for corrections.</div></details>
+    <p class="small" style="margin:10px 0 0"><b>Deeper:</b> A model needs “transactions in the last hour” both online at 20 ms and offline for 2 years of training data. How do you build it?</p>
+    <details class="ans"><summary>How a strong answer sounds</summary><div>One definition, two execution paths, with equality enforced by a test. Online: a stream processor maintains a sliding one-hour count keyed by card, written to a low-latency store the model reads at request time. Offline: the same aggregation expressed over the event log with a strict <i>as-of</i> join — for each labelled example, count events in the hour strictly before that example's timestamp, which is the point-in-time correctness problem of Chapter 29. I'd generate the training set from the same event stream rather than from the online store's current values, define the aggregation once in a feature repository so both paths share it, and add a continuous check comparing online values against a recomputation on a sample. Late events get a watermark and an update path, and the training set is built with the same lateness policy the online system has — otherwise offline looks better than production, every time.</div></details>
+  </div></div>
+
+  <div class="takeaways">
+    <h3>🧠 Key takeaways</h3>
+    <ul>
+      <li>Use batch unless freshness changes a decision; streaming is a permanent operational commitment.</li>
+      <li>Aggregate on event time with an explicit watermark, and decide the late-data policy from the downstream decision.</li>
+      <li>Prefer at-least-once delivery with idempotent consumers over chasing exactly-once.</li>
+      <li>Design for backfills: partitioned, idempotent, deterministic, and joined as-of the event time.</li>
+      <li>Data contracts move breakage from your training run to the producer's pull request.</li>
+    </ul>
+  </div>
+
+  <div class="quiz-wrap">
+    <h2>Check your understanding</h2>
+    <div class="quiz-score"></div>
+
+    <div class="quiz" data-answer="1">
+      <p class="q">What does a watermark represent in stream processing?</p>
+      <div class="opts">
+        <button class="opt">The rate of incoming events</button>
+        <button class="opt">A claim that no events older than this timestamp are still expected</button>
+        <button class="opt">The checkpoint interval</button>
+        <button class="opt">The maximum window size</button>
+      </div>
+      <div class="explain">It is the system's assertion about completeness, and it's what lets a window close and emit. Longer watermark = more complete results, later.</div>
+    </div>
+
+    <div class="quiz" data-answer="3">
+      <p class="q">You backfill “customer tier” for 2024 using the current tier table. What's wrong?</p>
+      <div class="opts">
+        <button class="opt">It will be slow</button>
+        <button class="opt">Nothing, if the table is up to date</button>
+        <button class="opt">It will duplicate rows</button>
+        <button class="opt">It leaks future information into past examples</button>
+      </div>
+      <div class="explain">Customers who upgraded later appear upgraded throughout history. The model learns an effect backwards, and the online result never matches the offline one.</div>
+    </div>
+
+    <div class="quiz" data-answer="0">
+      <p class="q">Your stream sink is at-least-once. What's the pragmatic way to handle duplicates?</p>
+      <div class="opts">
+        <button class="opt">Make consumers idempotent — deduplicate on an event id or use upserts</button>
+        <button class="opt">Switch every pipeline to at-most-once</button>
+        <button class="opt">Ignore them; duplicates are rare</button>
+        <button class="opt">Increase the watermark</button>
+      </div>
+      <div class="explain">Idempotency makes duplicates harmless and is far cheaper than end-to-end exactly-once machinery.</div>
+    </div>
+
+    <div class="quiz" data-answer="2">
+      <p class="q">Which feature genuinely needs a streaming pipeline?</p>
+      <div class="opts">
+        <button class="opt">Customer lifetime value</button>
+        <button class="opt">Product's 30-day average rating</button>
+        <button class="opt">Number of transactions on this card in the last 5 minutes</button>
+        <button class="opt">User's signup country</button>
+      </div>
+      <div class="explain">Recency is the signal itself — a five-minute-old view of a velocity feature is useless for fraud. The others tolerate hours of staleness.</div>
+    </div>
+
+    <div class="quiz" data-answer="1">
+      <p class="q">What is a data contract primarily for?</p>
+      <div class="opts">
+        <button class="opt">Compressing data in transit</button>
+        <button class="opt">Making schema and quality guarantees explicit and testable in the producer's CI</button>
+        <button class="opt">Encrypting personal data</button>
+        <button class="opt">Choosing partition keys</button>
+      </div>
+      <div class="explain">It shifts the failure left: a breaking change fails the producer's build instead of silently corrupting your training set weeks later.</div>
+    </div>
+  </div>
+</main>
+<script src="assets/app.js"></script>
+<script>
+(function(){
+  const { $, $$, clamp } = ML;
+
+  /* ================= windows ================= */
+  const EVENTS = [
+    { e: 5, a: 6 }, { e: 12, a: 14 }, { e: 25, a: 27 }, { e: 40, a: 43 }, { e: 55, a: 57 },
+    { e: 58, a: 95 },     // late
+    { e: 70, a: 72 }, { e: 85, a: 88 }, { e: 95, a: 97 }, { e: 110, a: 113 },
+    { e: 45, a: 150 },    // very late
+    { e: 125, a: 128 }, { e: 140, a: 142 }, { e: 155, a: 158 }, { e: 168, a: 171 },
+  ];
+  function drawWin() {
+    const mode = $('#winSeg').dataset.value || 'tumbling';
+    const wm = +$('#winWm').value;
+    $('#winWmV').textContent = wm + ' s';
+    const T = 200, X = (t) => 40 + t / T * 580;
+    let wins = [];
+    if (mode === 'tumbling') for (let s = 0; s < T; s += 60) wins.push([s, s + 60]);
+    else if (mode === 'sliding') for (let s = -30; s < T; s += 30) wins.push([Math.max(0, s), s + 60]);
+    else {
+      const sorted = EVENTS.slice().sort((a, b) => a.e - b.e);
+      let cur = [sorted[0].e, sorted[0].e];
+      sorted.forEach(ev => {
+        if (ev.e - cur[1] <= 30) cur[1] = ev.e; else { wins.push([cur[0], cur[1] + 5]); cur = [ev.e, ev.e]; }
+      });
+      wins.push([cur[0], cur[1] + 5]);
+    }
+    let g = '';
+    wins.forEach(([s, e], i) => {
+      const y = 30 + (i % 3) * 22;
+      g += `<rect class="win" x="${X(s)}" y="${y}" width="${Math.max(4, X(e) - X(s))}" height="18" rx="4"/>`;
+      if (X(e) - X(s) > 42) g += `<text x="${X(s) + 5}" y="${y + 13}">w${i + 1}</text>`;
+    });
+    let late = 0, dropped = 0;
+    EVENTS.forEach(ev => {
+      const delay = ev.a - ev.e;
+      const isLate = delay > 5;
+      const isDropped = delay > wm && wm < delay;
+      if (isDropped) dropped++; else if (isLate) late++;
+      g += `<circle class="ev ${isDropped ? 'dropped' : isLate ? 'late' : ''}" cx="${X(ev.e)}" cy="155" r="5"/>`;
+      if (isLate) g += `<line x1="${X(ev.e)}" y1="155" x2="${X(ev.a)}" y2="185" stroke="${isDropped ? 'var(--red)' : 'var(--amber)'}" stroke-width="1.2" stroke-dasharray="2 2"/><circle cx="${X(ev.a)}" cy="185" r="3.5" fill="${isDropped ? 'var(--red)' : 'var(--amber)'}" opacity=".7"/>`;
+    });
+    g += `<line stroke="var(--border-strong)" x1="40" y1="155" x2="620" y2="155"/><text x="40" y="205">event time →</text>`;
+    g += `<text x="470" y="205">arrival time (dashed = delay)</text>`;
+    const wmX = X(T - wm);
+    g += `<line class="wm" x1="${wmX}" y1="20" x2="${wmX}" y2="200"/><text x="${clamp(wmX - 34, 42, 560)}" y="16" style="fill:var(--pink)">watermark</text>`;
+    $('#winSvg').innerHTML = g;
+    $('#winCount').textContent = wins.length;
+    $('#winLate').textContent = late;
+    $('#winDrop').textContent = dropped;
+    $('#winLat').textContent = (mode === 'session' ? '30s gap + ' : '') + wm + 's after window end';
+    const notes = {
+      tumbling: 'Fixed, non-overlapping buckets. Every event belongs to exactly one window — simple, cheap, and the default for counters like “transactions per minute”.',
+      sliding: 'Overlapping windows give a smoother, more responsive signal (“count in the last 60s, updated every 30s”), at the cost of each event being counted in several windows and more state to keep.',
+      session: 'Windows are defined by activity: a gap longer than the threshold ends the session. Ideal for user behaviour features, and the only one whose window boundaries depend on the data itself.',
+    };
+    $('#winInfo p').innerHTML = notes[mode] + ` With a <b>${wm}s</b> watermark you wait that long past a window’s end before emitting: ${dropped ? `<b>${dropped} event(s) arrived too late and were dropped.</b> ` : 'no events were dropped. '}` +
+      (wm >= 60 ? 'This is a completeness-first setting — good for billing or reporting, too slow for a real-time decision.' : wm <= 10 ? 'This is a latency-first setting — right for fraud or ranking, where a slightly incomplete answer now beats a perfect one later.' : 'A middle setting; make it explicit in the feature’s documentation, because downstream consumers need to know how complete the number is.');
+  }
+  $('#winSeg').addEventListener('segchange', drawWin);
+  $('#winWm').addEventListener('input', drawWin);
+  drawWin();
+
+  /* ================= freshness budget ================= */
+  const PIPES = {
+    stream: { stages: [['Event emitted → log', 0.2], ['Stream processor', 0.8], ['Write to online store', 0.05], ['Feature read at request', 0.01]], n: 'Sub-second end to end. Worth the complexity only for features whose value is their recency — velocity counts, session context, live inventory.' },
+    micro: { stages: [['Event emitted → log', 0.2], ['Micro-batch wait', 150], ['Job runtime', 40], ['Write to online store', 5], ['Feature read at request', 0.01]], n: 'A pragmatic middle ground: most of the freshness of streaming with batch’s simpler failure model and easier reprocessing. Often the right answer when “a few minutes” is acceptable.' },
+    hourly: { stages: [['Event emitted → log', 0.2], ['Wait for the hour to close', 1800], ['Job runtime', 240], ['Write to online store', 60], ['Feature read at request', 0.01]], n: 'Average staleness is about half the schedule plus the runtime — here roughly 35 minutes. Fine for behavioural aggregates, useless for anything adversarial.' },
+    nightly: { stages: [['Event emitted → log', 0.2], ['Wait for the day to close', 43200], ['Job runtime', 1800], ['Write to online store', 300], ['Feature read at request', 0.01]], n: 'Up to 24 hours stale, 12 on average. Perfectly appropriate for lifetime values and slow-moving profile features — and a common hidden cause of “the model worked in the notebook”.' },
+  };
+  function budget() {
+    const k = $('#fPipe').dataset.value || 'stream', p = PIPES[k];
+    const total = p.stages.reduce((s, x) => s + x[1], 0);
+    $('#fBudget').innerHTML = p.stages.map(([n, v]) =>
+      `<div class="r"><span>${n}</span><div class="tk"><i style="width:${clamp(v / total * 100, 0.5, 100)}%;background:var(--accent)"></i></div><span class="v">${v < 1 ? (v * 1000).toFixed(0) + ' ms' : v < 90 ? v + ' s' : (v / 60).toFixed(0) + ' min'}</span></div>`).join('') +
+      `<div class="r"><span><b>Total (worst case)</b></span><div class="tk"><i style="width:100%;background:${total < 5 ? 'var(--green)' : total < 600 ? 'var(--amber)' : 'var(--red)'}"></i></div><span class="v"><b>${total < 90 ? total.toFixed(1) + ' s' : total < 5400 ? (total / 60).toFixed(0) + ' min' : (total / 3600).toFixed(1) + ' h'}</b></span></div>`;
+    $('#fInfo p').innerHTML = p.n;
+  }
+  $('#fPipe').addEventListener('segchange', budget);
+  budget();
+})();
+</script>
+</body>
+</html>

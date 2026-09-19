@@ -1,0 +1,292 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Case Study: E-commerce Search &amp; Ranking</title>
+<link rel="stylesheet" href="assets/style.css">
+<script>try{var t=JSON.parse(localStorage.getItem('ml-theme'));if(t)document.documentElement.setAttribute('data-theme',t)}catch(e){}</script>
+<style>
+  .req { display:grid; grid-template-columns:repeat(auto-fit,minmax(160px,1fr)); gap:8px }
+  .req > div { padding:10px 12px; border-radius:12px; background:var(--surface-2); border:1px solid var(--border) }
+  .req b { display:block; font-size:11px; color:var(--muted); text-transform:uppercase; letter-spacing:.05em }
+  .req span { font-family:var(--mono); font-size:17px; font-weight:800 }
+  .results { display:grid; gap:6px; margin-top:10px }
+  .results .item { display:grid; grid-template-columns:24px 1fr 62px 62px 62px; gap:8px; align-items:center; padding:8px 10px; border-radius:10px; background:var(--surface-2); border:1px solid var(--border); font-size:13px }
+  .results .item.spon { border-left:4px solid var(--amber) }
+  .results .item.oos { opacity:.5 }
+  .results .sc { font-family:var(--mono); text-align:right; font-size:11.5px; color:var(--muted) }
+  .results .hd { background:none; border:none; color:var(--muted); font-size:11px; text-transform:uppercase; letter-spacing:.05em }
+  .qsteps { display:grid; gap:6px }
+  .qsteps .r { display:grid; grid-template-columns:150px 1fr; gap:12px; padding:9px 11px; border-radius:10px; background:var(--surface-2); border:1px solid var(--border); font-size:13px }
+  .qsteps .r b { font-family:var(--mono); color:var(--accent) }
+  .qsteps .r code { font-size:12px }
+</style>
+</head>
+<body data-chapter="42">
+<main class="content">
+
+  <section class="hero">
+    <div class="eyebrow"><span class="pill accent">Chapter 42</span><span class="pill pink">Case Study</span><span class="pill">⏱ 50 min</span></div>
+    <h1>Case Study: <span class="grad">E-commerce Search</span></h1>
+    <p class="lead">Design search for a marketplace with 200 million listings and 40 million searches a day. Unlike a feed, the user has told you exactly what they want — and unlike web search, the “right” answer depends on price, stock, delivery, seller quality and margin as much as on relevance.</p>
+    <ul class="objectives">
+      <li>Build a query-understanding pipeline that handles typos, intent and attributes</li>
+      <li>Combine lexical, vector and structured retrieval with hard filters</li>
+      <li>Train a learning-to-rank model on biased click data</li>
+      <li>Balance relevance against business objectives without corrupting either</li>
+      <li>Handle zero-result queries, stock churn and the long tail</li>
+    </ul>
+  </section>
+
+  <h2>1 · Requirements</h2>
+  <div class="req">
+    <div><b>Listings</b><span>200M</span></div>
+    <div><b>Searches/day</b><span>40M</span></div>
+    <div><b>Peak QPS</b><span>3,500</span></div>
+    <div><b>Latency budget</b><span>150 ms p95</span></div>
+    <div><b>Index freshness</b><span>&lt; 60 s for price/stock</span></div>
+    <div><b>Unique queries/day</b><span>6M (70% long tail)</span></div>
+  </div>
+
+  <div class="callout tip">
+    <div class="ico">🎯</div>
+    <div class="body"><div class="title">Metrics</div>
+      <p><b>Primary (online):</b> revenue per search session, with conversion rate as a secondary. <b>Offline:</b> NDCG@10 against human-judged relevance for head queries, plus click-model-based NDCG for the tail. <b>Guardrails:</b> zero-result rate, p95 latency, share of impressions to sponsored listings, new-seller exposure, and returns rate (a proxy for “the customer bought the wrong thing”).<br>
+      <b>Baseline:</b> BM25 on title and attributes, sorted by a static popularity prior. Surprisingly hard to beat on head queries; easy to beat on the tail.</p></div>
+  </div>
+
+  <h2>2 · Query understanding</h2>
+  <div class="qsteps">
+    <div class="r"><b>Normalise</b><span>Lowercase, strip punctuation, expand units (<code>13in → 13 inch</code>), handle plurals. Cheap and high-yield.</span></div>
+    <div class="r"><b>Spell correct</b><span>Learned from query logs: the corrections users make themselves are the best training data available (<code>ipone</code> → <code>iphone</code>). Never “correct” a real brand into a common word.</span></div>
+    <div class="r"><b>Segment &amp; tag</b><span>Named-entity tagging over the query: <code>red nike running shoes size 9</code> → colour=red, brand=nike, category=running-shoes, size=9. This turns free text into structured filters.</span></div>
+    <div class="r"><b>Intent classify</b><span>Navigational (a specific product), broad (“gifts for dad”), or attribute-driven. Intent changes the whole ranking strategy — a navigational query wants one exact result, not diversity.</span></div>
+    <div class="r"><b>Expand</b><span>Synonyms from co-click data (<code>trainers ≈ sneakers</code>), and controlled query relaxation when recall is low. Expansion is where precision goes to die, so gate it on retrieved-result count.</span></div>
+    <div class="r"><b>Rewrite</b><span>For the tail, an embedding of the whole query carries meaning that token matching loses — which is exactly where hybrid retrieval earns its place.</span></div>
+  </div>
+
+  <div class="callout warn">
+    <div class="ico">🔤</div>
+    <div class="body"><div class="title">Tagging the query is worth more than a better ranker</div>
+      <p>Once <code>size 9</code> is a structured filter rather than two tokens, you stop returning size-11 shoes that happen to mention “9” in the description. Attribute extraction converts fuzzy text matching into exact constraints, and on marketplaces it typically moves conversion more than any ranking model change — because the failures it removes are the ones that make users leave.</p></div>
+  </div>
+
+  <h2>3 · Retrieval</h2>
+  <div class="table-wrap">
+    <table class="t">
+      <thead><tr><th>Leg</th><th>Handles</th><th>Returns</th></tr></thead>
+      <tbody>
+        <tr><td><b>Lexical (BM25)</b></td><td>Exact terms, model numbers, brand names, SKUs</td><td>~800</td></tr>
+        <tr><td><b>Vector (bi-encoder)</b></td><td>Paraphrase and intent: “something to keep coffee hot” → vacuum flasks</td><td>~600</td></tr>
+        <tr><td><b>Structured</b></td><td>The tagged attributes as hard filters, plus category priors</td><td>constrains both legs</td></tr>
+        <tr><td><b>Personalised</b></td><td>Brands and price bands this user buys; recently viewed</td><td>~200</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="small muted" style="margin-top:8px">Fuse with reciprocal rank fusion (Chapter 20), then apply <b>hard business filters</b>: in stock, ships to this country, not blocked, seller active. Hard filters run inside retrieval, never afterwards — post-filtering a selective constraint leaves you with three results from the wrong neighbourhood.</p>
+
+  <h2>4 · Learning to rank</h2>
+  <p>A gradient-boosted ranker (LambdaMART-style) over ~200 features remains extremely competitive here, with a neural ranker as the challenger for the tail where text understanding matters most.</p>
+
+  <div class="grid c3">
+    <div class="card"><h4 class="mt0">Query–item features</h4><p class="small mb0">BM25 scores per field, embedding similarity, attribute match count, exact-title match, category agreement.</p></div>
+    <div class="card"><h4 class="mt0">Item features</h4><p class="small mb0">Historical CTR and conversion (position-debiased), price versus category median, seller rating, delivery speed, return rate, stock depth, recency.</p></div>
+    <div class="card"><h4 class="mt0">User &amp; context features</h4><p class="small mb0">Price sensitivity, brand affinity, device, locale, session history, time of day.</p></div>
+  </div>
+
+  <div class="callout danger">
+    <div class="ico">🎣</div>
+    <div class="body"><div class="title">Your labels are clicks, and clicks are biased</div>
+      <p>Position bias dominates (Chapter 30), and there's a second trap specific to commerce: <b>the historical CTR feature</b>. An item shown often gets clicks, so its CTR rises, so it ranks higher. Untreated, the ranker learns to reproduce yesterday's ranking. Controls: position-debias the labels with propensities estimated from randomised swaps; compute CTR features out-of-time and shrink them toward the category prior for low-volume items; and use purchases, not clicks, as the primary label wherever volume allows — they're rarer but far less gameable.</p></div>
+  </div>
+
+  <h2>5 · Deep dive: mixing relevance with business objectives</h2>
+  <p>Every marketplace needs the ranker to consider margin, stock and sponsorship. Every marketplace also has a story about the quarter someone weighted margin too heavily. Try it:</p>
+
+  <div class="panel">
+    <div class="panel-head"><div class="dots"><i></i><i></i><i></i></div><span class="p-title">Query: “running shoes”</span><span class="p-tag">Interactive</span></div>
+    <div class="panel-body">
+      <div class="range-row"><label for="wRel">Relevance weight</label><input type="range" id="wRel" min="0" max="1" step="0.05" value="1"><output id="wRelV"></output></div>
+      <div class="range-row"><label for="wMar">Margin weight</label><input type="range" id="wMar" min="0" max="1" step="0.05" value="0.15"><output id="wMarV"></output></div>
+      <div class="range-row"><label for="wSpon">Sponsored boost</label><input type="range" id="wSpon" min="0" max="1" step="0.05" value="0.2"><output id="wSponV"></output></div>
+      <div class="range-row"><label for="wDel">Delivery speed weight</label><input type="range" id="wDel" min="0" max="1" step="0.05" value="0.25"><output id="wDelV"></output></div>
+      <div class="results" id="resList"></div>
+      <div class="stats" style="margin-top:12px">
+        <div class="stat acc"><div class="k">Mean relevance (top 5)</div><div class="v" id="mRel" style="font-size:18px">–</div></div>
+        <div class="stat good"><div class="k">Expected revenue / search</div><div class="v" id="mRev" style="font-size:18px">–</div></div>
+        <div class="stat"><div class="k">Sponsored in top 5</div><div class="v" id="mSpon" style="font-size:18px">–</div></div>
+        <div class="stat warn"><div class="k">Projected long-run trust</div><div class="v" id="mTrust" style="font-size:18px">–</div></div>
+      </div>
+      <div class="callout" id="mixInfo" style="margin-top:12px"><div class="ico">⚖️</div><div class="body"><p style="margin:0"></p></div></div>
+    </div>
+  </div>
+
+  <h2>6 · Deep dive: the tail and zero results</h2>
+  <div class="split">
+    <div class="card"><h4 class="mt0">70% of queries are seen once a week or less</h4><p class="small mb0">Head queries have abundant click data and are largely solved. The tail has none — no CTR features, no co-click synonyms — so it depends entirely on text and attribute understanding. That's where embeddings, query tagging and relaxation earn their keep, and where offline NDCG on head queries will tell you nothing.</p></div>
+    <div class="card"><h4 class="mt0">Zero results are a product failure</h4><p class="small mb0">Track the zero-result rate as a first-class metric. Recovery ladder: drop the least important attribute filter, relax to the parent category, fall back to the vector leg alone, then show “similar items” with an honest explanation. Never show an empty page — and log every case, because the recovery path is also your best source of missing-synonym data.</p></div>
+  </div>
+
+  <h2>7 · Deep dive: index freshness</h2>
+  <div class="table-wrap">
+    <table class="t">
+      <thead><tr><th>Change</th><th>Freshness need</th><th>Mechanism</th></tr></thead>
+      <tbody>
+        <tr><td>Price, stock, delivery estimate</td><td>&lt; 60 s</td><td>Streaming partial updates to a mutable field store, read at ranking time — not a document reindex</td></tr>
+        <tr><td>New listing</td><td>&lt; 5 min</td><td>Incremental index, plus a cold-start exposure budget like Chapter 41</td></tr>
+        <tr><td>Title, images, attributes</td><td>&lt; 1 h</td><td>Incremental reindex with embedding recompute</td></tr>
+        <tr><td>Historical CTR / conversion</td><td>Daily</td><td>Batch job, out-of-time, shrunk toward the category prior</td></tr>
+        <tr><td>Embedding model version</td><td>Quarterly</td><td>Full re-embed behind a shadow index, then an atomic swap (Chapter 15)</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="callout warn">
+    <div class="ico">📦</div>
+    <div class="body"><div class="title">Selling an out-of-stock item is worse than not ranking it</div>
+      <p>Stock changes far faster than any reindex cadence, so stock must be a <b>runtime lookup</b>, not a static index field. The common pattern: retrieve generously, then apply availability at ranking time using a fast key-value read, and treat a stale “in stock” as a bug with a defined SLA. A ranking system that is 2% more relevant and sells unavailable items loses.</p></div>
+  </div>
+
+  <h2>8 · Evaluation</h2>
+  <div class="table-wrap">
+    <table class="t">
+      <thead><tr><th>Stage</th><th>Method</th><th>Caveat</th></tr></thead>
+      <tbody>
+        <tr><td>Offline (head)</td><td>NDCG against human relevance judgements</td><td>Expensive; covers only a few thousand queries</td></tr>
+        <tr><td>Offline (tail)</td><td>Click-model NDCG from logs</td><td>Inherits the biases of the ranker that produced the logs</td></tr>
+        <tr><td>Interleaving</td><td>Blend two rankers in one result page</td><td>Very sensitive, fast — measures ranking preference, not revenue (Chapter 33)</td></tr>
+        <tr><td>A/B test</td><td>Revenue per session, conversion, returns</td><td>The decision metric; needs weeks and careful guardrails</td></tr>
+        <tr><td>Query-class slices</td><td>Head / tail / navigational / broad / zero-result</td><td>Aggregate NDCG hides tail regressions completely</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="callout interview"><div class="ico">🎤</div><div class="body"><div class="title">Interview drill</div>
+    <p class="small" style="margin:10px 0 0"><b>Follow-up:</b> “Conversion improved but returns went up 15%.” What happened?</p>
+    <details class="ans"><summary>How a strong answer sounds</summary><div>The ranker learned to surface items people <i>buy</i>, not items that satisfy them — typically by favouring cheap items, misleading titles or wrong-variant matches (size, colour, compatibility). Clicks and purchases are both short-horizon signals; returns are the delayed truth. I'd add returns and post-purchase signals into the training objective as a negative head, check whether attribute matching is failing for variant-heavy categories, slice returns by query class and seller, and add returns rate as a launch guardrail. The general lesson: when a metric improves and a slower one degrades, you've usually optimised a proxy past the point where it tracks the outcome.</div></details>
+    <p class="small" style="margin:10px 0 0"><b>Follow-up:</b> “Why not rank everything by conversion probability?”</p>
+    <details class="ans"><summary>How a strong answer sounds</summary><div>Because conversion probability is estimated from data the current ranker generated, so it encodes position bias and popularity feedback — high-exposure items look convertible because they were shown. It also ignores the long tail, where there's no data at all, and it optimises a single session rather than the relationship: cheap, high-conversion items can raise returns and erode trust. A practical ranker predicts several outcomes — click, purchase, return, satisfaction — combines them with weights that are a product decision, and is trained on debiased labels with guardrails on the things conversion doesn't see.</div></details>
+  </div></div>
+
+  <div class="takeaways">
+    <h3>🧠 Key takeaways</h3>
+    <ul>
+      <li>Query understanding — tagging attributes into hard filters — often beats ranking improvements.</li>
+      <li>Hybrid lexical + vector retrieval with structured filters applied <i>inside</i> the search.</li>
+      <li>Debias click labels and shrink CTR features, or the ranker relearns yesterday's ranking.</li>
+      <li>Business objectives belong in an explicit weighted blend with guardrails, not hidden in the label.</li>
+      <li>Stock and price are runtime lookups; zero-result rate and tail slices are first-class metrics.</li>
+    </ul>
+  </div>
+
+  <div class="quiz-wrap">
+    <h2>Check your understanding</h2>
+    <div class="quiz-score"></div>
+
+    <div class="quiz" data-answer="1">
+      <p class="q">Why apply “in stock” as a runtime lookup rather than an index field?</p>
+      <div class="opts">
+        <button class="opt">Index fields can't store booleans</button>
+        <button class="opt">Stock changes far faster than any reindex cadence, and selling an unavailable item is worse than not ranking it</button>
+        <button class="opt">It makes BM25 scores more accurate</button>
+        <button class="opt">To reduce index size</button>
+      </div>
+      <div class="explain">Freshness requirements differ per field. Fast-changing attributes belong in a low-latency store read at ranking time.</div>
+    </div>
+
+    <div class="quiz" data-answer="2">
+      <p class="q">Your ranker uses historical CTR as a feature. What's the danger?</p>
+      <div class="opts">
+        <button class="opt">CTR is expensive to compute</button>
+        <button class="opt">It overfits to seasonal effects</button>
+        <button class="opt">Exposure drives CTR, so the model learns to reproduce the existing ranking</button>
+        <button class="opt">It leaks user identity</button>
+      </div>
+      <div class="explain">A self-reinforcing loop. Debias by position, compute out-of-time, and shrink low-volume items toward the category prior.</div>
+    </div>
+
+    <div class="quiz" data-answer="0">
+      <p class="q">70% of queries are long tail with no click history. Which investment helps them most?</p>
+      <div class="opts">
+        <button class="opt">Query tagging plus embedding-based retrieval</button>
+        <button class="opt">More CTR features</button>
+        <button class="opt">A larger candidate set from BM25 only</button>
+        <button class="opt">Higher sponsored weighting</button>
+      </div>
+      <div class="explain">Behavioural features don't exist for the tail. Understanding the query text and matching on semantics and attributes is all you have.</div>
+    </div>
+
+    <div class="quiz" data-answer="3">
+      <p class="q">Offline NDCG improved 4% but the A/B test showed no revenue change. Most likely explanation?</p>
+      <div class="opts">
+        <button class="opt">The A/B test was too short</button>
+        <button class="opt">NDCG is the wrong formula</button>
+        <button class="opt">The ranker is overfitting</button>
+        <button class="opt">The judged set is head queries, and the gain didn't reach the tail or didn't change purchase decisions</button>
+      </div>
+      <div class="explain">Human-judged sets skew to head queries, and relevance gains on results users were already going to buy don't move revenue. Slice by query class before believing an aggregate offline gain.</div>
+    </div>
+
+    <div class="quiz" data-answer="1">
+      <p class="q">What's the right response to a zero-result query?</p>
+      <div class="opts">
+        <button class="opt">Show an empty page with a message</button>
+        <button class="opt">Relax filters progressively, fall back to the vector leg, and show similar items with an explanation — while logging the case</button>
+        <button class="opt">Retry the same query</button>
+        <button class="opt">Redirect to the home page</button>
+      </div>
+      <div class="explain">Zero results are a lost session and a free signal about missing synonyms or coverage. The recovery ladder salvages the visit and the log improves tomorrow's retrieval.</div>
+    </div>
+  </div>
+</main>
+<script src="assets/app.js"></script>
+<script>
+(function(){
+  const { $, $$, clamp } = ML;
+
+  const ITEMS = [
+    { t: 'Nike Pegasus 40 · road running', rel: .97, margin: .18, spon: 0, del: 2, oos: false, price: 109 },
+    { t: 'Adidas Ultraboost Light', rel: .94, margin: .22, spon: 0, del: 3, oos: false, price: 139 },
+    { t: 'Brooks Ghost 15 (wide fit)', rel: .92, margin: .26, spon: 1, del: 1, oos: false, price: 119 },
+    { t: 'Own-brand trail runner', rel: .71, margin: .58, spon: 0, del: 1, oos: false, price: 44 },
+    { t: 'Asics Gel-Kayano 30', rel: .90, margin: .19, spon: 0, del: 5, oos: false, price: 149 },
+    { t: 'Running socks 5-pack', rel: .41, margin: .62, spon: 1, del: 1, oos: false, price: 14 },
+    { t: 'New Balance 1080v13', rel: .89, margin: .21, spon: 0, del: 2, oos: true, price: 145 },
+    { t: 'Unbranded mesh sneakers', rel: .58, margin: .71, spon: 1, del: 4, oos: false, price: 22 },
+  ];
+  function mix() {
+    const wRel = +$('#wRel').value, wMar = +$('#wMar').value, wSpon = +$('#wSpon').value, wDel = +$('#wDel').value;
+    $('#wRelV').textContent = wRel.toFixed(2);
+    $('#wMarV').textContent = wMar.toFixed(2);
+    $('#wSponV').textContent = wSpon.toFixed(2);
+    $('#wDelV').textContent = wDel.toFixed(2);
+    const scored = ITEMS.filter(i => !i.oos).map(i => ({
+      ...i,
+      score: wRel * i.rel + wMar * i.margin + wSpon * i.spon * 0.6 + wDel * (1 - (i.del - 1) / 4),
+    })).sort((a, b) => b.score - a.score);
+    $('#resList').innerHTML =
+      `<div class="item hd"><span></span><span>listing</span><span class="sc">rel</span><span class="sc">margin</span><span class="sc">score</span></div>` +
+      scored.map((i, k) => `<div class="item ${i.spon ? 'spon' : ''}"><span class="sc">${k + 1}</span><span>${i.t}${i.spon ? ' <span class="pill amber" style="font-size:10px;padding:1px 6px">sponsored</span>' : ''}</span><span class="sc">${i.rel.toFixed(2)}</span><span class="sc">${(i.margin * 100).toFixed(0)}%</span><span class="sc">${i.score.toFixed(2)}</span></div>`).join('') +
+      `<div class="item oos"><span class="sc">–</span><span>New Balance 1080v13 — <b>out of stock, filtered at runtime</b></span><span class="sc">0.89</span><span class="sc">21%</span><span class="sc">—</span></div>`;
+    const top5 = scored.slice(0, 5);
+    const meanRel = top5.reduce((s, i) => s + i.rel, 0) / 5;
+    const rev = top5.reduce((s, i, k) => s + i.rel * i.price * i.margin * Math.pow(0.72, k), 0);
+    const spon = top5.filter(i => i.spon).length;
+    const trust = clamp(1 - (1 - meanRel) * 1.9 - spon * 0.07, 0, 1);
+    $('#mRel').textContent = meanRel.toFixed(3);
+    $('#mRev').textContent = '£' + rev.toFixed(2);
+    $('#mSpon').textContent = spon + ' / 5';
+    $('#mTrust').textContent = (trust * 100).toFixed(0) + '%';
+    $('#mixInfo p').innerHTML = meanRel > 0.88
+      ? `✅ <b>Relevance-led.</b> The top results are what the user asked for, and the business objectives are breaking ties rather than driving the order. Expected revenue per search is lower than the aggressive setting — and this is the ordering that keeps people coming back, which is why trust belongs in the launch criteria alongside revenue.`
+      : meanRel > 0.75
+        ? `⚠️ <b>Business objectives are now visibly reordering results.</b> A high-margin item has climbed above better matches. This is often defensible — a slightly cheaper equivalent with next-day delivery genuinely serves the user — but it needs a relevance floor: no item below a relevance threshold may enter the top 5, regardless of margin.`
+        : `🚩 <b>Relevance has been sold.</b> Own-brand and sponsored items dominate the page at the expense of what the user searched for. Revenue per search looks excellent this quarter; the measurable consequences — lower repeat search rate, higher returns, more zero-conversion sessions — arrive one to two quarters later, by which point the weighting is normalised. This is the single most common self-inflicted wound in marketplace search.`;
+  }
+  ['#wRel', '#wMar', '#wSpon', '#wDel'].forEach(id => $(id).addEventListener('input', mix));
+  mix();
+})();
+</script>
+</body>
+</html>

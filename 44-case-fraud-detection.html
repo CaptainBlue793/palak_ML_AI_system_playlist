@@ -1,0 +1,343 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Case Study: Real-Time Fraud Detection</title>
+<link rel="stylesheet" href="assets/style.css">
+<script>try{var t=JSON.parse(localStorage.getItem('ml-theme'));if(t)document.documentElement.setAttribute('data-theme',t)}catch(e){}</script>
+<style>
+  .req { display:grid; grid-template-columns:repeat(auto-fit,minmax(160px,1fr)); gap:8px }
+  .req > div { padding:10px 12px; border-radius:12px; background:var(--surface-2); border:1px solid var(--border) }
+  .req b { display:block; font-size:11px; color:var(--muted); text-transform:uppercase; letter-spacing:.05em }
+  .req span { font-family:var(--mono); font-size:17px; font-weight:800 }
+  .bands { display:grid; gap:6px }
+  .bands .r { display:grid; grid-template-columns:120px 1fr 78px 78px; gap:10px; align-items:center; font-size:13px }
+  .bands .tk { height:16px; border-radius:6px; background:var(--surface-3); overflow:hidden; display:flex }
+  .bands .tk i { display:block; height:100% }
+  .bands .v { font-family:var(--mono); text-align:right; font-size:12px; color:var(--muted) }
+  .adv-svg { width:100%; height:220px }
+  .adv-svg .ln { fill:none; stroke-width:2.6 }
+  .adv-svg text { font-size:10.5px; fill:var(--muted); font-family:var(--mono) }
+  .layers2 { display:grid; gap:8px }
+  .layers2 .r { display:grid; grid-template-columns:140px 1fr; gap:12px; padding:11px 13px; border-radius:12px; background:var(--surface-2); border:1px solid var(--border); font-size:13.5px }
+  .layers2 .r b { font-family:var(--mono); color:var(--accent) }
+</style>
+</head>
+<body data-chapter="44">
+<main class="content">
+
+  <section class="hero">
+    <div class="eyebrow"><span class="pill accent">Chapter 44</span><span class="pill pink">Case Study</span><span class="pill">⏱ 50 min</span></div>
+    <h1>Case Study: <span class="grad">Real-Time Fraud Detection</span></h1>
+    <p class="lead">Score every card transaction in 50 milliseconds, catch fraud that is 0.15% of volume, and do it against an adversary who is actively testing your defences and will change tactics the week after you deploy. The interesting constraints here are not modelling ones.</p>
+    <ul class="objectives">
+      <li>Turn fraud losses and false declines into a single decision rule</li>
+      <li>Build streaming velocity and graph features inside a 50 ms budget</li>
+      <li>Train with delayed, biased and adversarially-shifting labels</li>
+      <li>Design the human review loop as part of the system, not around it</li>
+      <li>Keep the system honest when the attacker adapts</li>
+    </ul>
+  </section>
+
+  <h2>1 · Requirements</h2>
+  <div class="req">
+    <div><b>Transactions/s (peak)</b><span>12,000</span></div>
+    <div><b>Latency budget</b><span>50 ms p99</span></div>
+    <div><b>Fraud rate</b><span>0.15%</span></div>
+    <div><b>Review capacity</b><span>4,000 / day</span></div>
+    <div><b>Chargeback lag</b><span>up to 90 days</span></div>
+    <div><b>Availability</b><span>99.99% (fail-open?)</span></div>
+  </div>
+
+  <div class="callout warn">
+    <div class="ico">🚦</div>
+    <div class="body"><div class="title">The first design question: what happens if the model is down?</div>
+      <p><b>Fail open</b> (approve everything) loses money to fraud for the duration. <b>Fail closed</b> (decline everything) stops all revenue and is far more damaging. The real answer is a fallback ladder: model → cached score for this card → a small rules engine → approve with a conservative amount cap. The decision has to be made in advance, written down, and rehearsed — and it's a business decision, not an engineering one.</p></div>
+  </div>
+
+  <div class="callout tip">
+    <div class="ico">🎯</div>
+    <div class="body"><div class="title">Metrics</div>
+      <p><b>Primary (online):</b> net fraud loss per £1,000 processed, <i>plus</i> the false-decline rate — the two must be reported together or one will be optimised into the other. <b>Offline:</b> PR-AUC and recall at the precision the review team can sustain. <b>Guardrails:</b> approval rate by segment, p99 latency, review queue depth, and appeal overturn rate.<br>
+      <b>Baseline:</b> the existing rules engine. It will be strong on known patterns and useless on new ones — which is exactly the shape of the argument for adding a model.</p></div>
+  </div>
+
+  <div class="callout danger">
+    <div class="ico">😤</div>
+    <div class="body"><div class="title">False declines cost more than fraud</div>
+      <p>Industry experience is consistent: legitimate customers wrongly declined cost multiples of the fraud prevented, because a declined customer often doesn't come back and tells other people. A model that reduces fraud 30% while raising false declines 1 percentage point is usually a net loss. This is why the threshold must come from expected cost (Chapter 7) rather than from a default — and why the false-decline rate belongs next to the loss number in every report.</p></div>
+  </div>
+
+  <h2>2 · Features inside 50 ms</h2>
+  <div class="table-wrap">
+    <table class="t">
+      <thead><tr><th>Family</th><th>Examples</th><th>Where it's computed</th></tr></thead>
+      <tbody>
+        <tr><td><b>Transaction</b></td><td>amount, currency, MCC, card present, entry mode, time</td><td>The request itself — free</td></tr>
+        <tr><td><b>Velocity</b></td><td>count/sum for this card, device, IP and merchant over 1 min / 1 h / 24 h / 7 d</td><td>Streaming aggregates in an online store (Chapter 28)</td></tr>
+        <tr><td><b>Behavioural</b></td><td>deviation from this card's usual amount, hour, geography, merchant category</td><td>Precomputed profile + a live comparison</td></tr>
+        <tr><td><b>Device &amp; session</b></td><td>device fingerprint age, emulator flags, typing/session dynamics, proxy signals</td><td>Client SDK + enrichment service</td></tr>
+        <tr><td><b>Graph</b></td><td>how many cards this device has touched; shared email/address components</td><td><b>Precomputed</b> — a live graph traversal will not fit in the budget</td></tr>
+        <tr><td><b>Merchant</b></td><td>merchant's historical fraud rate, chargeback ratio, age</td><td>Batch, shrunk toward the category prior</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="callout tip">
+    <div class="ico">🕸️</div>
+    <div class="body"><div class="title">Graph features precomputed, refreshed near-line</div>
+      <p>“This device has been used with 14 cards in the last hour” is one of the strongest fraud signals in existence and one of the most expensive to compute. The pattern: maintain the entity graph in a streaming job, materialise per-entity aggregates (degree, distinct counts, component risk) into the online store, and read them as plain features. Latency budget met, signal preserved, and the graph job is where the interesting engineering lives.</p></div>
+  </div>
+
+  <h2>3 · Defence in depth</h2>
+  <div class="layers2">
+    <div class="r"><b>Rules</b><span>Hard blocks for known-bad entities, sanctions lists and velocity ceilings. Instant to update — crucial during an active attack, when waiting for a retrain is not an option.</span></div>
+    <div class="r"><b>Model</b><span>Gradient-boosted trees over the features above. Fast on CPU, handles mixed types and missing values natively, retrains in minutes (Chapter 6).</span></div>
+    <div class="r"><b>Policy</b><span>Threshold per amount band and per segment, derived from expected cost. Step-up authentication (3-D Secure, one-time code) as a middle option between approve and decline — often the highest-value action available.</span></div>
+    <div class="r"><b>Human review</b><span>A bounded queue of the highest-value uncertain cases. Also your fastest source of labels and your window into new attack patterns.</span></div>
+    <div class="r"><b>Post-hoc</b><span>Batch detection of patterns visible only in aggregate — mule networks, testing sprees, merchant collusion — feeding back into rules and the graph.</span></div>
+  </div>
+
+  <h2>4 · Deep dive: thresholds by amount band</h2>
+  <div class="panel">
+    <div class="panel-head"><div class="dots"><i></i><i></i><i></i></div><span class="p-title">One threshold, or one per band?</span><span class="p-tag">Interactive</span></div>
+    <div class="panel-body">
+      <div class="seg" id="thrSeg"><button data-v="single" class="active">Single global threshold</button><button data-v="band">Per-band thresholds</button><button data-v="stepup">Per-band + step-up authentication</button></div>
+      <div class="range-row" style="margin-top:8px"><label for="thrFd">Cost of a false decline (£)</label><input type="range" id="thrFd" min="2" max="60" step="1" value="18"><output id="thrFdV"></output></div>
+      <div class="bands" id="bandRows" style="margin-top:12px"></div>
+      <div class="stats" style="margin-top:12px">
+        <div class="stat bad"><div class="k">Fraud loss / day</div><div class="v" id="bLoss" style="font-size:18px">–</div></div>
+        <div class="stat warn"><div class="k">False declines / day</div><div class="v" id="bFd" style="font-size:18px">–</div></div>
+        <div class="stat"><div class="k">Review queue</div><div class="v" id="bQueue" style="font-size:18px">–</div></div>
+        <div class="stat good"><div class="k">Total cost / day</div><div class="v" id="bTotal" style="font-size:18px">–</div></div>
+      </div>
+      <div class="callout" id="bandInfo" style="margin-top:12px"><div class="ico">💷</div><div class="body"><p style="margin:0"></p></div></div>
+    </div>
+  </div>
+
+  <h2>5 · Deep dive: labels are late, biased and adversarial</h2>
+  <div class="grid c3">
+    <div class="card feature reveal"><div class="f-ico">⏳</div><h4>Late</h4><p>Chargebacks confirm at 30–90 days. Any performance metric computed today describes a model from three months ago (Chapter 34).</p></div>
+    <div class="card feature reveal"><div class="f-ico" style="background:var(--amber-soft)">🎭</div><h4>Biased</h4><p>You only observe outcomes for transactions you <b>approved</b>. Declined transactions have no label — the classic selection-bias trap in fraud.</p></div>
+    <div class="card feature reveal"><div class="f-ico" style="background:var(--red-soft)">🥷</div><h4>Adversarial</h4><p>The distribution shifts because of your model. Yesterday's signal is today's thing the attacker avoids.</p></div>
+  </div>
+
+  <div class="callout warn">
+    <div class="ico">🔍</div>
+    <div class="body"><div class="title">Recovering labels for what you declined</div>
+      <p>Three practical routes: <b>(1)</b> approve a small randomised sample of would-be declines below a value cap — an explicit, budgeted exploration cost that buys unbiased labels; <b>(2)</b> use human review outcomes as labels, remembering that reviewers see only what the model surfaced; <b>(3)</b> use downstream signals on approved-but-suspicious transactions (customer contact, refund requests, account takeover reports). Without at least one of these, your model's view of the world narrows to the shape of its own past decisions.</p></div>
+  </div>
+
+  <h2>6 · Deep dive: the adversary adapts</h2>
+  <div class="panel">
+    <div class="panel-head"><div class="dots"><i></i><i></i><i></i></div><span class="p-title">Detection rate over 26 weeks</span><span class="p-tag">Interactive</span></div>
+    <div class="panel-body">
+      <div class="seg" id="advSeg"><button data-v="static" class="active">Train once, never retrain</button><button data-v="monthly">Monthly retrain</button><button data-v="weekly">Weekly retrain + rules</button></div>
+      <div class="svg-scroll"><svg id="advSvg" class="diagram adv-svg" viewBox="0 0 640 220"></svg></div>
+      <div class="stats">
+        <div class="stat acc"><div class="k">Mean detection rate</div><div class="v" id="aDet" style="font-size:18px">–</div></div>
+        <div class="stat bad"><div class="k">Worst week</div><div class="v" id="aWorst" style="font-size:18px">–</div></div>
+        <div class="stat good"><div class="k">Cumulative loss (relative)</div><div class="v" id="aLoss" style="font-size:18px">–</div></div>
+      </div>
+      <div class="callout" id="advInfo" style="margin-top:12px"><div class="ico">🥷</div><div class="body"><p style="margin:0"></p></div></div>
+    </div>
+  </div>
+
+  <div class="callout danger">
+    <div class="ico">🧪</div>
+    <div class="body"><div class="title">Attackers probe your thresholds</div>
+      <p>Card testing — thousands of tiny transactions to find which cards work and which amounts pass — is both an attack and a reconnaissance tool. Signals: a burst of small amounts across many cards from one device or IP range, unusually high decline rates from a merchant, sudden clustering just under a known threshold. Defences: velocity rules at the entity level, deliberately fuzzy thresholds so the boundary isn't exactly learnable, rate limiting per device and per merchant, and alerting on the <i>decline</i> distribution rather than only on approvals.</p></div>
+  </div>
+
+  <h2>7 · The review loop</h2>
+  <div class="table-wrap">
+    <table class="t">
+      <thead><tr><th>Design choice</th><th>Why</th></tr></thead>
+      <tbody>
+        <tr><td><b>Queue by expected value, not by score</b></td><td>A £4,000 transaction at p=0.4 deserves review before a £30 one at p=0.9</td></tr>
+        <tr><td><b>Show evidence, not just a score</b></td><td>Reviewers need the velocity counts, the device history and the graph neighbourhood to decide in seconds</td></tr>
+        <tr><td><b>Capture structured reasons</b></td><td>“Declined: device shared across 14 cards” is a label <i>and</i> a feature idea</td></tr>
+        <tr><td><b>Randomise a small share of the queue</b></td><td>Otherwise reviewer labels only describe cases the model already suspected</td></tr>
+        <tr><td><b>Track reviewer agreement</b></td><td>Your label ceiling is human agreement (Chapter 3) — measure it before blaming the model</td></tr>
+        <tr><td><b>Feed appeals back</b></td><td>An overturned decline is a high-quality false-positive label and a customer you nearly lost</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="callout interview"><div class="ico">🎤</div><div class="body"><div class="title">Interview drill</div>
+    <p class="small" style="margin:10px 0 0"><b>Follow-up:</b> “Fraud losses dropped 40% after launch. Is that success?”</p>
+    <details class="ans"><summary>How a strong answer sounds</summary><div>Not on its own — I'd want the false-decline number next to it. Declining more transactions always reduces fraud; the question is what it cost in legitimate customers, and that cost is larger per unit than the fraud saved. So: approval rate before and after, by segment and by amount band; the appeal overturn rate; and ideally a holdout group whose transactions were scored but not acted on, which gives an unbiased estimate of both sides. I'd also check where the reduction came from — if it's concentrated in one merchant or one geography, it may be a data artefact rather than better detection. And I'd look at the review queue: if it grew beyond capacity, the apparent gain may just be cases quietly timing out into a default decision.</div></details>
+    <p class="small" style="margin:10px 0 0"><b>Follow-up:</b> “A new attack pattern appears on Saturday night. What happens?”</p>
+    <details class="ans"><summary>How a strong answer sounds</summary><div>The model won't catch it — it has never seen the pattern and the labels are 90 days away. That's what the rules layer is for: an on-call analyst can deploy an entity-level velocity rule or a hard block within minutes, with a documented review and an expiry so it doesn't become permanent technical debt. In parallel, the case goes into the review queue with a priority flag, the graph job surfaces connected entities so the block covers the network rather than one card, and the labelled cases go into the next retrain. The design principle is that the fast layer is human-editable rules and the slow layer is the model — attempting to solve a Saturday-night attack by retraining is how people lose a weekend and a lot of money.</div></details>
+  </div></div>
+
+  <div class="takeaways">
+    <h3>🧠 Key takeaways</h3>
+    <ul>
+      <li>Report fraud loss and false declines together; the threshold comes from expected cost per amount band.</li>
+      <li>Velocity and graph features carry the signal — precompute graphs near-line to meet the latency budget.</li>
+      <li>Labels are late, biased by your own decisions and adversarially shifting; budget for randomised approvals.</li>
+      <li>Rules give you a minutes-fast response layer; the model gives you generalisation. You need both.</li>
+      <li>The review queue is part of the system: prioritise by expected value and harvest structured labels from it.</li>
+    </ul>
+  </div>
+
+  <div class="quiz-wrap">
+    <h2>Check your understanding</h2>
+    <div class="quiz-score"></div>
+
+    <div class="quiz" data-answer="2">
+      <p class="q">Why is a single global decision threshold a poor choice here?</p>
+      <div class="opts">
+        <button class="opt">It's computationally expensive</button>
+        <button class="opt">It can't be calibrated</button>
+        <button class="opt">The cost of a miss scales with the transaction amount while the cost of a false decline is roughly fixed</button>
+        <button class="opt">It breaks the latency budget</button>
+      </div>
+      <div class="explain">Expected-cost reasoning gives a different optimum per amount band: aggressive on £4,000, permissive on £8.</div>
+    </div>
+
+    <div class="quiz" data-answer="1">
+      <p class="q">You only observe fraud outcomes for approved transactions. What problem does this create?</p>
+      <div class="opts">
+        <button class="opt">Label noise</button>
+        <button class="opt">Selection bias — the training data reflects the current model's decisions, not the true distribution</button>
+        <button class="opt">Class imbalance</button>
+        <button class="opt">Feature skew</button>
+      </div>
+      <div class="explain">The model's blind spots are self-perpetuating because it never sees the outcome of what it blocked. A randomised approval sample below a value cap buys unbiased labels.</div>
+    </div>
+
+    <div class="quiz" data-answer="0">
+      <p class="q">A new attack starts tonight. Which layer responds fastest?</p>
+      <div class="opts">
+        <button class="opt">The rules engine — human-editable, deployable in minutes</button>
+        <button class="opt">Retraining the model</button>
+        <button class="opt">The review queue</button>
+        <button class="opt">The batch graph job</button>
+      </div>
+      <div class="explain">Model retraining needs labels that are months away. Rules exist precisely to cover the window between an attack appearing and the model learning it.</div>
+    </div>
+
+    <div class="quiz" data-answer="3">
+      <p class="q">Why precompute graph features rather than traversing the graph at request time?</p>
+      <div class="opts">
+        <button class="opt">Graphs can't be queried in real time at all</button>
+        <button class="opt">Precomputation improves accuracy</button>
+        <button class="opt">To reduce storage</button>
+        <button class="opt">A multi-hop traversal cannot fit in a 50 ms budget at 12,000 TPS</button>
+      </div>
+      <div class="explain">Maintain the graph in a streaming job and materialise per-entity aggregates; the scoring path then reads plain features.</div>
+    </div>
+
+    <div class="quiz" data-answer="1">
+      <p class="q">How should the review queue be prioritised?</p>
+      <div class="opts">
+        <button class="opt">By model score, highest first</button>
+        <button class="opt">By expected value at risk — probability times amount</button>
+        <button class="opt">By arrival time</button>
+        <button class="opt">By merchant size</button>
+      </div>
+      <div class="explain">Reviewer time is the scarce resource. A moderately suspicious large transaction is worth more attention than a highly suspicious tiny one.</div>
+    </div>
+  </div>
+</main>
+<script src="assets/app.js"></script>
+<script>
+(function(){
+  const { $, $$, clamp, fmt } = ML;
+
+  /* ================= thresholds by band ================= */
+  const BANDS = [
+    { n: '£0–25', vol: 380000, avg: 12, fraud: 0.0022 },
+    { n: '£25–100', vol: 290000, avg: 58, fraud: 0.0015 },
+    { n: '£100–500', vol: 190000, avg: 240, fraud: 0.0012 },
+    { n: '£500–2,000', vol: 62000, avg: 950, fraud: 0.0018 },
+    { n: '£2,000+', vol: 14000, avg: 4200, fraud: 0.0031 },
+  ];
+  function bands() {
+    const mode = $('#thrSeg').dataset.value || 'single';
+    const fdCost = +$('#thrFd').value;
+    $('#thrFdV').textContent = '£' + fdCost;
+    let loss = 0, fds = 0, queue = 0;
+    const rows = BANDS.map(b => {
+      let thr;
+      if (mode === 'single') thr = 0.5;
+      else thr = clamp(fdCost / (fdCost + b.avg), 0.01, 0.9);
+      // detection and false-decline rates as functions of threshold
+      const detect = clamp(0.94 - thr * 0.75, 0.15, 0.95);
+      const fdRate = clamp(0.028 * Math.exp(-thr * 4.2), 0.0002, 0.05);
+      const frauds = b.vol * b.fraud;
+      let missed = frauds * (1 - detect);
+      let falseDecl = b.vol * fdRate;
+      let reviewed = 0;
+      if (mode === 'stepup') {
+        // step-up recovers 70% of would-be false declines, catches extra fraud
+        reviewed = falseDecl * 0.9;
+        falseDecl *= 0.3;
+        missed *= 0.85;
+      }
+      loss += missed * b.avg;
+      fds += falseDecl;
+      queue += reviewed;
+      return { ...b, thr, detect, falseDecl, missed };
+    });
+    const mx = Math.max(...rows.map(r => r.missed * r.avg + r.falseDecl * fdCost));
+    $('#bandRows').innerHTML = rows.map(r =>
+      `<div class="r"><span>${r.n}</span><div class="tk"><i style="width:${(r.missed * r.avg / mx * 100).toFixed(1)}%;background:var(--red)"></i><i style="width:${(r.falseDecl * fdCost / mx * 100).toFixed(1)}%;background:var(--amber)"></i></div><span class="v">thr ${r.thr.toFixed(2)}</span><span class="v">${(r.detect * 100).toFixed(0)}% caught</span></div>`).join('') +
+      `<div class="small muted" style="margin-top:4px">red = fraud loss · amber = false-decline cost</div>`;
+    const total = loss + fds * fdCost;
+    $('#bLoss').textContent = '£' + fmt(loss, 0);
+    $('#bFd').textContent = fmt(fds, 0);
+    $('#bQueue').textContent = fmt(queue, 0) + (queue > 4000 ? ' ⚠️' : '');
+    $('#bTotal').textContent = '£' + fmt(total, 0);
+    const notes = {
+      single: `<b>One threshold for everything.</b> It is simultaneously too permissive on £4,000 transactions — where a miss costs the full amount — and far too aggressive on £12 ones, where declining a real customer costs more than the fraud would have. Total daily cost: <b>£${fmt(total, 0)}</b>.`,
+      band: `✅ <b>Per-band thresholds</b> derived from expected cost: flag above p ≈ fd_cost / (fd_cost + amount). Low-value transactions are allowed through freely; high-value ones are scrutinised. Same model, same day, <b>£${fmt(total, 0)}</b> — the improvement comes from the decision rule, not the model.`,
+      stepup: `✅✅ <b>Step-up authentication</b> turns the binary into three outcomes. Most would-be false declines become a one-time code the real customer passes, so you keep the revenue and the customer; fraudsters mostly abandon. Total <b>£${fmt(total, 0)}</b>, at the cost of ${fmt(queue, 0)} extra friction events a day${queue > 4000 ? ' — which now exceeds review capacity, so the step-up must be automated rather than manual' : ''}.`,
+    };
+    $('#bandInfo p').innerHTML = notes[mode];
+  }
+  $('#thrSeg').addEventListener('segchange', bands);
+  $('#thrFd').addEventListener('input', bands);
+  bands();
+
+  /* ================= adversarial drift ================= */
+  function adv() {
+    const mode = $('#advSeg').dataset.value || 'static';
+    const W = 26;
+    const det = [];
+    let d = 0.88;
+    for (let w = 0; w < W; w++) {
+      d -= 0.019 + (w % 7 === 3 ? 0.05 : 0);            // steady erosion + occasional new tactic
+      if (mode === 'monthly' && w % 4 === 3) d = Math.min(0.88, d + 0.11);
+      if (mode === 'weekly') { d = Math.min(0.9, d + 0.016); if (w % 7 === 3) d = Math.min(0.9, d + 0.04); }
+      det.push(clamp(d, 0.2, 0.95));
+    }
+    const X = (w) => 42 + w / (W - 1) * 580, Y = (v) => 185 - (v - 0.2) / 0.75 * 160;
+    let p = '';
+    det.forEach((v, w) => { p += (p ? 'L' : 'M') + X(w).toFixed(1) + ',' + Y(v).toFixed(1) + ' '; });
+    $('#advSvg').innerHTML =
+      `<line stroke="var(--border-strong)" x1="42" y1="185" x2="628" y2="185"/><line stroke="var(--border-strong)" x1="42" y1="10" x2="42" y2="185"/>` +
+      `<line stroke="var(--red)" stroke-dasharray="4 4" x1="42" y1="${Y(0.7)}" x2="628" y2="${Y(0.7)}"/><text x="545" y="${Y(0.7) - 5}" style="fill:var(--red)">target 70%</text>` +
+      `<path class="ln" style="stroke:var(--accent)" d="${p}"/>` +
+      `<text x="290" y="206">weeks</text><text x="2" y="14">detection</text>`;
+    const mean = det.reduce((a, b) => a + b, 0) / det.length;
+    const worst = Math.min(...det);
+    $('#aDet').textContent = (mean * 100).toFixed(1) + '%';
+    $('#aWorst').textContent = (worst * 100).toFixed(1) + '%';
+    $('#aLoss').textContent = ((1 - mean) / (1 - 0.86)).toFixed(2) + '×';
+    const notes = {
+      static: `🚩 <b>No retraining.</b> Detection decays continuously as the attacker adapts, falling to ${(worst * 100).toFixed(0)}% within six months — and because chargebacks lag 90 days, you find out about the first month's decay in the fourth. Fraud is the domain where “the model is fine, we trained it last year” is most expensively wrong.`,
+      monthly: `⚠️ <b>Monthly retraining</b> recovers detection in steps, but each cycle allows several weeks of erosion first, and a genuinely new tactic can run for most of a month. Better than nothing; the sawtooth is the cost.`,
+      weekly: `✅ <b>Weekly retraining plus a human-editable rules layer.</b> The model tracks gradual drift and the rules cover the gap when something new appears overnight. Detection stays near target, and the operational requirement this implies — an automated retraining pipeline with gates (Chapter 32) and an on-call analyst who can ship a rule — is the real design conclusion.`,
+    };
+    $('#advInfo p').innerHTML = notes[mode];
+  }
+  $('#advSeg').addEventListener('segchange', adv);
+  adv();
+})();
+</script>
+</body>
+</html>

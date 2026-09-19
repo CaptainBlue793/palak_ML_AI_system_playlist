@@ -1,0 +1,322 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Deployment, Rollout &amp; Online Experiments</title>
+<link rel="stylesheet" href="assets/style.css">
+<script>try{var t=JSON.parse(localStorage.getItem('ml-theme'));if(t)document.documentElement.setAttribute('data-theme',t)}catch(e){}</script>
+<style>
+  .peek-svg { width:100%; height:230px }
+  .peek-svg .ln { fill:none; stroke-width:1.6; opacity:.55 }
+  .peek-svg .sig { stroke:var(--red) }
+  .peek-svg .nosig { stroke:var(--accent-2) }
+  .peek-svg .band { fill:var(--surface-3); opacity:.5 }
+  .peek-svg text { font-size:10.5px; fill:var(--muted); font-family:var(--mono) }
+  .ramp { display:grid; gap:8px }
+  .ramp .r { display:grid; grid-template-columns:120px 1fr; gap:12px; align-items:center; padding:10px 12px; border-radius:12px; background:var(--surface-2); border:1px solid var(--border); font-size:13.5px }
+  .ramp .r b { font-family:var(--mono); color:var(--accent) }
+  .guard { display:grid; grid-template-columns:repeat(auto-fit,minmax(170px,1fr)); gap:8px }
+  .guard > div { padding:10px 12px; border-radius:12px; border:1px solid var(--border); background:var(--surface-2); font-size:13px }
+  .guard b { display:block; font-size:11px; color:var(--muted); text-transform:uppercase; letter-spacing:.05em; margin-bottom:3px }
+</style>
+</head>
+<body data-chapter="33">
+<main class="content">
+
+  <section class="hero">
+    <div class="eyebrow"><span class="pill accent">Chapter 33</span><span class="pill amber">Expert</span><span class="pill">⏱ 45 min</span></div>
+    <h1>Deployment, Rollout <span class="grad">&amp; Online Experiments</span></h1>
+    <p class="lead">The offline metric is a prediction. The experiment is the measurement. Most of what separates teams that ship improvements from teams that ship changes is the discipline between those two sentences.</p>
+    <ul class="objectives">
+      <li>Roll out through shadow, canary and experiment with automated guardrails</li>
+      <li>Size an A/B test and know what effect it can actually detect</li>
+      <li>Avoid peeking, novelty effects and interference</li>
+      <li>Choose between A/B, interleaving and bandits</li>
+      <li>Read a result honestly and decide with it</li>
+    </ul>
+  </section>
+
+  <h2>The rollout ladder</h2>
+  <div class="ramp">
+    <div class="r"><b>1 · Shadow</b><span>New model runs on real traffic; outputs logged, never used. Catches skew, latency and crashes at zero risk (Chapter 32). Duration: days.</span></div>
+    <div class="r"><b>2 · Canary</b><span>1–5% of traffic, watched by automatic guardrails on errors, latency, cost and a fast proxy metric. This is an operational safety check, not a measurement of value.</span></div>
+    <div class="r"><b>3 · Experiment</b><span>A proper A/B at a share large enough to detect the effect you care about, run for a pre-registered duration. This is where you learn whether it helps.</span></div>
+    <div class="r"><b>4 · Ramp</b><span>Increase share in steps, re-checking guardrails at each level. Some effects only appear under load or at scale.</span></div>
+    <div class="r"><b>5 · Full + holdback</b><span>Ship to everyone, but keep a small long-term holdback to measure cumulative effects and catch slow regressions.</span></div>
+  </div>
+
+  <div class="callout tip">
+    <div class="ico">🛡️</div>
+    <div class="body"><div class="title">Guardrails are not the same as the primary metric</div>
+      <p>The primary metric is what you hope will improve. Guardrails are what must <b>not</b> get worse, and they should trigger an automatic rollback without discussion.</p>
+      <div class="guard" style="margin-top:10px">
+        <div><b>Reliability</b>error rate, timeout rate, fallback rate</div>
+        <div><b>Latency</b>p95/p99 end to end</div>
+        <div><b>Cost</b>cost per request, GPU hours</div>
+        <div><b>Quality floor</b>complaint rate, thumbs-down, escalation rate</div>
+        <div><b>Fairness</b>outcome gaps across key segments</div>
+        <div><b>Safety</b>policy-violation rate, false-refusal rate</div>
+      </div></div>
+  </div>
+
+  <h2>Sizing an experiment</h2>
+  <p>The most common experimental failure is running a test that never had the statistical power to detect the effect you were hoping for — then reading its noise as a result.</p>
+
+  <div class="panel">
+    <div class="panel-head"><div class="dots"><i></i><i></i><i></i></div><span class="p-title">Sample size &amp; minimum detectable effect</span><span class="p-tag">Interactive</span></div>
+    <div class="panel-body">
+      <div class="range-row"><label for="abUsers">Daily users eligible</label><input type="range" id="abUsers" min="1000" max="5000000" step="1000" value="200000"><output id="abUsersV"></output></div>
+      <div class="range-row"><label for="abBase">Baseline conversion rate</label><input type="range" id="abBase" min="0.2" max="40" step="0.1" value="4"><output id="abBaseV"></output></div>
+      <div class="range-row"><label for="abMde">Relative effect you want to detect</label><input type="range" id="abMde" min="0.5" max="20" step="0.5" value="2"><output id="abMdeV"></output></div>
+      <div class="range-row"><label for="abSplit">Traffic in the experiment</label><input type="range" id="abSplit" min="5" max="100" step="5" value="50"><output id="abSplitV"></output></div>
+      <div class="stats">
+        <div class="stat acc"><div class="k">Users needed per arm</div><div class="v" id="abN" style="font-size:18px">–</div></div>
+        <div class="stat"><div class="k">Runtime</div><div class="v" id="abDays" style="font-size:18px">–</div></div>
+        <div class="stat good"><div class="k">MDE in 14 days</div><div class="v" id="abMde14" style="font-size:18px">–</div></div>
+        <div class="stat warn"><div class="k">Verdict</div><div class="v" id="abVerdict" style="font-size:15px">–</div></div>
+      </div>
+      <div class="callout" id="abInfo" style="margin-top:12px"><div class="ico">📐</div><div class="body"><p style="margin:0"></p></div></div>
+      <p class="small muted">Two-sided test, α = 0.05, power = 80%. Note how brutally the required sample grows as the effect shrinks — halving the effect quadruples the users. That relationship is why “we'll just run it for a week and see” usually measures nothing.</p>
+    </div>
+  </div>
+
+  <h2>Peeking: the most common way to fool yourself</h2>
+  <p>Checking the dashboard daily and stopping when it goes green does not give you a 5% false-positive rate. It gives you something much worse.</p>
+
+  <div class="panel">
+    <div class="panel-head"><div class="dots"><i></i><i></i><i></i></div><span class="p-title">100 A/A tests — no real effect at all</span><span class="p-tag">Interactive</span></div>
+    <div class="panel-body">
+      <div class="seg" id="peekSeg"><button data-v="fixed" class="active">Fixed horizon (correct)</button><button data-v="peek">Peek daily, stop when significant</button></div>
+      <div class="svg-scroll"><svg id="peekSvg" class="diagram peek-svg" viewBox="0 0 640 230"></svg></div>
+      <div class="stats">
+        <div class="stat bad"><div class="k">“Significant” results</div><div class="v" id="pkFalse">–</div></div>
+        <div class="stat"><div class="k">Expected at α = 0.05</div><div class="v" id="pkExp">5 of 100</div></div>
+        <div class="stat good"><div class="k">Mean stopping day</div><div class="v" id="pkDay" style="font-size:18px">–</div></div>
+      </div>
+      <div class="callout" id="pkInfo" style="margin-top:12px"><div class="ico">👀</div><div class="body"><p style="margin:0"></p></div></div>
+      <div class="controls"><button class="btn sm" id="pkRun">🎲 Re-run the simulation</button></div>
+    </div>
+  </div>
+
+  <div class="callout warn">
+    <div class="ico">🔧</div>
+    <div class="body"><div class="title">If you must look early, use a method built for it</div>
+      <p>Sequential testing (always-valid p-values, mSPRT) and group-sequential designs with alpha spending let you monitor continuously without inflating error. <b>CUPED</b> — regressing out each user's pre-experiment behaviour — typically cuts variance by 30–50%, which shortens every test you run and is usually the single highest-leverage improvement to an experimentation platform.</p></div>
+  </div>
+
+  <h2>Other ways experiments lie</h2>
+  <div class="table-wrap">
+    <table class="t">
+      <thead><tr><th>Trap</th><th>What happens</th><th>Fix</th></tr></thead>
+      <tbody>
+        <tr><td><b>Novelty / primacy</b></td><td>Users react to the change itself; the effect fades or grows over weeks</td><td>Run long enough to see it stabilise; check the effect by week, not just overall</td></tr>
+        <tr><td><b>Interference</b></td><td>Treatment affects control — shared inventory, marketplaces, social graphs</td><td>Cluster randomisation, switchback tests, or budget-split designs</td></tr>
+        <tr><td><b>Wrong randomisation unit</b></td><td>Randomising by request when the experience is per user</td><td>Randomise at the level the user perceives; keep it stable across sessions</td></tr>
+        <tr><td><b>Ratio metrics</b></td><td>Variance of a ratio computed per user is not the naive formula</td><td>Delta method or bootstrap; never compare sums of ratios</td></tr>
+        <tr><td><b>Multiple metrics</b></td><td>20 metrics, one significant — that's expected by chance</td><td>Pre-register one primary metric; treat the rest as exploratory</td></tr>
+        <tr><td><b>Sample-ratio mismatch</b></td><td>50/50 split delivers 48/52 — assignment or logging is broken</td><td>Automatic SRM check; a failure invalidates the result entirely</td></tr>
+        <tr><td><b>Segment shopping</b></td><td>“It worked for Android users in Brazil”</td><td>Pre-register segments; otherwise treat as a hypothesis for the next test</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h2>A/B, interleaving, or bandits?</h2>
+  <div class="grid c3">
+    <div class="card feature reveal"><div class="f-ico">⚖️</div><h4>A/B test</h4><p>The default. Unbiased, interpretable, measures real product outcomes. Slow, and needs enough traffic for the effect size.</p></div>
+    <div class="card feature reveal"><div class="f-ico" style="background:var(--accent-2-soft)">🔀</div><h4>Interleaving</h4><p>For ranking: blend two rankers' results in one list and see which side's items get clicked. <b>10–100× more sensitive</b> because each user compares both — but it measures ranking preference, not product outcomes.</p></div>
+    <div class="card feature reveal"><div class="f-ico" style="background:var(--green-soft)">🎰</div><h4>Bandits</h4><p>Continuously shift traffic to what performs better. Great for many variants, short-lived decisions and minimising regret; harder to get a clean effect estimate and unsuitable for long-horizon metrics.</p></div>
+  </div>
+
+  <div class="callout tip">
+    <div class="ico">🧭</div>
+    <div class="body"><div class="title">A practical sequence for ranking changes</div>
+      <p>Offline NDCG to shortlist candidates → interleaving to pick the winner cheaply and quickly → a full A/B on the winner to measure the product effect and check guardrails → ramp with a long-term holdback. Each stage is more expensive and more trustworthy than the last, which is exactly the property you want.</p></div>
+  </div>
+
+  <h2>Reading the result</h2>
+  <pre class="code">primary   conversion +1.8%  (95% CI: +0.4% … +3.2%)   p = 0.013
+guardrail p99 latency +6 ms (CI: +2 … +10)             ← within the +15 ms budget
+guardrail cost/req   +9%                                ← above the +5% budget ⚠️
+segments  new users +4.1%  ·  returning +1.1%  ·  EU +0.2% (CI spans zero)
+SRM       50.02 / 49.98  ✅
+
+decision: ship at 50% for two more weeks to confirm the cost figure,
+          with a work item to bring cost/req back under budget before full ramp.</pre>
+
+  <div class="callout warn">
+    <div class="ico">📏</div>
+    <div class="body"><div class="title">Report the interval, not just the point</div>
+      <p>“+1.8%” invites a decision the data can't support. “+1.8%, CI +0.4% to +3.2%” says: probably positive, possibly small. Also state the cost of being wrong — a change that is free to reverse deserves a different bar than one that alters a pricing model or a safety threshold.</p></div>
+  </div>
+
+  <div class="callout danger"><div class="ico">⚠️</div><div class="body"><div class="title">Common mistakes</div>
+    <ul class="mb0">
+      <li><b>Peeking and stopping early.</b> Turns a 5% error rate into 20–30%.</li>
+      <li><b>No sample-ratio mismatch check.</b> A broken split invalidates everything downstream, silently.</li>
+      <li><b>Launching on a canary.</b> A canary checks safety, not value — it is far too small to measure an effect.</li>
+      <li><b>Treating “not significant” as “no effect”.</b> Report the interval; an underpowered test is uninformative, not negative.</li>
+      <li><b>Ignoring interference</b> in marketplaces and social products, where treatment leaks into control.</li>
+      <li><b>No long-term holdback.</b> Cumulative effects and slow regressions are invisible once everyone is treated.</li>
+    </ul></div></div>
+
+  <div class="callout interview"><div class="ico">🎤</div><div class="body"><div class="title">Interview drill</div>
+    <p class="small" style="margin:10px 0 0"><b>Warm-up:</b> Your test shows +3% conversion, p = 0.04, after six days of a planned fourteen. Ship it?</p>
+    <details class="ans"><summary>How a strong answer sounds</summary><div>No — not on that basis. Stopping when the result first crosses significance is peeking, and it inflates the false-positive rate several-fold; effects caught early are also systematically overestimated. I'd run to the pre-registered horizon, or use a sequential design that is valid under continuous monitoring if early stopping matters commercially. I'd also check SRM, look for novelty by examining the daily effect, and confirm guardrails. If there's genuine urgency, the honest options are to switch to an always-valid method or to accept a documented, higher error rate — not to pretend the fixed-horizon p-value still means what it says.</div></details>
+    <p class="small" style="margin:10px 0 0"><b>Deeper:</b> How would you A/B test a change to a two-sided marketplace's ranking?</p>
+    <details class="ans"><summary>How a strong answer sounds</summary><div>Naive user-level randomisation is invalid because supply is shared: if treatment users book the best-rated providers, control users see worse availability, so the control group is contaminated and the effect is overstated. Options: randomise by market or region (cluster randomisation), accepting far fewer units and therefore much lower power; use switchback testing, alternating the whole market between variants in time blocks, which handles interference at the cost of needing careful block sizing versus carryover; or budget-split designs that partition supply. I'd also measure both sides — buyer conversion and provider utilisation and earnings — because a change that improves buyer metrics by concentrating demand on a few providers is usually bad for the marketplace. And I'd instrument the interference directly: check whether control-group availability moves when treatment share changes.</div></details>
+  </div></div>
+
+  <div class="takeaways">
+    <h3>🧠 Key takeaways</h3>
+    <ul>
+      <li>Shadow proves it runs, canary proves it's safe, an experiment proves it helps — they are not substitutes.</li>
+      <li>Size tests from baseline rate and effect size; halving the effect quadruples the sample.</li>
+      <li>Peeking inflates false positives — use a fixed horizon, or a sequential method designed for monitoring.</li>
+      <li>Watch for interference, novelty, SRM, ratio metrics and segment shopping.</li>
+      <li>Report confidence intervals and guardrails, and keep a long-term holdback.</li>
+    </ul>
+  </div>
+
+  <div class="quiz-wrap">
+    <h2>Check your understanding</h2>
+    <div class="quiz-score"></div>
+
+    <div class="quiz" data-answer="2">
+      <p class="q">You check your A/B test daily and stop when p &lt; 0.05. What's the real false-positive rate?</p>
+      <div class="opts">
+        <button class="opt">Still 5%</button>
+        <button class="opt">Lower than 5%</button>
+        <button class="opt">Much higher — often 20–30%</button>
+        <button class="opt">Impossible to say</button>
+      </div>
+      <div class="explain">Each look is another chance for noise to cross the threshold. Fixed horizons or always-valid sequential methods are the fixes.</div>
+    </div>
+
+    <div class="quiz" data-answer="1">
+      <p class="q">Your 50/50 experiment delivered 52.3% / 47.7% of users. What do you do?</p>
+      <div class="opts">
+        <button class="opt">Weight the analysis to correct the imbalance</button>
+        <button class="opt">Stop — sample-ratio mismatch means assignment or logging is broken and the result is invalid</button>
+        <button class="opt">Continue; small imbalances are normal</button>
+        <button class="opt">Increase the sample size</button>
+      </div>
+      <div class="explain">At that scale the imbalance is far beyond chance. Something is systematically dropping or misassigning users, so the groups aren't comparable — fix it and re-run.</div>
+    </div>
+
+    <div class="quiz" data-answer="0">
+      <p class="q">Why is interleaving so much more sensitive than an A/B test for ranking?</p>
+      <div class="opts">
+        <button class="opt">Each user sees both rankers' results, so the comparison is within-user and removes user variance</button>
+        <button class="opt">It uses more traffic</button>
+        <button class="opt">It measures long-term retention</button>
+        <button class="opt">It doesn't require randomisation</button>
+      </div>
+      <div class="explain">Between-user variance dominates A/B noise. Comparing within a user removes it — at the cost of only measuring ranking preference, not product outcomes.</div>
+    </div>
+
+    <div class="quiz" data-answer="3">
+      <p class="q">A new recommendation model shows +12% engagement in week 1 and +1% by week 4. What is this?</p>
+      <div class="opts">
+        <button class="opt">Sample-ratio mismatch</button>
+        <button class="opt">Interference</button>
+        <button class="opt">Simpson's paradox</button>
+        <button class="opt">A novelty effect</button>
+      </div>
+      <div class="explain">Users react to change itself. Run long enough for the effect to stabilise and report the steady-state estimate, not the first week.</div>
+    </div>
+
+    <div class="quiz" data-answer="1">
+      <p class="q">Which is a guardrail metric rather than a primary metric?</p>
+      <div class="opts">
+        <button class="opt">Conversion rate</button>
+        <button class="opt">p99 latency</button>
+        <button class="opt">Revenue per user</button>
+        <button class="opt">Click-through rate</button>
+      </div>
+      <div class="explain">Guardrails must not get worse and should trigger automatic rollback. The primary metric is the one you're trying to move.</div>
+    </div>
+  </div>
+</main>
+<script src="assets/app.js"></script>
+<script>
+(function(){
+  const { $, $$, clamp, fmt } = ML;
+
+  /* ================= sample size ================= */
+  function ab() {
+    const users = +$('#abUsers').value, base = +$('#abBase').value / 100;
+    const mde = +$('#abMde').value / 100, split = +$('#abSplit').value / 100;
+    $('#abUsersV').textContent = fmt(users, 0) + ' / day';
+    $('#abBaseV').textContent = (base * 100).toFixed(1) + '%';
+    $('#abMdeV').textContent = '+' + (mde * 100).toFixed(1) + '% relative';
+    $('#abSplitV').textContent = (split * 100).toFixed(0) + '%';
+    const delta = base * mde;
+    const n = Math.ceil(2 * Math.pow(1.96 + 0.84, 2) * base * (1 - base) / (delta * delta));
+    const perDay = users * split / 2;
+    const days = n / perDay;
+    // MDE achievable in 14 days
+    const n14 = perDay * 14;
+    const mde14 = 2.8 * Math.sqrt(2 * base * (1 - base) / n14) / base;
+    $('#abN').textContent = fmt(n, 0);
+    $('#abDays').textContent = days < 1 ? (days * 24).toFixed(1) + ' h' : days.toFixed(1) + ' days';
+    $('#abMde14').textContent = '+' + (mde14 * 100).toFixed(2) + '%';
+    const verdict = days <= 14 ? '✅ feasible' : days <= 45 ? '⚠️ long' : '❌ not feasible';
+    $('#abVerdict').textContent = verdict;
+    $('#abInfo p').innerHTML = days <= 14
+      ? `✅ You need <b>${fmt(n, 0)} users per arm</b>, reachable in <b>${days.toFixed(1)} days</b>. Pre-register that horizon and the primary metric before you start, and resist reading the dashboard as a decision tool before it ends.`
+      : days <= 45
+        ? `⚠️ <b>${days.toFixed(0)} days</b> is a long test — long enough that seasonality and other launches will contaminate it. Options: raise the traffic share, use CUPED to cut variance by 30–50%, pick a more sensitive proxy metric, or accept a larger MDE (in 14 days you could only detect <b>+${(mde14 * 100).toFixed(2)}%</b>).`
+        : `❌ At <b>${days.toFixed(0)} days</b> this experiment will never finish cleanly. Either the effect you're chasing is too small to measure with this traffic, or you need a fundamentally more sensitive design — interleaving for ranking, a within-user comparison, or variance reduction. Running it anyway and reading the noise is the failure mode to avoid.`;
+  }
+  ['#abUsers', '#abBase', '#abMde', '#abSplit'].forEach(id => $(id).addEventListener('input', ab));
+  ab();
+
+  /* ================= peeking ================= */
+  function peek() {
+    const mode = $('#peekSeg').dataset.value || 'fixed';
+    const N = 100, DAYS = 21;
+    const runs = [];
+    for (let r = 0; r < N; r++) {
+      const z = [];
+      let sumA = 0, sumB = 0, n = 0;
+      let stopped = -1, sig = false;
+      for (let d = 1; d <= DAYS; d++) {
+        for (let i = 0; i < 400; i++) { sumA += Math.random() < 0.04 ? 1 : 0; sumB += Math.random() < 0.04 ? 1 : 0; n++; }
+        const pA = sumA / n, pB = sumB / n;
+        const se = Math.sqrt((pA * (1 - pA) + pB * (1 - pB)) / n) || 1e-9;
+        const zz = (pB - pA) / se;
+        z.push(zz);
+        if (mode === 'peek' && stopped < 0 && Math.abs(zz) > 1.96) { stopped = d; sig = true; }
+      }
+      if (mode === 'fixed') { sig = Math.abs(z[z.length - 1]) > 1.96; stopped = DAYS; }
+      runs.push({ z, sig, stopped: stopped < 0 ? DAYS : stopped });
+    }
+    const X = (d) => 42 + (d - 1) / (DAYS - 1) * 580, Y = (z) => 115 - clamp(z, -4, 4) * 25;
+    let g = `<rect class="band" x="42" y="${Y(1.96)}" width="580" height="${Y(-1.96) - Y(1.96)}"/>`;
+    runs.forEach(r => {
+      const upto = mode === 'peek' ? r.stopped : DAYS;
+      let d = '';
+      r.z.slice(0, upto).forEach((z, i) => { d += (d ? 'L' : 'M') + X(i + 1).toFixed(1) + ',' + Y(z).toFixed(1) + ' '; });
+      g += `<path class="ln ${r.sig ? 'sig' : 'nosig'}" d="${d}"/>`;
+    });
+    g += `<line stroke="var(--border-strong)" x1="42" y1="115" x2="622" y2="115"/>` +
+      `<line stroke="var(--red)" stroke-dasharray="4 4" x1="42" y1="${Y(1.96)}" x2="622" y2="${Y(1.96)}"/>` +
+      `<line stroke="var(--red)" stroke-dasharray="4 4" x1="42" y1="${Y(-1.96)}" x2="622" y2="${Y(-1.96)}"/>` +
+      `<text x="44" y="${Y(1.96) - 5}" style="fill:var(--red)">z = +1.96</text>` +
+      `<text x="280" y="215">day of the experiment</text><text x="2" y="14">z-statistic</text>`;
+    $('#peekSvg').innerHTML = g;
+    const falses = runs.filter(r => r.sig).length;
+    $('#pkFalse').textContent = falses + ' of 100';
+    $('#pkDay').textContent = (runs.filter(r => r.sig).reduce((s, r) => s + r.stopped, 0) / Math.max(1, falses)).toFixed(1) + ' days';
+    $('#pkInfo p').innerHTML = mode === 'fixed'
+      ? `<b>Fixed horizon.</b> All 100 experiments have <i>no real effect</i>, and about 5 cross the threshold at the pre-registered end — exactly the 5% you signed up for. Note how wildly the z-statistic wanders mid-experiment: any of those excursions would have looked like a result if you'd stopped there.`
+      : `🚨 <b>Peeking.</b> Same data, same absence of any real effect — but stopping the moment significance appears produced <b>${falses} “significant” results out of 100</b>. Every one is false. This is the single most common statistical error in product experimentation, and it is why the stopping rule must be decided before the test starts.`;
+  }
+  $('#peekSeg').addEventListener('segchange', peek);
+  $('#pkRun').onclick = peek;
+  peek();
+})();
+</script>
+</body>
+</html>

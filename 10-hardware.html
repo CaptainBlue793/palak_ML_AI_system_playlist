@@ -1,0 +1,362 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Hardware: GPUs, Memory &amp; the Roofline</title>
+<link rel="stylesheet" href="assets/style.css">
+<script>try{var t=JSON.parse(localStorage.getItem('ml-theme'));if(t)document.documentElement.setAttribute('data-theme',t)}catch(e){}</script>
+<style>
+  .roof-svg { width:100%; }
+  .roof-svg .roof { fill:none; stroke:var(--accent); stroke-width:2.8 }
+  .roof-svg .ridge { stroke:var(--border-strong); stroke-dasharray:4 4 }
+  .roof-svg .pt { fill:var(--pink) }
+  .roof-svg .pt.other { fill:var(--muted); opacity:.55 }
+  .roof-svg text { font-size:10.5px; fill:var(--muted); font-family:var(--mono) }
+  .mem-bars { display:grid; gap:6px; margin-top:10px }
+  .mem-bars .r { display:grid; grid-template-columns:160px 1fr 92px; gap:10px; align-items:center; font-size:13px }
+  .mem-bars .tk { height:16px; border-radius:6px; background:var(--surface-3); overflow:hidden; display:flex }
+  .mem-bars .tk i { display:block; height:100% }
+  .mem-bars .v { font-family:var(--mono); text-align:right; color:var(--muted) }
+  .chip { display:grid; grid-template-columns:repeat(8,1fr); gap:4px; margin:10px 0 }
+  .chip i { aspect-ratio:1; border-radius:5px; background:var(--accent-soft); border:1px solid var(--accent); display:grid; place-items:center; font-size:9px; font-style:normal; color:var(--accent); font-family:var(--mono) }
+  .hier { display:grid; gap:6px }
+  .hier > div { display:grid; grid-template-columns:120px 1fr; gap:12px; align-items:center; padding:9px 12px; border-radius:10px; border:1px solid var(--border); background:var(--surface-2); font-size:13.5px }
+  .hier b { font-family:var(--mono) }
+</style>
+</head>
+<body data-chapter="10">
+<main class="content">
+
+  <section class="hero">
+    <div class="eyebrow"><span class="pill accent">Chapter 10</span><span class="pill cyan">Intermediate</span><span class="pill">⏱ 40 min</span></div>
+    <h1>Hardware: GPUs, Memory <span class="grad">&amp; the Roofline</span></h1>
+    <p class="lead">Modern ML performance is rarely about FLOPs. It's about whether the data reaches the arithmetic units fast enough. Once you can tell a memory-bound kernel from a compute-bound one, most “why is my GPU at 30%?” questions answer themselves.</p>
+    <ul class="objectives">
+      <li>Describe what a GPU is actually good at, and why</li>
+      <li>Read the memory hierarchy and its bandwidth numbers</li>
+      <li>Compute arithmetic intensity and place a kernel on the roofline</li>
+      <li>Explain why LLM decoding is memory-bound and training is not</li>
+      <li>Pick numeric precisions and understand interconnect limits</li>
+    </ul>
+  </section>
+
+  <h2>CPUs think, GPUs sweat</h2>
+  <p>A CPU core is a brilliant generalist: deep pipelines, big caches, branch prediction, optimised for finishing <i>one</i> chain of dependent work quickly. A GPU is thousands of simple lanes doing the same instruction on different data. Deep learning is almost entirely “multiply these giant matrices”, which is exactly that shape.</p>
+
+  <div class="split">
+    <div class="card"><h4 class="mt0">🧠 CPU</h4><p class="small mb0">~8–128 fat cores · huge caches · ~0.5–2 TFLOP/s fp32 · ~100–400 GB/s memory. Optimised for <b>latency</b> on branchy, irregular code.</p></div>
+    <div class="card"><h4 class="mt0">🎮 GPU</h4><p class="small mb0">~100+ streaming multiprocessors · thousands of threads · ~100–2,000 TFLOP/s in low precision · 2–8 TB/s HBM. Optimised for <b>throughput</b> on regular, parallel work.</p></div>
+  </div>
+
+  <div class="callout analogy">
+    <div class="ico">🚚</div>
+    <div class="body"><div class="title">Analogy: sports car vs freight train</div>
+      <p>A sports car gets one parcel across town fastest. A freight train moves ten thousand parcels per trip but takes an hour to load. If your workload is one small parcel at a time — an LLM generating a single token for a single user — you're running a freight train nearly empty. Batching is how you fill it (Chapter 26).</p></div>
+  </div>
+
+  <h3>Inside the chip</h3>
+  <p>The important parts, in the order they matter for performance:</p>
+
+  <div class="hier">
+    <div><b>Tensor cores</b><span>Dedicated matrix-multiply-accumulate units. They provide nearly all of a modern GPU's advertised FLOPs — and only for matmul-shaped work in supported precisions. An elementwise kernel never touches them.</span></div>
+    <div><b>Registers / SMEM</b><span>Tens of KB per block, terabytes/s, one-cycle-ish latency. Kernel authors fight to keep data here (this is what FlashAttention is about).</span></div>
+    <div><b>L2 cache</b><span>~40–60 MB, several TB/s. Shared across the chip; the difference between a fused and an unfused operation is often just whether data stayed in L2.</span></div>
+    <div><b>HBM (VRAM)</b><span>40–192 GB at 2–8 TB/s. Huge compared to caches, tiny compared to your dataset, and <b>the usual bottleneck</b>.</span></div>
+    <div><b>NVLink / PCIe</b><span>GPU-to-GPU: NVLink ~400–900 GB/s; PCIe 5 ~64 GB/s. An order of magnitude slower than HBM — which is why model sharding strategy is a systems design problem (Ch 24).</span></div>
+    <div><b>Network</b><span>InfiniBand/Ethernet at 100–400 Gb/s per NIC (~12–50 GB/s). Two more orders of magnitude down. Multi-node training lives or dies on how little you send here.</span></div>
+  </div>
+
+  <div class="callout warn">
+    <div class="ico">📉</div>
+    <div class="body"><div class="title">The gap that defines modern ML performance</div>
+      <p>Compute has grown far faster than memory bandwidth for two decades. An H100-class GPU can do roughly <b>300–500 arithmetic operations in the time it takes to fetch one number from HBM</b>. So the question for any kernel is not “how many FLOPs?” but “how many FLOPs <i>per byte moved</i>?”</p></div>
+  </div>
+
+  <h2>Arithmetic intensity and the roofline</h2>
+  <p><strong>Arithmetic intensity</strong> (AI) = FLOPs performed ÷ bytes moved from memory. Plot achievable throughput against AI and you get the <b>roofline</b>: a diagonal region where you're limited by bandwidth, and a flat region where you're limited by the arithmetic units.</p>
+
+  <div class="panel">
+    <div class="panel-head"><div class="dots"><i></i><i></i><i></i></div><span class="p-title">Roofline calculator</span><span class="p-tag">Interactive</span></div>
+    <div class="panel-body">
+      <div class="seg" id="kernSeg">
+        <button data-v="gemm" class="active">Big matmul (training)</button>
+        <button data-v="decode">LLM decode, batch 1</button>
+        <button data-v="decode64">LLM decode, batch 64</button>
+        <button data-v="attn">Attention (long context)</button>
+        <button data-v="norm">LayerNorm / elementwise</button>
+      </div>
+      <div class="svg-scroll"><svg id="roofSvg" class="diagram roof-svg" viewBox="0 0 640 300"></svg></div>
+      <div class="stats">
+        <div class="stat"><div class="k">Arithmetic intensity</div><div class="v" id="rAI">–</div></div>
+        <div class="stat acc"><div class="k">Bound by</div><div class="v" id="rBound" style="font-size:17px">–</div></div>
+        <div class="stat good"><div class="k">Achievable throughput</div><div class="v" id="rTput" style="font-size:17px">–</div></div>
+        <div class="stat warn"><div class="k">% of peak FLOPs</div><div class="v" id="rPct">–</div></div>
+      </div>
+      <div class="callout" id="roofInfo" style="margin-top:12px"><div class="ico">📘</div><div class="body"><div class="title"></div><p style="margin:0"></p></div></div>
+      <p class="small muted">Reference device: ~990 TFLOP/s bf16 dense, 3.35 TB/s HBM (H100-class). The <b>ridge point</b> — where the diagonal meets the ceiling — is around 295 FLOPs/byte. Any kernel below that number cannot reach peak compute no matter how well it is written.</p>
+    </div>
+  </div>
+
+  <div class="callout tip">
+    <div class="ico">🧮</div>
+    <div class="body"><div class="title">Why decoding one token is so inefficient</div>
+      <p>Generating a token requires reading <b>every weight</b> of the model from HBM and doing roughly two FLOPs per weight. That's an arithmetic intensity of about 2 — a hundred times below the ridge point. The GPU spends its time waiting on memory, using a small fraction of its arithmetic units. Batch 64 requests together and you read those same weights once for 64 tokens: intensity ≈ 128, and throughput improves almost linearly. That single fact drives the entire design of inference servers.</p></div>
+  </div>
+
+  <h2>Where the memory actually goes</h2>
+  <p>Training memory is not just weights. For a model with P parameters in mixed precision with Adam:</p>
+
+  <div class="panel">
+    <div class="panel-head"><div class="dots"><i></i><i></i><i></i></div><span class="p-title">Will it fit? Single-GPU memory budget</span><span class="p-tag">Interactive</span></div>
+    <div class="panel-body">
+      <div class="range-row"><label for="pParams">Parameters (billions)</label><input type="range" id="pParams" min="0.1" max="70" step="0.1" value="7"><output id="pParamsV"></output></div>
+      <div class="range-row"><label for="pBatch">Activation memory factor (batch × sequence)</label><input type="range" id="pBatch" min="1" max="40" step="1" value="8"><output id="pBatchV"></output></div>
+      <div class="seg" id="memSeg"><button data-v="train" class="active">Training (AdamW)</button><button data-v="lora">LoRA fine-tune</button><button data-v="inf16">Inference bf16</button><button data-v="inf4">Inference int4</button></div>
+      <div class="mem-bars" id="memBars"></div>
+      <div class="callout" id="memInfo" style="margin-top:12px"><div class="ico">💾</div><div class="body"><p style="margin:0"></p></div></div>
+    </div>
+  </div>
+
+  <h2>Numeric precision</h2>
+  <div class="table-wrap">
+    <table class="t">
+      <thead><tr><th>Format</th><th>Bits</th><th>Used for</th><th>Notes</th></tr></thead>
+      <tbody>
+        <tr><td><b>fp32</b></td><td>32</td><td>Master weights, reductions, loss</td><td>The safe fallback; half the speed of bf16 on tensor cores</td></tr>
+        <tr><td><b>tf32</b></td><td>19 stored in 32</td><td>Drop-in speedup for fp32 matmuls</td><td>NVIDIA-specific; fp32 range, fp16-ish mantissa</td></tr>
+        <tr><td><b>bf16</b></td><td>16</td><td><b>Default for training</b></td><td>fp32 exponent range → no loss scaling needed</td></tr>
+        <tr><td><b>fp16</b></td><td>16</td><td>Older hardware, inference</td><td>Needs loss scaling; overflows easily</td></tr>
+        <tr><td><b>fp8</b></td><td>8</td><td>Training and inference on newest GPUs</td><td>~2× again over bf16; needs per-tensor scaling</td></tr>
+        <tr><td><b>int8 / int4</b></td><td>8 / 4</td><td>Inference (quantized weights)</td><td>Big memory and bandwidth wins — Chapter 27</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="callout tip">
+    <div class="ico">🎯</div>
+    <div class="body"><div class="title">Lower precision is usually a bandwidth optimisation</div>
+      <p>Halving the bits halves the bytes you move. For memory-bound work (decoding, elementwise, small batches) that's close to a 2× speedup even if the arithmetic units were never the limit. This is why int4 weight-only quantization speeds up single-user LLM serving so dramatically.</p></div>
+  </div>
+
+  <h2>Utilization: MFU and why you're at 30%</h2>
+  <p><strong>Model FLOPs Utilization</strong> = useful FLOPs your model needs ÷ FLOPs the hardware could have done in that time. Well-tuned large-scale training lands at 35–55%. If you're far below, the cause is almost always on this list:</p>
+
+  <div class="table-wrap">
+    <table class="t">
+      <thead><tr><th>Symptom</th><th>Cause</th><th>Fix</th></tr></thead>
+      <tbody>
+        <tr><td>GPU util spiky, gaps between steps</td><td>Data loader starving the GPU</td><td>More workers, prefetch, pin memory, faster decode, cache preprocessed shards</td></tr>
+        <tr><td>Util high but MFU low</td><td>Many small memory-bound kernels</td><td>Kernel fusion, <code>torch.compile</code>, bigger batches, flash attention</td></tr>
+        <tr><td>Long all-reduce stalls</td><td>Communication not overlapped with compute</td><td>Gradient bucketing, overlap comms with backward (Ch 23)</td></tr>
+        <tr><td>Padding waste in sequences</td><td>Fixed-length batches with variable data</td><td>Length bucketing, sequence packing, variable-length attention kernels</td></tr>
+        <tr><td>Everything fine, still 40%</td><td>That may simply be good</td><td>Compare against a published MFU for the same model class before optimising further</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h2>Beyond one GPU, and beyond NVIDIA</h2>
+  <div class="grid c3">
+    <div class="card feature reveal"><div class="f-ico">🔗</div><h4>Topology matters</h4><p>8 GPUs on one node share fast NVLink; crossing nodes drops to network speed. Parallelism strategies are chosen to keep the chattiest communication inside a node (Ch 24).</p></div>
+    <div class="card feature reveal"><div class="f-ico" style="background:var(--accent-2-soft)">🧊</div><h4>TPUs</h4><p>Systolic-array accelerators with big on-chip memory and a fast 2D/3D torus interconnect. Excellent at dense matmul at scale; programmed through XLA, so kernel-level control is different, not absent.</p></div>
+    <div class="card feature reveal"><div class="f-ico" style="background:var(--green-soft)">💻</div><h4>CPU inference</h4><p>Perfectly viable for small models, GBDTs and low-QPS services. Quantized 7B models run on laptops. Don't pay for a GPU to serve 12 requests a minute.</p></div>
+  </div>
+
+  <div class="callout danger"><div class="ico">⚠️</div><div class="body"><div class="title">Common mistakes</div>
+    <ul class="mb0">
+      <li><b>Optimising FLOPs when you're memory-bound.</b> A cleverer algorithm with the same bytes moved changes nothing. Measure intensity first.</li>
+      <li><b>Assuming peak TFLOPs are reachable.</b> Vendor numbers assume ideal dense matmul in the lowest precision, often with sparsity. Real MFU of 40% is healthy.</li>
+      <li><b>Ignoring the data pipeline.</b> The most common cause of an idle GPU is a CPU that can't decode JPEGs or tokenize fast enough.</li>
+      <li><b>Buying the biggest GPU for a small model.</b> If the model fits in 24 GB and you're latency-bound, more HBM does nothing; bandwidth and clocks do.</li>
+      <li><b>Forgetting activation memory.</b> Weights fit; then the first batch OOMs. Activations scale with batch × sequence × layers (Ch 23).</li>
+    </ul></div></div>
+
+  <div class="callout interview"><div class="ico">🎤</div><div class="body"><div class="title">Interview drill</div>
+    <p class="small" style="margin:10px 0 0"><b>Warm-up:</b> Why does batching help LLM inference so much more than it helps image classification?</p>
+    <details class="ans"><summary>How a strong answer sounds</summary><div>Autoregressive decoding reads the entire weight matrix to produce a single token, so arithmetic intensity is about 2 FLOPs/byte — deeply memory-bound. Batching amortises that weight read across many sequences, so throughput scales almost linearly until you approach the compute roof or run out of KV-cache memory. A CNN forward pass on a 224×224 image already does thousands of FLOPs per byte of weights, so it sits near the compute roof even at batch 1 — extra batching helps far less.</div></details>
+    <p class="small" style="margin:10px 0 0"><b>Deeper:</b> Your training run reports 95% GPU utilization but only 18% MFU. What's going on?</p>
+    <details class="ans"><summary>How a strong answer sounds</summary><div>Utilization only says a kernel was resident, not that it was doing useful matmul. 95% util with 18% MFU means the GPU is busy running many small, memory-bound kernels — elementwise ops, normalizations, unfused attention, dtype casts — rather than tensor-core work. I'd profile to get a kernel-time breakdown, fuse with <code>torch.compile</code> or custom kernels, switch to flash attention, raise the batch size or sequence packing to increase intensity, and check I'm not silently running in fp32. If a lot of time is in all-reduce, the fix is overlapping communication with the backward pass instead.</div></details>
+  </div></div>
+
+  <div class="takeaways">
+    <h3>🧠 Key takeaways</h3>
+    <ul>
+      <li>GPUs trade latency for throughput; they win only on regular, parallel, matmul-shaped work.</li>
+      <li>Arithmetic intensity (FLOPs per byte) decides whether a kernel is memory- or compute-bound.</li>
+      <li>LLM decoding at batch 1 is extremely memory-bound — batching is the primary throughput lever.</li>
+      <li>Training memory is weights + gradients + optimizer state + activations; the optimizer often dominates.</li>
+      <li>MFU of 35–55% is good; low MFU usually means data loading, unfused kernels or unoverlapped communication.</li>
+    </ul>
+  </div>
+
+  <div class="quiz-wrap">
+    <h2>Check your understanding</h2>
+    <div class="quiz-score"></div>
+
+    <div class="quiz" data-answer="1">
+      <p class="q">A kernel has arithmetic intensity of 3 FLOPs/byte on a device with a ridge point of 295. It is…</p>
+      <div class="opts">
+        <button class="opt">Compute-bound</button>
+        <button class="opt">Memory-bandwidth-bound</button>
+        <button class="opt">Latency-bound on the PCIe bus</button>
+        <button class="opt">Impossible to accelerate</button>
+      </div>
+      <div class="explain">Far below the ridge point means the arithmetic units are starved. The levers are moving fewer bytes (fusion, lower precision, caching) or reusing each byte more (bigger batches).</div>
+    </div>
+
+    <div class="quiz" data-answer="2">
+      <p class="q">Which change most improves throughput for batch-1 LLM decoding?</p>
+      <div class="opts">
+        <button class="opt">A GPU with 2× the FLOPs and the same bandwidth</button>
+        <button class="opt">Rewriting the matmul with a better tiling strategy</button>
+        <button class="opt">Quantizing weights to int4</button>
+        <button class="opt">Increasing the number of layers</button>
+      </div>
+      <div class="explain">The bottleneck is reading weights from HBM. Quartering the bytes roughly quarters the read time; extra FLOPs go unused because the arithmetic units are already idle waiting.</div>
+    </div>
+
+    <div class="quiz" data-answer="3">
+      <p class="q">Training a 7B model with AdamW in mixed precision. Which is typically the single largest memory consumer?</p>
+      <div class="opts">
+        <button class="opt">bf16 weights</button>
+        <button class="opt">Gradients</button>
+        <button class="opt">The CUDA context</button>
+        <button class="opt">Optimizer state (fp32 moments + master weights)</button>
+      </div>
+      <div class="explain">Adam keeps two fp32 moments plus an fp32 master copy — roughly 12 bytes per parameter versus 2 for bf16 weights. That's the arithmetic that motivates ZeRO sharding in Chapter 23.</div>
+    </div>
+
+    <div class="quiz" data-answer="0">
+      <p class="q">GPU utilization shows 40% with visible gaps between steps. What do you investigate first?</p>
+      <div class="opts">
+        <button class="opt">The data loading pipeline</button>
+        <button class="opt">The choice of optimizer</button>
+        <button class="opt">The learning-rate schedule</button>
+        <button class="opt">Weight initialization</button>
+      </div>
+      <div class="explain">Periodic gaps are the signature of a starved GPU: not enough loader workers, slow decoding, or no prefetch. Check that before touching anything about the model.</div>
+    </div>
+
+    <div class="quiz" data-answer="2">
+      <p class="q">Why is bf16 generally safer than fp16 for training?</p>
+      <div class="opts">
+        <button class="opt">It has more mantissa bits</button>
+        <button class="opt">It is faster on tensor cores</button>
+        <button class="opt">It keeps fp32's exponent range, so gradients rarely overflow or underflow</button>
+        <button class="opt">It is supported on CPUs</button>
+      </div>
+      <div class="explain">Range matters more than precision for gradients. bf16's wide exponent removes the need for loss scaling and the class of NaN failures that comes with fp16.</div>
+    </div>
+  </div>
+</main>
+<script src="assets/app.js"></script>
+<script>
+(function(){
+  const { $, $$, clamp, fmt } = ML;
+
+  /* ================= roofline ================= */
+  const PEAK = 990e12;        // bf16 FLOP/s
+  const BW = 3.35e12;         // bytes/s
+  const RIDGE = PEAK / BW;    // ~295 FLOPs/byte
+
+  const KERNELS = {
+    gemm: { ai: 410, t: 'Large matmul (e.g. 8192×8192×8192, bf16)',
+      n: 'Each output element reuses a whole row and column, so bytes moved grow like n² while FLOPs grow like n³. Above the ridge point, so a good implementation reaches 50–70% of peak. This is the work that GPUs were built for, and it is why training is compute-bound.' },
+    decode: { ai: 2, t: 'LLM decode step, batch 1',
+      n: 'One token requires reading every weight once: 2 FLOPs per parameter per token, 2 bytes per parameter in bf16 → intensity ≈ 1–2. You are using well under 1% of the arithmetic units. Nothing about the matmul implementation can fix this; only batching, quantization, or speculative decoding can.' },
+    decode64: { ai: 110, t: 'LLM decode step, batch 64',
+      n: 'The same weight read now serves 64 sequences, multiplying intensity by 64. Throughput rises almost linearly with batch size until you approach the ridge point or run out of KV-cache memory — which is exactly why inference servers work so hard to keep batches full (Chapter 26).' },
+    attn: { ai: 62, t: 'Attention at long context (unfused)',
+      n: 'The naive implementation materialises a T×T score matrix in HBM, so bytes moved grow quadratically with sequence length. FlashAttention keeps tiles in SRAM and never writes the full matrix, raising effective intensity several-fold — the same maths, far fewer bytes.' },
+    norm: { ai: 0.5, t: 'LayerNorm / activation / elementwise',
+      n: 'Read a tensor, do a couple of operations per element, write it back. Hopelessly memory-bound in isolation — which is why these are <i>fused</i> into neighbouring kernels. A chain of five unfused elementwise ops moves the tensor ten times instead of twice.' },
+  };
+
+  function drawRoof() {
+    const k = $('#kernSeg').dataset.value || 'gemm', kern = KERNELS[k];
+    const lx = (ai) => 50 + (Math.log10(ai) + 1) / 4.2 * 540;     // 0.1 .. ~1600
+    const ly = (fl) => 265 - (Math.log10(fl) - 10) / 3.2 * 235;   // 1e10 .. 1e13
+    let d = '';
+    for (let e = -1; e <= 3.2; e += 0.02) {
+      const ai = Math.pow(10, e);
+      const perf = Math.min(PEAK, ai * BW);
+      d += (d ? 'L' : 'M') + lx(ai).toFixed(1) + ',' + ly(perf).toFixed(1) + ' ';
+    }
+    const perf = Math.min(PEAK, kern.ai * BW);
+    let g = `<line stroke="var(--border-strong)" x1="50" y1="265" x2="620" y2="265"/><line stroke="var(--border-strong)" x1="50" y1="20" x2="50" y2="265"/>` +
+      `<path class="roof" d="${d}"/>` +
+      `<line class="ridge" x1="${lx(RIDGE)}" y1="20" x2="${lx(RIDGE)}" y2="265"/>` +
+      `<text x="${lx(RIDGE) - 40}" y="16">ridge ≈ ${RIDGE.toFixed(0)}</text>` +
+      `<text x="120" y="250" transform="rotate(-32 120 250)" style="fill:var(--accent)">memory bound</text>` +
+      `<text x="430" y="52" style="fill:var(--accent)">compute bound</text>` +
+      `<text x="250" y="288">arithmetic intensity (FLOPs / byte, log)</text>` +
+      `<text x="2" y="14">TFLOP/s</text>`;
+    for (const v of [0.1, 1, 10, 100, 1000]) g += `<text x="${lx(v) - 8}" y="279">${v}</text>`;
+    for (const v of [1e10, 1e11, 1e12, 1e13]) if (ly(v) > 14 && ly(v) < 266) g += `<text x="6" y="${ly(v) + 4}">${(v / 1e12).toFixed(v < 1e12 ? 2 : 0)}</text>`;
+    Object.entries(KERNELS).forEach(([kk, vv]) => {
+      if (kk === k) return;
+      g += `<circle class="pt other" cx="${lx(vv.ai)}" cy="${ly(Math.min(PEAK, vv.ai * BW))}" r="4"/>`;
+    });
+    g += `<circle class="pt" cx="${lx(kern.ai)}" cy="${ly(perf)}" r="7"/>`;
+    $('#roofSvg').innerHTML = g;
+
+    $('#rAI').textContent = kern.ai + ' F/B';
+    const bound = kern.ai < RIDGE ? '🧱 memory bandwidth' : '⚙️ compute';
+    $('#rBound').textContent = bound;
+    $('#rTput').textContent = (perf / 1e12).toFixed(1) + ' TFLOP/s';
+    $('#rPct').textContent = (perf / PEAK * 100).toFixed(1) + '%';
+    $('#roofInfo .title').textContent = kern.t;
+    $('#roofInfo p').innerHTML = kern.n;
+  }
+  $('#kernSeg').addEventListener('segchange', drawRoof);
+  drawRoof();
+
+  /* ================= memory budget ================= */
+  const GPU_GB = 80;
+  function mem() {
+    const P = +$('#pParams').value, act = +$('#pBatch').value;
+    const mode = $('#memSeg').dataset.value || 'train';
+    $('#pParamsV').textContent = P.toFixed(1) + ' B';
+    $('#pBatchV').textContent = '×' + act;
+    let rows;
+    if (mode === 'train') rows = [
+      ['bf16 weights', P * 2, 'var(--accent)'],
+      ['bf16 gradients', P * 2, 'var(--accent-2)'],
+      ['AdamW state (fp32 m, v)', P * 8, 'var(--amber)'],
+      ['fp32 master weights', P * 4, 'var(--pink)'],
+      ['Activations', act * 0.55 * Math.sqrt(P) , 'var(--green)'],
+    ];
+    else if (mode === 'lora') rows = [
+      ['Frozen base weights (bf16)', P * 2, 'var(--accent)'],
+      ['LoRA adapter weights', P * 0.02, 'var(--accent-2)'],
+      ['Adapter grads + optimizer', P * 0.12, 'var(--amber)'],
+      ['Activations (still full depth)', act * 0.5 * Math.sqrt(P), 'var(--green)'],
+    ];
+    else if (mode === 'inf16') rows = [
+      ['bf16 weights', P * 2, 'var(--accent)'],
+      ['KV cache', act * 0.42 * Math.sqrt(P), 'var(--pink)'],
+      ['Workspace', 1.5, 'var(--green)'],
+    ];
+    else rows = [
+      ['int4 weights', P * 0.55, 'var(--accent)'],
+      ['KV cache (fp16)', act * 0.42 * Math.sqrt(P), 'var(--pink)'],
+      ['Workspace', 1.5, 'var(--green)'],
+    ];
+    const total = rows.reduce((s, r) => s + r[1], 0);
+    $('#memBars').innerHTML = rows.map(([n, v, c]) =>
+      `<div class="r"><span>${n}</span><div class="tk"><i style="width:${clamp(v / Math.max(total, GPU_GB) * 100, 0, 100)}%;background:${c}"></i></div><span class="v">${v.toFixed(1)} GB</span></div>`
+    ).join('') +
+      `<div class="r"><span><b>Total</b></span><div class="tk"><i style="width:${clamp(total / Math.max(total, GPU_GB) * 100, 0, 100)}%;background:${total > GPU_GB ? 'var(--red)' : 'var(--green)'}"></i></div><span class="v"><b>${total.toFixed(1)} GB</b></span></div>`;
+    const n = Math.ceil(total / GPU_GB);
+    $('#memInfo p').innerHTML = total <= GPU_GB
+      ? `✅ Fits on a single 80 GB GPU with <b>${(GPU_GB - total).toFixed(1)} GB</b> to spare. ${mode === 'train' ? 'Note how the optimizer state alone is larger than the weights — that is the line item ZeRO shards first.' : 'Remaining headroom goes to longer contexts or more concurrent sequences.'}`
+      : `❌ Needs <b>${total.toFixed(0)} GB</b> — at least <b>${n} GPUs</b>, so you now need a parallelism strategy (Chapters 23–24)${mode === 'train' ? ', gradient checkpointing to cut activations, or a memory-lean optimizer' : ', or heavier quantization'}.`;
+  }
+  $('#pParams').addEventListener('input', mem);
+  $('#pBatch').addEventListener('input', mem);
+  $('#memSeg').addEventListener('segchange', mem);
+  mem();
+})();
+</script>
+</body>
+</html>

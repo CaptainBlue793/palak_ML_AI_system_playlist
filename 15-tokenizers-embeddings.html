@@ -1,0 +1,389 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Tokenizers &amp; Embeddings</title>
+<link rel="stylesheet" href="assets/style.css">
+<script>try{var t=JSON.parse(localStorage.getItem('ml-theme'));if(t)document.documentElement.setAttribute('data-theme',t)}catch(e){}</script>
+<style>
+  .toks { display:flex; flex-wrap:wrap; gap:4px; margin-top:10px }
+  .toks span { padding:4px 7px; border-radius:7px; font-family:var(--mono); font-size:12.5px; border:1px solid var(--border); white-space:pre }
+  .toks span.c0 { background:var(--accent-soft); color:var(--accent); border-color:var(--accent) }
+  .toks span.c1 { background:var(--accent-2-soft); color:var(--accent-2); border-color:var(--accent-2) }
+  .toks span.c2 { background:var(--amber-soft); color:var(--amber); border-color:var(--amber) }
+  .toks span.c3 { background:var(--pink-soft); color:var(--pink); border-color:var(--pink) }
+  .simgrid { display:grid; gap:2px; margin-top:10px; font-size:10px }
+  .simgrid i { aspect-ratio:1; border-radius:3px; display:grid; place-items:center; font-style:normal; font-family:var(--mono); color:var(--text); font-size:9px }
+  .simlabel { font-size:10.5px; font-family:var(--mono); color:var(--muted); text-align:right; padding-right:4px; display:grid; align-items:center }
+  .nn-list { display:grid; gap:5px; margin-top:8px }
+  .nn-list .r { display:grid; grid-template-columns:120px 1fr 54px; gap:10px; align-items:center; font-size:13px }
+  .nn-list .tk { height:12px; border-radius:99px; background:var(--surface-3); overflow:hidden }
+  .nn-list .tk i { display:block; height:100%; background:linear-gradient(90deg,var(--accent),var(--accent-2)) }
+  .nn-list .v { font-family:var(--mono); text-align:right; color:var(--muted) }
+</style>
+</head>
+<body data-chapter="15">
+<main class="content">
+
+  <section class="hero">
+    <div class="eyebrow"><span class="pill accent">Chapter 15</span><span class="pill cyan">Intermediate</span><span class="pill">⏱ 35 min</span></div>
+    <h1>Tokenizers <span class="grad">&amp; Embeddings</span></h1>
+    <p class="lead">Before a model sees text it sees integers, and before it reasons it looks those integers up in a table. Tokenization decides your costs, your multilingual fairness and several famous model failures. Embeddings turn the result into geometry — the substrate of every retrieval system you'll build.</p>
+    <ul class="objectives">
+      <li>Explain byte-pair encoding and why subwords beat words and characters</li>
+      <li>Predict tokenizer pathologies: numbers, code, non-English text</li>
+      <li>Read embedding geometry and compute similarity correctly</li>
+      <li>Describe how embedding models are trained with contrastive objectives</li>
+      <li>Budget the storage and re-embedding cost of a vector corpus</li>
+    </ul>
+  </section>
+
+  <h2>Why tokens exist</h2>
+  <p>You need a fixed vocabulary of symbols. Two obvious options both fail:</p>
+
+  <div class="split">
+    <div class="card"><h4 class="mt0">Whole words</h4><p class="small mb0">Vocabulary is unbounded (names, typos, compounds, new slang) and every unseen word becomes <code>&lt;UNK&gt;</code> — an information hole the model can never fill.</p></div>
+    <div class="card"><h4 class="mt0">Single characters</h4><p class="small mb0">Tiny vocabulary, nothing unknown — but sequences become 5× longer, which is quadratically more expensive in attention, and each token carries almost no meaning.</p></div>
+  </div>
+
+  <p><strong>Subword tokenization</strong> takes the middle: frequent words become one token, rare words split into meaningful pieces, and anything else falls back to bytes so nothing is ever unrepresentable.</p>
+
+  <div class="panel">
+    <div class="panel-head"><div class="dots"><i></i><i></i><i></i></div><span class="p-title">Tokenizer playground (approximate BPE)</span><span class="p-tag">Interactive</span></div>
+    <div class="panel-body">
+      <textarea class="inp" id="tokIn" rows="3" style="width:100%;font-family:var(--mono);font-size:13.5px">The unbelievably tokenized sentence costs $1,234.56 in 2026. Café — 東京 — def calculate_total(x): return x*1.08</textarea>
+      <div class="controls" style="margin-top:8px">
+        <button class="btn sm" data-ex="english">English prose</button>
+        <button class="btn sm" data-ex="code">Python code</button>
+        <button class="btn sm" data-ex="numbers">Numbers &amp; IDs</button>
+        <button class="btn sm" data-ex="multi">Non-English</button>
+      </div>
+      <div class="toks" id="tokOut"></div>
+      <div class="stats" style="margin-top:12px">
+        <div class="stat"><div class="k">Characters</div><div class="v" id="tChars">–</div></div>
+        <div class="stat acc"><div class="k">Tokens</div><div class="v" id="tToks">–</div></div>
+        <div class="stat good"><div class="k">Chars per token</div><div class="v" id="tRatio">–</div></div>
+        <div class="stat warn"><div class="k">Cost per 1M such docs</div><div class="v" id="tCost" style="font-size:17px">–</div></div>
+      </div>
+      <div class="callout" id="tokInfo" style="margin-top:12px"><div class="ico">📘</div><div class="body"><p style="margin:0"></p></div></div>
+      <p class="small muted">This is a simplified BPE with a small merge table — a real tokenizer has 50k–200k entries — but the behaviour it demonstrates (English ≈ 4 chars/token, code and other scripts far worse) matches production tokenizers closely.</p>
+    </div>
+  </div>
+
+  <h2>How BPE learns its vocabulary</h2>
+  <p>Byte-pair encoding is trained, not designed:</p>
+  <ol>
+    <li>Start with every byte as its own token.</li>
+    <li>Count adjacent pairs across a large corpus; merge the most frequent pair into a new token.</li>
+    <li>Repeat until you reach the target vocabulary size (e.g. 100,000 merges).</li>
+  </ol>
+  <p>Frequent sequences like <code> the</code>, <code>ing</code> and <code>=&gt;</code> become single tokens; rare words decompose. <b>WordPiece</b> (BERT) picks merges by likelihood gain rather than raw frequency; <b>Unigram</b> (SentencePiece) starts large and prunes; all three behave similarly in practice.</p>
+
+  <div class="callout warn">
+    <div class="ico">🌍</div>
+    <div class="body"><div class="title">Tokenization is a fairness and cost issue</div>
+      <p>A tokenizer trained mostly on English gives ~4 characters per token for English but 1–2 for Hindi, Thai or Amharic. The same sentence therefore costs <b>2–4× more tokens</b>, fits worse in the context window, and is more expensive to serve — for the languages least likely to be prioritised. When you pick or train a tokenizer, measure its fertility (tokens per word) on every language you support.</p></div>
+  </div>
+
+  <div class="table-wrap">
+    <table class="t">
+      <thead><tr><th>Pathology</th><th>Why it happens</th><th>What it breaks</th></tr></thead>
+      <tbody>
+        <tr><td>“How many r's in strawberry?”</td><td>The word is 2–3 tokens; the model never sees letters</td><td>Character counting, spelling, reversal, acrostics</td></tr>
+        <tr><td>Arithmetic on long numbers</td><td>Digits group inconsistently (“1234” may be 1 or 3 tokens)</td><td>Multi-digit arithmetic — better tokenizers split digits individually</td></tr>
+        <tr><td>Whitespace-sensitive code</td><td>Indentation runs merge into tokens in odd ways</td><td>Python generation; fixed by code-aware vocabularies</td></tr>
+        <tr><td>Trailing space in a prompt</td><td>“ hello” and “hello” are different tokens</td><td>Completion quality — never end a prompt with a stray space</td></tr>
+        <tr><td>Glitch tokens</td><td>Rare strings in the vocabulary, almost absent from training</td><td>Bizarre, unstable outputs when they appear</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h2>From token id to vector</h2>
+  <p>The embedding table is a matrix of shape (vocab × d). Token id 15,231 means “take row 15,231”. Those rows are learned parameters, and for a 100k vocabulary with d=4096 they account for ~410M parameters at each end of the model — which is why the input and output embeddings are often <b>tied</b> (shared).</p>
+
+  <pre class="code">ids   = tokenizer("hello world")      <span class="c"># [15496, 1917]</span>
+x     = embedding_table[ids]          <span class="c"># (2, 4096)</span>
+h     = transformer(x)                <span class="c"># (2, 4096) contextual representations</span>
+logits = h @ embedding_table.T        <span class="c"># tied weights: (2, vocab)</span></pre>
+
+  <div class="callout tip">
+    <div class="ico">📐</div>
+    <div class="body"><div class="title">Static vs contextual embeddings</div>
+      <p>The embedding <i>table</i> gives one fixed vector per token — “bank” is the same vector everywhere. After a few transformer blocks, the representation is <b>contextual</b>: the “bank” in <i>river bank</i> and in <i>bank account</i> have diverged. Modern embedding models are transformers whose contextual outputs are pooled into one vector per sentence or document.</p></div>
+  </div>
+
+  <h2>Embedding geometry</h2>
+  <p>Meaning becomes direction. Similar items point the same way, and the standard score is cosine similarity (Chapter 2). Click a word to see its neighbours in this toy space.</p>
+
+  <div class="panel">
+    <div class="panel-head"><div class="dots"><i></i><i></i><i></i></div><span class="p-title">Similarity in a small embedding space</span><span class="p-tag">Interactive</span></div>
+    <div class="panel-body">
+      <div class="controls" id="wordBtns"></div>
+      <div class="split" style="margin-top:12px">
+        <div>
+          <div class="small muted" style="font-weight:700">Nearest neighbours</div>
+          <div class="nn-list" id="nnList"></div>
+        </div>
+        <div>
+          <div class="small muted" style="font-weight:700">Full similarity matrix</div>
+          <div id="simWrap"></div>
+        </div>
+      </div>
+      <p class="small muted" style="margin-top:10px">Real embedding spaces have 384–4,096 dimensions, and nearly all pairs are close to orthogonal — high-dimensional space is mostly empty, which is exactly what makes nearest-neighbour search meaningful (Chapter 20).</p>
+    </div>
+  </div>
+
+  <h2>How embedding models are trained</h2>
+  <p>Contrastive learning: pull matching pairs together, push everything else apart. The pairs come from naturally aligned data — a question and its answer, a title and its body, a query and the clicked document, an image and its caption.</p>
+
+  <div class="grid c3">
+    <div class="card feature reveal"><div class="f-ico">🧲</div><h4>In-batch negatives</h4><p>Every other item in the batch is a negative. Free, and bigger batches mean more negatives — which is why embedding training loves large batches.</p></div>
+    <div class="card feature reveal"><div class="f-ico" style="background:var(--accent-2-soft)">🎯</div><h4>Hard negatives</h4><p>Mine <i>almost</i> correct documents with a first-pass retriever and train against those. This is usually the single biggest quality jump.</p></div>
+    <div class="card feature reveal"><div class="f-ico" style="background:var(--green-soft)">🪆</div><h4>Matryoshka</h4><p>Train so the first 64/128/256 dimensions are independently useful. You can then truncate vectors to cut storage by 8× and re-rank with the full vector.</p></div>
+  </div>
+
+  <div class="callout warn">
+    <div class="ico">🔢</div>
+    <div class="body"><div class="title">Pooling and normalization matter</div>
+      <p>Mean-pooling token vectors, using the <code>[CLS]</code> position, or using the last token all give different results — use whatever the model card specifies, or your similarities will be quietly wrong. Then <b>L2-normalize</b>: with unit vectors, dot product equals cosine similarity, which makes vector databases faster and results consistent.</p></div>
+  </div>
+
+  <h2>The systems view: storage and re-embedding</h2>
+  <p>Embeddings are data you must store, index, back up and eventually regenerate. Size the bill before you choose a dimension.</p>
+
+  <div class="panel">
+    <div class="panel-head"><div class="dots"><i></i><i></i><i></i></div><span class="p-title">Corpus cost calculator</span><span class="p-tag">Interactive</span></div>
+    <div class="panel-body">
+      <div class="range-row"><label for="eDocs">Chunks to embed (millions)</label><input type="range" id="eDocs" min="0.1" max="200" step="0.1" value="10"><output id="eDocsV"></output></div>
+      <div class="range-row"><label for="eDim">Embedding dimension</label><input type="range" id="eDim" min="64" max="4096" step="64" value="768"><output id="eDimV"></output></div>
+      <div class="seg" id="ePrec"><button data-v="4" class="active">float32</button><button data-v="2">float16</button><button data-v="1">int8</button><button data-v="0.125">binary</button></div>
+      <div class="stats" style="margin-top:12px">
+        <div class="stat acc"><div class="k">Raw vector storage</div><div class="v" id="eStore" style="font-size:18px">–</div></div>
+        <div class="stat"><div class="k">With HNSW index (~1.6×)</div><div class="v" id="eIndex" style="font-size:18px">–</div></div>
+        <div class="stat good"><div class="k">One-off embedding cost</div><div class="v" id="eCost" style="font-size:18px">–</div></div>
+        <div class="stat warn"><div class="k">Time on 1 GPU</div><div class="v" id="eTime" style="font-size:18px">–</div></div>
+      </div>
+      <div class="callout" id="eInfo" style="margin-top:12px"><div class="ico">💡</div><div class="body"><p style="margin:0"></p></div></div>
+    </div>
+  </div>
+
+  <div class="callout danger">
+    <div class="ico">🔒</div>
+    <div class="body"><div class="title">Pin the embedding model version</div>
+      <p>Vectors from two model versions are <b>not comparable</b> — not even slightly. Upgrading the embedder means re-embedding the entire corpus and rebuilding the index, usually behind a dual-write and a shadow index so search never breaks. Store the model name and version alongside every vector, and treat an upgrade as a migration with a rollback plan (Chapter 21).</p></div>
+  </div>
+
+  <div class="callout danger"><div class="ico">⚠️</div><div class="body"><div class="title">Common mistakes</div>
+    <ul class="mb0">
+      <li><b>Comparing vectors from different models or versions.</b> The numbers still come out, and they mean nothing.</li>
+      <li><b>Forgetting to normalize</b> when the index assumes cosine, or normalizing twice and wondering why scores are flat.</li>
+      <li><b>Using the wrong pooling</b> for the model — a silent 5–15 point retrieval regression.</li>
+      <li><b>Counting characters instead of tokens</b> for cost and context budgeting. Non-English and code blow the estimate apart.</li>
+      <li><b>Chunking without regard to tokens.</b> “500 words” is 700 tokens in English and 2,000 in Japanese; chunk by tokens with overlap (Chapter 21).</li>
+      <li><b>Asking a model to manipulate letters</b> and concluding it can't reason. It can't see letters — that's a tokenization artefact.</li>
+    </ul></div></div>
+
+  <div class="callout interview"><div class="ico">🎤</div><div class="body"><div class="title">Interview drill</div>
+    <p class="small" style="margin:10px 0 0"><b>Warm-up:</b> Why do LLMs fail at counting letters in a word?</p>
+    <details class="ans"><summary>How a strong answer sounds</summary><div>The model never sees characters — it sees token ids. “strawberry” might be two or three tokens, none of which expose their spelling, so the model has to recall spelling as memorised knowledge rather than inspect it. It's a representation limitation, not a reasoning one, which is why the same model can write a correct program to count the letters. Workarounds: ask for a tool call or code, or use character-level or digit-split tokenization where it matters.</div></details>
+    <p class="small" style="margin:10px 0 0"><b>Deeper:</b> You're choosing an embedding dimension for 200M chunks. Walk through the decision.</p>
+    <details class="ans"><summary>How a strong answer sounds</summary><div>Start from retrieval quality on <i>my</i> data, not a leaderboard: build a small labelled query set and measure recall@k for a few models and dimensions. Then cost it: 200M × 1024 dims × 4 bytes is ~820 GB before the index, versus ~205 GB at int8 or ~100 GB at 384 dims — which decides whether it fits in RAM, and RAM is the dominant cost of a vector index. I'd prefer a Matryoshka-capable model so I can store truncated vectors for the first-pass search and re-rank the top few hundred with full vectors, plus scalar quantization. Finally, I'd pin the model version and plan the re-embedding migration before launch, because that cost recurs every upgrade.</div></details>
+  </div></div>
+
+  <div class="takeaways">
+    <h3>🧠 Key takeaways</h3>
+    <ul>
+      <li>Subword tokenization balances vocabulary size against sequence length; byte fallback means nothing is unrepresentable.</li>
+      <li>Token counts — not characters — drive context limits and cost, and they differ hugely across languages and code.</li>
+      <li>Embeddings turn meaning into direction; normalize and use the model's prescribed pooling.</li>
+      <li>Embedding models are trained contrastively; hard negatives usually give the biggest gains.</li>
+      <li>Vectors are infrastructure: budget storage, and treat an embedder upgrade as a full re-index migration.</li>
+    </ul>
+  </div>
+
+  <div class="quiz-wrap">
+    <h2>Check your understanding</h2>
+    <div class="quiz-score"></div>
+
+    <div class="quiz" data-answer="2">
+      <p class="q">Why do most LLMs use subword tokenization rather than words?</p>
+      <div class="opts">
+        <button class="opt">Subwords are faster to look up</button>
+        <button class="opt">Words can't be embedded</button>
+        <button class="opt">It bounds vocabulary size while still representing any string</button>
+        <button class="opt">It removes the need for positional encodings</button>
+      </div>
+      <div class="explain">A fixed vocabulary plus byte fallback means no <code>&lt;UNK&gt;</code> ever, at a sequence length far shorter than character-level.</div>
+    </div>
+
+    <div class="quiz" data-answer="0">
+      <p class="q">The same paragraph costs 180 tokens in English and 520 in Thai. Why?</p>
+      <div class="opts">
+        <button class="opt">The tokenizer's merges were learned mostly from English text</button>
+        <button class="opt">Thai has more words</button>
+        <button class="opt">Unicode uses more bits for Thai characters, so the model is slower</button>
+        <button class="opt">The context window is language-specific</button>
+      </div>
+      <div class="explain">BPE merges reflect the training corpus. Under-represented scripts stay near byte level — more tokens, more cost, less usable context.</div>
+    </div>
+
+    <div class="quiz" data-answer="1">
+      <p class="q">You upgrade your embedding model to a new version. What must happen?</p>
+      <div class="opts">
+        <button class="opt">Nothing — embeddings are comparable across versions</button>
+        <button class="opt">Re-embed the whole corpus and rebuild the index</button>
+        <button class="opt">Only re-embed documents added since the upgrade</button>
+        <button class="opt">Normalize the old vectors again</button>
+      </div>
+      <div class="explain">Different models produce different spaces. Mixing them makes similarity meaningless — a full re-index, usually behind a shadow index with dual writes.</div>
+    </div>
+
+    <div class="quiz" data-answer="3">
+      <p class="q">What are “hard negatives” in contrastive embedding training?</p>
+      <div class="opts">
+        <button class="opt">Examples with noisy labels</button>
+        <button class="opt">Very long documents</button>
+        <button class="opt">Duplicates of the positive example</button>
+        <button class="opt">Documents that look relevant but aren't</button>
+      </div>
+      <div class="explain">Random negatives are trivially separable and teach little. Near-misses mined with a first-pass retriever force the model to learn the fine distinctions that matter at retrieval time.</div>
+    </div>
+
+    <div class="quiz" data-answer="1">
+      <p class="q">You store 50M embeddings at 1536 dimensions in float32. Roughly how much raw vector storage is that?</p>
+      <div class="opts">
+        <button class="opt">~30 GB</button>
+        <button class="opt">~307 GB</button>
+        <button class="opt">~3 TB</button>
+        <button class="opt">~77 GB</button>
+      </div>
+      <div class="explain">50e6 × 1536 × 4 bytes ≈ 307 GB, before the index overhead. This arithmetic is why int8 quantization and dimension truncation are standard practice.</div>
+    </div>
+  </div>
+</main>
+<script src="assets/app.js"></script>
+<script>
+(function(){
+  const { $, $$, clamp, fmt } = ML;
+
+  /* ================= approximate BPE ================= */
+  const MERGES = [' the', ' of', ' and', ' to', ' in', 'ing', 'ed', 'er', 'ly', 'tion', 'able', 'un', ' sen', 'tence',
+    ' cost', 's', ' return', ' def', ' calc', 'ulate', '_total', ' The', ' be', 'liev', 'ably', ' token', 'ized',
+    '(', ')', ':', '*', '.', ',', '$', ' in', ' is', ' a', ' x', '1', '2', '3', '4', '5', '6', '0', '8', '7', '9'];
+  function tokenize(text) {
+    const out = [];
+    let i = 0;
+    while (i < text.length) {
+      // try longest merge match
+      let best = null;
+      for (const m of MERGES) {
+        if (text.startsWith(m, i) && (!best || m.length > best.length)) best = m;
+      }
+      if (best && best.length > 1) { out.push(best); i += best.length; continue; }
+      // word chunk of up to 4 latin chars
+      const m = /^[A-Za-z]{1,4}/.exec(text.slice(i));
+      if (m) { out.push(m[0]); i += m[0].length; continue; }
+      const ch = text[i];
+      if (ch.charCodeAt(0) > 127) {
+        // non-latin: roughly one token per character, sometimes per byte
+        out.push(ch); i += 1;
+        if (ch.charCodeAt(0) > 0x2000) out.push('·'); // byte-fallback illustration
+        continue;
+      }
+      out.push(ch); i += 1;
+    }
+    return out;
+  }
+  const EXAMPLES = {
+    english: 'The unbelievably tokenized sentence costs less than you think, because common English words are single tokens.',
+    code: 'def calculate_total(items):\n    return sum(i.price * 1.08 for i in items)  # VAT included',
+    numbers: 'Order 8837291 for $1,234.56 on 2026-04-17, ref TX-99A81B2C-0042, total 18446744073709551616.',
+    multi: '東京都に住んでいます。Cafétéria à Montréal. मुझे भाषा पसंद है। Здравствуйте!',
+  };
+  function runTok() {
+    const text = $('#tokIn').value;
+    const toks = tokenize(text);
+    $('#tokOut').innerHTML = toks.map((t, i) =>
+      `<span class="c${i % 4}">${t.replace(/ /g, '␣').replace(/\n/g, '⏎').replace(/</g, '&lt;')}</span>`).join('');
+    const ratio = text.length / Math.max(1, toks.length);
+    $('#tChars').textContent = text.length;
+    $('#tToks').textContent = toks.length;
+    $('#tRatio').textContent = ratio.toFixed(2);
+    $('#tCost').textContent = '$' + (toks.length * 1e6 / 1e6 * 0.5).toFixed(0);
+    const info = $('#tokInfo p');
+    if (ratio > 3.4) info.innerHTML = '✅ <b>Efficient.</b> Around 4 characters per token is what English prose achieves on a well-matched tokenizer — the baseline every cost estimate assumes.';
+    else if (ratio > 2.4) info.innerHTML = '⚠️ <b>Middling.</b> Punctuation, numbers and identifiers break merges, so you pay more tokens for the same information. Code and structured data usually land here.';
+    else info.innerHTML = '🚩 <b>Expensive.</b> Around 1–2 characters per token means the text is being represented near byte level — typical for scripts under-represented in the tokenizer’s training corpus, or for long digit strings. Same meaning, 2–4× the cost and context.';
+  }
+  $('#tokIn').addEventListener('input', runTok);
+  $$('[data-ex]').forEach(b => b.onclick = () => { $('#tokIn').value = EXAMPLES[b.dataset.ex]; runTok(); });
+  runTok();
+
+  /* ================= embedding space ================= */
+  const WORDS = {
+    king:    [0.82, 0.55, 0.12, 0.05],
+    queen:   [0.78, 0.60, 0.10, 0.18],
+    man:     [0.70, 0.30, 0.20, 0.02],
+    woman:   [0.66, 0.34, 0.18, 0.22],
+    dog:     [0.20, 0.10, 0.90, 0.15],
+    cat:     [0.18, 0.12, 0.88, 0.22],
+    puppy:   [0.16, 0.08, 0.86, 0.30],
+    server:  [0.10, 0.80, 0.08, 0.60],
+    database:[0.12, 0.86, 0.06, 0.58],
+    latency: [0.08, 0.74, 0.04, 0.66],
+    poem:    [0.30, 0.15, 0.20, 0.85],
+    novel:   [0.32, 0.18, 0.18, 0.88],
+  };
+  const NAMES = Object.keys(WORDS);
+  const norm = (v) => { const n = Math.hypot(...v); return v.map(x => x / n); };
+  const U = Object.fromEntries(NAMES.map(n => [n, norm(WORDS[n])]));
+  const cos = (a, b) => U[a].reduce((s, x, i) => s + x * U[b][i], 0);
+  let sel = 'king';
+
+  function drawEmb() {
+    $('#wordBtns').innerHTML = NAMES.map(n => `<button class="btn sm ${n === sel ? 'primary' : ''}" data-w="${n}">${n}</button>`).join('');
+    $$('#wordBtns [data-w]').forEach(b => b.onclick = () => { sel = b.dataset.w; drawEmb(); });
+    const sims = NAMES.filter(n => n !== sel).map(n => [n, cos(sel, n)]).sort((a, b) => b[1] - a[1]).slice(0, 6);
+    $('#nnList').innerHTML = sims.map(([n, s]) =>
+      `<div class="r"><span>${n}</span><div class="tk"><i style="width:${clamp(s * 100, 0, 100)}%"></i></div><span class="v">${s.toFixed(3)}</span></div>`).join('');
+    let g = `<div class="simgrid" style="grid-template-columns:70px repeat(${NAMES.length},1fr)">`;
+    g += '<i></i>' + NAMES.map(n => `<i style="font-size:8px;color:var(--muted)">${n.slice(0, 4)}</i>`).join('');
+    NAMES.forEach(a => {
+      g += `<div class="simlabel">${a}</div>`;
+      NAMES.forEach(b => {
+        const s = cos(a, b);
+        g += `<i style="background:rgba(13,148,136,${clamp(s, 0, 1).toFixed(2)});color:${s > 0.6 ? '#fff' : 'var(--muted)'}">${s.toFixed(1).slice(1)}</i>`;
+      });
+    });
+    g += '</div>';
+    $('#simWrap').innerHTML = g;
+  }
+  drawEmb();
+
+  /* ================= corpus cost ================= */
+  function ecost() {
+    const docs = +$('#eDocs').value * 1e6, dim = +$('#eDim').value;
+    const bytes = +($('#ePrec').dataset.value || 4);
+    $('#eDocsV').textContent = fmt(docs, 0) + ' chunks';
+    $('#eDimV').textContent = dim + ' dims';
+    const raw = docs * dim * bytes;
+    $('#eStore').textContent = ML.bytes(raw);
+    $('#eIndex').textContent = ML.bytes(raw * 1.6);
+    const tokens = docs * 350;                       // ~350 tokens per chunk
+    $('#eCost').textContent = '$' + fmt(tokens / 1e6 * 0.02, 0);
+    const hours = docs / 2500 / 3600;                 // ~2500 chunks/s on one GPU
+    $('#eTime').textContent = hours < 1 ? (hours * 60).toFixed(0) + ' min' : hours.toFixed(1) + ' h';
+    $('#eInfo p').innerHTML = raw > 200e9
+      ? `⚠️ At <b>${ML.bytes(raw * 1.6)}</b> this will not sit in one machine's RAM. Options: quantize to int8 (4× smaller, ~1% recall loss), truncate Matryoshka dimensions, shard the index across nodes, or use a disk-backed index (Chapter 20).`
+      : raw > 30e9
+        ? `This fits on a large memory-optimised node. Keep an eye on the index overhead — graph-based indexes add roughly 60% on top of the raw vectors, and rebuilds need headroom for two copies.`
+        : `Comfortable. At this size you can afford full-precision vectors and a simple in-memory index, and re-embedding the corpus is an afternoon rather than a project.`;
+  }
+  ['#eDocs', '#eDim'].forEach(id => $(id).addEventListener('input', ecost));
+  $('#ePrec').addEventListener('segchange', ecost);
+  ecost();
+})();
+</script>
+</body>
+</html>

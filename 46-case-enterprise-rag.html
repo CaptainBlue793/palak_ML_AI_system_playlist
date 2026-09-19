@@ -1,0 +1,327 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Case Study: Enterprise RAG Assistant</title>
+<link rel="stylesheet" href="assets/style.css">
+<script>try{var t=JSON.parse(localStorage.getItem('ml-theme'));if(t)document.documentElement.setAttribute('data-theme',t)}catch(e){}</script>
+<style>
+  .req { display:grid; grid-template-columns:repeat(auto-fit,minmax(160px,1fr)); gap:8px }
+  .req > div { padding:10px 12px; border-radius:12px; background:var(--surface-2); border:1px solid var(--border) }
+  .req b { display:block; font-size:11px; color:var(--muted); text-transform:uppercase; letter-spacing:.05em }
+  .req span { font-family:var(--mono); font-size:17px; font-weight:800 }
+  .ragviz text { font-size:10px; fill:var(--text-2); font-family:var(--font); font-weight:600 }
+  .ragviz .sub { font-size:8.5px; fill:var(--muted); font-family:var(--mono); font-weight:400 }
+  .aclsvg { width:100%; height:210px }
+  .aclsvg text { font-size:10px; fill:var(--muted); font-family:var(--mono) }
+  .layers { display:grid; gap:8px }
+  .layers .r { display:grid; grid-template-columns:150px 1fr; gap:12px; padding:11px 13px; border-radius:12px; background:var(--surface-2); border:1px solid var(--border); font-size:13.5px }
+  .layers .r b { font-family:var(--mono); color:var(--accent) }
+</style>
+</head>
+<body data-chapter="46">
+<main class="content">
+
+  <section class="hero">
+    <div class="eyebrow"><span class="pill accent">Chapter 46</span><span class="pill pink">Case Study</span><span class="pill">⏱ 50 min</span></div>
+    <h1>Case Study: <span class="grad">Enterprise RAG Assistant</span></h1>
+    <p class="lead">Ten million documents across SharePoint, Confluence, Jira, Slack, Drive and a ticket system. Sixty thousand employees, each of whom may see a different subset of them. Answers must cite their sources, must never surface a document the asker is not allowed to read, and must be right often enough that people stop searching by hand.</p>
+    <ul class="objectives">
+      <li>Design the connector, parsing and incremental indexing pipeline</li>
+      <li>Enforce per-user permissions <em>inside</em> retrieval, not after it</li>
+      <li>Keep a 10M-document index fresh without rebuilding it</li>
+      <li>Ground answers in citations and abstain when evidence is thin</li>
+      <li>Evaluate a system whose ground truth lives in people's heads</li>
+    </ul>
+  </section>
+
+  <h2>1 · Requirements</h2>
+  <div class="req">
+    <div><b>Documents</b><span>10M</span></div>
+    <div><b>Chunks</b><span>~180M</span></div>
+    <div><b>Employees</b><span>60k</span></div>
+    <div><b>Queries/day</b><span>400k</span></div>
+    <div><b>Answer p95</b><span>&lt; 6 s</span></div>
+    <div><b>Freshness</b><span>&lt; 15 min</span></div>
+  </div>
+  <p class="small muted" style="margin-top:10px"><b>In scope:</b> connectors, indexing, permission-aware retrieval, grounding, evaluation, cost. <b>Out of scope:</b> training a base model (Chapter 52), the chat serving fleet itself (Chapter 45), records-management policy.</p>
+
+  <div class="callout tip">
+    <div class="ico">🎯</div>
+    <div class="body"><div class="title">Metrics</div>
+      <p><b>Primary:</b> task deflection — questions answered without opening a ticket or interrupting a colleague, measured by a follow-up prompt and by ticket volume in the covered categories. <b>Quality:</b> answer correctness and citation faithfulness on a graded set, retrieval recall@20 on annotated queries, abstention rate. <b>Guardrails:</b> <em>zero</em> permission leaks (a hard gate, not a metric to trade), p95 latency, index staleness, cost per query.</p></div>
+  </div>
+
+  <div class="callout warn">
+    <div class="ico">🚫</div>
+    <div class="body"><div class="title">The one requirement that is not a trade-off</div>
+      <p>Every other number here is negotiable under pressure: latency, freshness, cost, even accuracy. Permission correctness is not. A single retrieved snippet from an unreleased earnings memo, a performance review or a document under legal hold is an incident that ends the project — and unlike a wrong answer, users cannot detect it, so it can run for months undiscovered. Design the retrieval path so that a leak requires <em>a bug in one place</em>, rather than requiring every one of five layers to work.</p></div>
+  </div>
+
+  <h2>2 · Ingestion and indexing</h2>
+  <div class="panel">
+    <div class="panel-head"><div class="dots"><i></i><i></i><i></i></div><span class="p-title">From a SharePoint edit to a retrievable chunk</span><span class="p-tag">Step-through</span></div>
+    <div class="panel-body svg-scroll">
+      <svg id="ragSvg" class="diagram ragviz" viewBox="0 0 900 310">
+        <defs><marker id="rg46" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" class="arrow-head"/></marker></defs>
+        <path id="r-e1" class="edge dimmable" d="M130,55 L180,55" marker-end="url(#rg46)"/>
+        <path id="r-e2" class="edge dimmable" d="M300,55 L350,55" marker-end="url(#rg46)"/>
+        <path id="r-e3" class="edge dimmable" d="M470,55 L520,55" marker-end="url(#rg46)"/>
+        <path id="r-e4" class="edge dimmable" d="M640,55 L690,55" marker-end="url(#rg46)"/>
+        <path id="r-e5" class="edge dimmable" d="M760,140 L760,80" marker-end="url(#rg46)"/>
+        <path id="r-acl" class="edge dimmable dash" d="M240,80 L240,175 L640,175" marker-end="url(#rg46)"/>
+        <path id="r-edlq" class="edge dimmable dash" d="M410,80 L410,235" marker-end="url(#rg46)"/>
+        <g id="r-src" class="node dimmable" transform="translate(20,30)"><rect width="110" height="50" rx="11"/><text x="55" y="22" text-anchor="middle">Sources</text><text x="55" y="38" text-anchor="middle" class="sub">6 connectors</text></g>
+        <g id="r-cdc" class="node dimmable" transform="translate(180,30)"><rect width="120" height="50" rx="11"/><text x="60" y="22" text-anchor="middle">Change feed</text><text x="60" y="38" text-anchor="middle" class="sub">webhook + poll</text></g>
+        <g id="r-parse" class="node dimmable" transform="translate(350,30)"><rect width="120" height="50" rx="11"/><text x="60" y="22" text-anchor="middle">Parse + chunk</text><text x="60" y="38" text-anchor="middle" class="sub">pdf · docx · html</text></g>
+        <g id="r-emb" class="node dimmable" transform="translate(520,30)"><rect width="120" height="50" rx="11"/><text x="60" y="22" text-anchor="middle">Embed</text><text x="60" y="38" text-anchor="middle" class="sub">batch · dedup cache</text></g>
+        <g id="r-idx" class="node dimmable" transform="translate(690,30)"><rect width="140" height="50" rx="11"/><text x="70" y="22" text-anchor="middle">Hybrid index</text><text x="70" y="38" text-anchor="middle" class="sub">vector + BM25</text></g>
+        <g id="r-perm" class="node dimmable" transform="translate(640,150)"><rect width="190" height="50" rx="11"/><text x="95" y="22" text-anchor="middle">Permission mirror</text><text x="95" y="38" text-anchor="middle" class="sub">groups · ACL tokens</text></g>
+        <g id="r-dlq" class="node dimmable" transform="translate(330,235)"><rect width="160" height="46" rx="11"/><text x="80" y="20" text-anchor="middle">Quarantine + DLQ</text><text x="80" y="36" text-anchor="middle" class="sub">parse failures</text></g>
+      </svg>
+    </div>
+    <div class="stepper" data-diagram="ragSvg">
+      <ol class="steps">
+        <li data-title="Connectors, not a crawler" data-on="r-src">Each system gets a first-class connector using its own change API — SharePoint webhooks, Confluence events, Drive push notifications — with a slow reconciliation poll behind it to catch what webhooks drop. A generic crawler would re-read 10M documents to find the 40,000 that changed today.</li>
+        <li data-title="Change feed" data-on="r-src r-cdc r-e1" data-packet="r-src>r-cdc">Every event lands on a durable queue keyed by document id, so bursts — a bulk migration, a permission sweep — are absorbed rather than dropped. Deduplicate by id and version: a document saved eight times in a minute should be indexed once.</li>
+        <li data-title="Parse and chunk" data-on="r-cdc r-parse r-e2" data-packet="r-cdc>r-parse">The unglamorous 60% of the work: PDFs with tables, scans needing OCR, 400-slide decks, spreadsheets, wiki macros. Chunk on structure — headings and sections — not on a fixed character count, and carry the document title plus the heading path into every chunk's text so a chunk is interpretable alone.</li>
+        <li data-title="Failures are quarantined, not silent" data-on="r-parse r-dlq r-edlq" data-packet="r-parse>r-dlq" data-color="var(--amber)">A document that fails to parse is invisible in retrieval and indistinguishable from one that does not exist. It goes to a dead-letter queue with a dashboard and an owner — “we have no answer” is far more often a parse failure than a retrieval failure.</li>
+        <li data-title="Embed with a dedup cache" data-on="r-parse r-emb r-e3" data-packet="r-parse>r-emb" data-color="var(--green)">Hash each chunk's text: an edit to page 3 of a 90-page document changes two chunks, not ninety. Embedding is batched on GPU, and the model version is stamped on every vector so a migration can proceed chunk by chunk (Chapter 20).</li>
+        <li data-title="Permissions mirrored separately" data-on="r-cdc r-perm r-acl" data-packet="r-cdc>r-perm" data-color="var(--pink)">ACLs change far more often than content, and a re-share must take effect in minutes without re-embedding anything. Permissions get their own feed into their own store, joined at query time — see the next section.</li>
+        <li data-title="Into the hybrid index" data-on="r-emb r-idx r-e4 r-perm r-e5" data-packet="r-emb>r-idx">Upsert by chunk id into a vector index and a lexical index that share document metadata: id, source, URL, title, timestamps, ACL tokens, sensitivity label. Both are needed — dense retrieval handles paraphrase, BM25 handles the error code, the project codename and the person's surname (Chapter 21).</li>
+      </ol>
+    </div>
+  </div>
+
+  <h2>3 · Deep dive: permission-aware retrieval</h2>
+  <p>The query needs the top 20 chunks <em>that this user may read</em>. Where that constraint is applied decides whether the system is correct, fast, or both.</p>
+
+  <div class="panel">
+    <div class="panel-head"><div class="dots"><i></i><i></i><i></i></div><span class="p-title">Four ways to apply permissions</span><span class="p-tag">Interactive</span></div>
+    <div class="panel-body">
+      <div class="seg" id="aclSeg"><button data-v="post" class="active">Post-filter</button><button data-v="over">Over-fetch + filter</button><button data-v="pre">ACL tokens in the index</button><button data-v="peruser">Per-user index</button></div>
+      <div class="svg-scroll"><svg id="aclSvg" class="diagram aclsvg" viewBox="0 0 640 210"></svg></div>
+      <div class="stats">
+        <div class="stat acc"><div class="k">Effective recall@20</div><div class="v" id="aRec" style="font-size:18px">–</div></div>
+        <div class="stat good"><div class="k">Added p95 latency</div><div class="v" id="aLat" style="font-size:18px">–</div></div>
+        <div class="stat warn"><div class="k">Index cost</div><div class="v" id="aCost" style="font-size:18px">–</div></div>
+        <div class="stat bad"><div class="k">Where enforcement lives</div><div class="v" id="aLeak" style="font-size:15px">–</div></div>
+      </div>
+      <div class="callout" id="aclInfo" style="margin-top:12px"><div class="ico">🔐</div><div class="body"><p style="margin:0"></p></div></div>
+    </div>
+  </div>
+
+  <div class="callout tip">
+    <div class="ico">🧾</div>
+    <div class="body"><div class="title">ACL tokens: the shape that actually scales</div>
+      <p>Store on each chunk a small set of opaque strings — <code>grp:eng-platform</code>, <code>grp:all-staff</code>, <code>usr:1042</code> — that grant read access, plus a deny set for the rare explicit exclusion. At query time, resolve the asker's group memberships (cached, a few milliseconds) into the same token vocabulary and push <code>allow ∩ user ≠ ∅ AND deny ∩ user = ∅</code> into the index as a pre-filter. The index applies it during traversal, so the top 20 it returns are already 20 readable chunks.</p>
+      <p>Two details make or break it. <b>Group expansion must be transitive</b> — nested groups are where leaks hide. And <b>the mirror must be recent</b>: revocation lag is the window in which a former team member still gets answers, so drive it from the change feed and alert on mirror lag, not only on indexing lag.</p></div>
+  </div>
+
+  <h2>4 · Deep dive: freshness without rebuilds</h2>
+  <div class="table-wrap">
+    <table class="t">
+      <thead><tr><th>Change</th><th>Rate</th><th>What must happen</th><th>Target lag</th></tr></thead>
+      <tbody>
+        <tr><td>Document edited</td><td>~40k/day</td><td>Re-parse, re-embed changed chunks only, upsert</td><td>&lt; 15 min</td></tr>
+        <tr><td>Document deleted or archived</td><td>~6k/day</td><td>Hard delete from both indexes — a tombstone that is still retrievable is a leak</td><td>&lt; 5 min</td></tr>
+        <tr><td>Permission changed</td><td>~150k/day</td><td>Update ACL tokens only; never re-embed</td><td>&lt; 2 min</td></tr>
+        <tr><td>Employee leaves or moves team</td><td>~200/day</td><td>Group membership refresh; invalidate the cached identity</td><td>&lt; 2 min</td></tr>
+        <tr><td>Embedding model upgraded</td><td>~2/year</td><td>Dual-write both versions, shadow-evaluate, cut over, drop the old</td><td>weeks</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="small muted" style="margin-top:8px">The asymmetry is the design driver: permission changes outnumber content changes roughly four to one and must land eight times faster, which is exactly why ACLs are not baked into the embedded chunk.</p>
+
+  <div class="callout warn">
+    <div class="ico">🕰️</div>
+    <div class="body"><div class="title">Stale beats wrong, and conflicting versions beat both</div>
+      <p>The commonest complaint in enterprise RAG is not hallucination — it is confidently citing the 2019 policy when the 2024 one exists, because both are in the corpus and the old one happens to be better written. Fixes, in order of effect: index <code>last_modified</code> and boost recency for policy-shaped sources; detect near-duplicate chunks across versions and keep the newest; propagate source deprecation, so an archived space drops out of retrieval rather than merely ranking lower; and surface dates in the citation so the reader can see what they are being told. Retrieval-quality work that ignores document versioning plateaus early.</p></div>
+  </div>
+
+  <h2>5 · Grounding, citations and abstention</h2>
+  <div class="layers">
+    <div class="r"><b>Retrieve</b><span>Hybrid search with the ACL pre-filter gives ~60 candidates; a cross-encoder reranker cuts them to the top 8. The reranker is where most of the quality comes from, and the second-biggest latency line (Chapter 21).</span></div>
+    <div class="r"><b>Assemble</b><span>Chunks are fenced as untrusted data carrying source id, title, URL and date — never concatenated into the instruction text. A document in the corpus is a prompt-injection vector, and some of yours were written by vendors (Chapter 36).</span></div>
+    <div class="r"><b>Generate</b><span>Answer with an inline citation per claim, drawn only from the provided chunks. Structured output makes citations machine-checkable rather than decorative.</span></div>
+    <div class="r"><b>Verify</b><span>A cheap entailment check: does each cited chunk actually support the sentence attached to it? Unsupported sentences are dropped, or the answer is downgraded to “here is what I found”.</span></div>
+    <div class="r"><b>Abstain</b><span>If reranker scores are all low, say so and show the closest documents. A confident wrong answer about a security policy costs more than an admission of ignorance — abstention rate is a metric to tune, not to minimise.</span></div>
+  </div>
+
+  <h2>6 · Evaluation</h2>
+  <div class="table-wrap">
+    <table class="t">
+      <thead><tr><th>Layer</th><th>Set</th><th>Measures</th><th>Runs</th></tr></thead>
+      <tbody>
+        <tr><td>Retrieval</td><td>800 queries with annotated relevant documents</td><td>recall@20, nDCG@10, per-source recall</td><td>Every index or model change</td></tr>
+        <tr><td>Permissions</td><td>Synthetic personas × sensitive documents</td><td>Leak count — must be zero</td><td>CI, on every deploy</td></tr>
+        <tr><td>Answers</td><td>400 curated questions graded by rubric</td><td>Correctness, citation faithfulness, completeness</td><td>Nightly and pre-release</td></tr>
+        <tr><td>Abstention</td><td>150 genuinely unanswerable questions</td><td>Does it decline instead of inventing?</td><td>Nightly</td></tr>
+        <tr><td>Production</td><td>Sampled live traffic</td><td>Judge scores, thumbs, citation click-through, repeat-question rate</td><td>Continuous</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="small muted" style="margin-top:8px">Decompose every failure into retrieval versus generation before acting: if the right chunk was not in the top 20, no amount of prompt work will fix the answer. Teams routinely spend months on prompts to fix what is a chunking or parsing problem (Chapter 35).</p>
+
+  <h2>7 · Capacity and cost</h2>
+  <div class="table-wrap">
+    <table class="t">
+      <thead><tr><th>Quantity</th><th>Estimate</th><th>Notes</th></tr></thead>
+      <tbody>
+        <tr><td>Chunks</td><td>~180M</td><td>10M documents × ~18 chunks</td></tr>
+        <tr><td>Vector storage</td><td>~140 GB</td><td>768-dim, int8 quantized, plus ~90 GB of graph overhead</td></tr>
+        <tr><td>Initial embedding cost</td><td>~£9k one-off</td><td>~90B tokens through a batched open embedding model</td></tr>
+        <tr><td>Daily re-embedding</td><td>~1.5M chunks</td><td>Changed chunks only; the dedup cache removes most of them</td></tr>
+        <tr><td>Cost per query</td><td>~£0.004</td><td>Retrieval + rerank + ~2.5k prompt tokens + ~350 output</td></tr>
+        <tr><td>Serving footprint</td><td>~24 GPUs</td><td>Reranker and generation; retrieval is CPU and memory bound</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h2>8 · What breaks</h2>
+  <div class="table-wrap">
+    <table class="t">
+      <thead><tr><th>Failure</th><th>Symptom</th><th>Response</th></tr></thead>
+      <tbody>
+        <tr><td>Permission mirror falls behind</td><td>Nothing visible — until an audit</td><td>Alert on mirror lag directly; fail closed when it exceeds the threshold</td></tr>
+        <tr><td>A connector silently stops</td><td>Answers go stale for one source only</td><td>Per-source freshness and document-count monitors, not a global one</td></tr>
+        <tr><td>Parse failures cluster on one format</td><td>“It doesn't know about our PDFs”</td><td>DLQ dashboard with an owner; treat corpus coverage as a product metric</td></tr>
+        <tr><td>Duplicate policy versions</td><td>Confident answers from superseded documents</td><td>Near-duplicate detection, recency boost, deprecation propagation</td></tr>
+        <tr><td>Injection inside a document</td><td>Assistant follows instructions found in the corpus</td><td>Fence retrieved content as data; never let it authorise an action (Chapter 36)</td></tr>
+        <tr><td>Embedding upgrade mid-flight</td><td>Mixed-version vectors, recall collapses</td><td>Version-stamped vectors, dual-write, shadow eval, one cutover</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="callout interview"><div class="ico">🎤</div><div class="body"><div class="title">Interview drill</div>
+    <p class="small" style="margin:10px 0 0"><b>Follow-up:</b> “A user says the assistant can't find a document they can clearly see in SharePoint.” Walk me through it.</p>
+    <details class="ans"><summary>How a strong answer sounds</summary><div>I would bisect the pipeline with the document id. Is it in the index at all? If not, did the change feed ever see it — connector health, webhook delivery, reconciliation lag — or did it fail parsing and land in the DLQ? That covers most reports, and it is an ingestion bug, not a retrieval one. If it is indexed, does the query retrieve it for a user with full access? If it does for them and not for the reporter, it is the permission path: ACL tokens on the chunk versus the user's resolved groups, usually a nested group that is not expanded transitively, or a stale mirror. If it retrieves for nobody, it is genuine retrieval quality — a lexical match the dense retriever misses, a chunk that lost its heading context, or a reranker burying it. I would want a per-document debug view showing exactly these stages, because this question gets asked weekly and should not need an engineer.</div></details>
+    <p class="small" style="margin:10px 0 0"><b>Follow-up:</b> “Why not just build one index per user?”</p>
+    <details class="ans"><summary>How a strong answer sounds</summary><div>It is the most obviously correct design and it does not survive the numbers. Sixty thousand users against a corpus where most documents are readable by thousands of people means duplicating storage and index-build cost tens of times over, and it turns every permission change into a per-user reindex — at 150k permission changes a day that becomes the dominant workload. It also destroys memory locality: one shared graph in RAM becomes sixty thousand small ones. I would use it only for genuinely isolated enclaves — legal hold, a regulated subsidiary — where isolation is the requirement and the corpus is small. For everyone else, ACL tokens filtered inside the index give the same correctness at a fraction of the cost, provided group expansion is transitive and mirror lag is monitored.</div></details>
+  </div></div>
+
+  <div class="takeaways">
+    <h3>🧠 Key takeaways</h3>
+    <ul>
+      <li>Permissions belong inside the index traversal — post-filtering silently destroys recall and leaves enforcement in application code.</li>
+      <li>ACLs change far more often than content, so mirror them separately and never re-embed to apply them.</li>
+      <li>Parsing and connector coverage, not model quality, decide how much of the corpus the assistant can answer from at all.</li>
+      <li>Document versioning matters as much as retrieval: the classic enterprise failure is a confident citation of a superseded policy.</li>
+      <li>Split every evaluation into retrieval and generation, and treat zero permission leaks as a gate rather than a metric.</li>
+    </ul>
+  </div>
+
+  <div class="quiz-wrap">
+    <h2>Check your understanding</h2>
+    <div class="quiz-score"></div>
+
+    <div class="quiz" data-answer="2">
+      <p class="q">Why is filtering search results by permission <em>after</em> retrieval a poor design?</p>
+      <div class="opts">
+        <button class="opt">It is slower than filtering inside the index</button>
+        <button class="opt">It cannot express deny rules</button>
+        <button class="opt">The top-k comes back mostly unreadable, so effective recall collapses — a narrow-access user may get nothing</button>
+        <button class="opt">It requires storing ACLs twice</button>
+      </div>
+      <div class="explain">If a user can read 2% of the corpus, an unfiltered top-20 yields roughly zero readable results. You must over-fetch enormously or, better, push the constraint into the index traversal.</div>
+    </div>
+
+    <div class="quiz" data-answer="0">
+      <p class="q">Why are ACLs kept out of the embedded chunk and mirrored separately?</p>
+      <div class="opts">
+        <button class="opt">Permission changes are far more frequent than content changes and must apply in minutes without re-embedding</button>
+        <button class="opt">Embeddings cannot encode strings</button>
+        <button class="opt">It halves vector storage</button>
+        <button class="opt">Because vector indexes do not support metadata</button>
+      </div>
+      <div class="explain">150k permission changes a day against 40k content edits, with a tighter lag target. Coupling them would make every re-share an embedding job.</div>
+    </div>
+
+    <div class="quiz" data-answer="3">
+      <p class="q">Users report the assistant “doesn't know about” a whole class of internal documents. Most likely cause?</p>
+      <div class="opts">
+        <button class="opt">The embedding model is too small</button>
+        <button class="opt">The context window is too short</button>
+        <button class="opt">The reranker is misconfigured</button>
+        <button class="opt">Those documents fail parsing and sit in the dead-letter queue, invisible to retrieval</button>
+      </div>
+      <div class="explain">Coverage gaps look exactly like quality gaps from the outside. A document that failed to parse is indistinguishable from one that does not exist — which is why the DLQ needs a dashboard and an owner.</div>
+    </div>
+
+    <div class="quiz" data-answer="1">
+      <p class="q">The assistant confidently cites a 2019 policy that was superseded in 2024. What fixes this most directly?</p>
+      <div class="opts">
+        <button class="opt">A larger generation model</button>
+        <button class="opt">Version handling: near-duplicate detection, recency boosting, and propagating archival out of the index</button>
+        <button class="opt">More aggressive chunking</button>
+        <button class="opt">Raising the abstention threshold</button>
+      </div>
+      <div class="explain">Both documents are genuinely in the corpus and both are relevant to the query. This is a corpus-curation problem wearing a retrieval costume.</div>
+    </div>
+
+    <div class="quiz" data-answer="2">
+      <p class="q">Why must retrieved documents be fenced as untrusted data?</p>
+      <div class="opts">
+        <button class="opt">To reduce token cost</button>
+        <button class="opt">To improve citation formatting</button>
+        <button class="opt">Because a document in the corpus can carry instructions — indirect prompt injection from content anyone in the company, or a vendor, can write</button>
+        <button class="opt">Because the model cannot read markdown</button>
+      </div>
+      <div class="explain">Any wiki page, ticket comment or attached PDF is user-supplied content. Treat it as data, and never let it authorise a tool call or override policy.</div>
+    </div>
+  </div>
+</main>
+<script src="assets/app.js"></script>
+<script>
+(function(){
+  const { $ } = ML;
+
+  const MODES = {
+    post: {
+      rec: 0.18, lat: 12, cost: '1×', leak: '⚠️ app code',
+      bars: [['considered', 20, 'var(--accent)'], ['readable', 4, 'var(--green)'], ['returned', 4, 'var(--green)']],
+      note: `🚩 <b>Post-filter.</b> Search ignores permissions, then the application drops what the user may not see. Someone with access to 2% of the corpus gets a near-empty answer from a top-20 that the index considered a success. Worse, the only thing between the asker and a restricted document is a filter in your application code — one refactor away from a leak. Cheap to build, and the reason most first versions get rewritten.`,
+    },
+    over: {
+      rec: 0.71, lat: 140, cost: '1×', leak: '⚠️ app code',
+      bars: [['considered', 500, 'var(--accent)'], ['readable', 96, 'var(--green)'], ['returned', 20, 'var(--green)']],
+      note: `⚠️ <b>Over-fetch and filter.</b> Ask for 500 to keep 20. Recall recovers for most users, but the cost is real — 25× the traversal work, and a reranking budget to match — and it still fails for the narrowest-access users, who are exactly the people handling the most sensitive material. A pragmatic stopgap while you build the real thing; a bad place to stay.`,
+    },
+    pre: {
+      rec: 0.94, lat: 9, cost: '1.05×', leak: '✅ the index',
+      bars: [['considered', 60, 'var(--accent)'], ['readable', 60, 'var(--green)'], ['returned', 20, 'var(--green)']],
+      note: `✅ <b>ACL tokens filtered during traversal.</b> Each chunk carries its allow and deny token sets; the user's resolved groups are pushed into the index as a pre-filter, so every candidate the graph walk considers is already readable. Recall is essentially unaffected, latency barely moves, and enforcement lives in one place — the index — instead of in application code. This is the answer for a shared corpus. The remaining work is in the mirror: transitive group expansion, and lag you alert on.`,
+    },
+    peruser: {
+      rec: 0.95, lat: 8, cost: '~40×', leak: '✅ isolation',
+      bars: [['considered', 60, 'var(--accent)'], ['readable', 60, 'var(--green)'], ['returned', 20, 'var(--green)']],
+      note: `⚠️ <b>One index per user.</b> Perfect isolation, and the numbers kill it: documents readable by thousands are duplicated thousands of times, sixty thousand small graphs destroy memory locality, and every permission change becomes a reindex — at 150k changes a day, that is the entire system's workload. Correct for a handful of genuinely isolated enclaves; ruinous as the default.`,
+    },
+  };
+
+  function draw() {
+    const m = MODES[$('#aclSeg').dataset.value || 'post'];
+    const max = Math.max.apply(null, m.bars.map((b) => b[1]));
+    let out = '';
+    m.bars.forEach((b, i) => {
+      const y = 26 + i * 54;
+      const w = Math.max(4, (b[1] / max) * 400);
+      out += `<text x="12" y="${y + 17}" style="fill:var(--muted)">${b[0]}</text>`;
+      out += `<rect x="118" y="${y}" width="${w}" height="26" rx="7" fill="${b[2]}" opacity=".85"/>`;
+      out += `<text x="${126 + w}" y="${y + 18}" style="fill:var(--text-2);font-weight:700">${b[1]}</text>`;
+    });
+    out += `<text x="118" y="198" style="fill:var(--muted);font-size:9px">chunks the index considered → of those, readable → returned to the reranker</text>`;
+    $('#aclSvg').innerHTML = out;
+    $('#aRec').textContent = (m.rec * 100).toFixed(0) + '%';
+    $('#aLat').textContent = '+' + m.lat + ' ms';
+    $('#aCost').textContent = m.cost;
+    $('#aLeak').textContent = m.leak;
+    $('#aclInfo p').innerHTML = m.note;
+  }
+  $('#aclSeg').addEventListener('segchange', draw);
+  draw();
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,331 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Fine-Tuning &amp; PEFT</title>
+<link rel="stylesheet" href="assets/style.css">
+<script>try{var t=JSON.parse(localStorage.getItem('ml-theme'));if(t)document.documentElement.setAttribute('data-theme',t)}catch(e){}</script>
+<style>
+  .decide { display:grid; gap:10px }
+  .decide .q { padding:12px 14px; border-radius:12px; background:var(--surface-2); border:1px solid var(--border) }
+  .decide .q b { display:block; margin-bottom:8px; font-size:14px }
+  .verdict { padding:16px; border-radius:14px; border:1px solid var(--accent); background:var(--accent-soft); margin-top:12px }
+  .verdict h4 { margin:0 0 6px; color:var(--accent) }
+  .lora-svg { width:100%; height:190px }
+  .lora-svg text { font-size:10.5px; fill:var(--muted); font-family:var(--mono) }
+  .lora-svg rect.w { fill:var(--surface-3); stroke:var(--border-strong) }
+  .lora-svg rect.a { fill:var(--accent-soft); stroke:var(--accent); stroke-width:2 }
+  .lora-svg rect.b { fill:var(--accent-2-soft); stroke:var(--accent-2); stroke-width:2 }
+  .tmpl { font-family:var(--mono); font-size:12.5px; line-height:1.7; background:var(--surface-2); border:1px solid var(--border); border-radius:12px; padding:12px 14px; white-space:pre-wrap }
+  .tmpl .sys { color:var(--accent-2) } .tmpl .usr { color:var(--accent) } .tmpl .asst { color:var(--green) } .tmpl .mask { color:var(--muted); text-decoration:line-through }
+</style>
+</head>
+<body data-chapter="17">
+<main class="content">
+
+  <section class="hero">
+    <div class="eyebrow"><span class="pill accent">Chapter 17</span><span class="pill cyan">Intermediate</span><span class="pill">⏱ 45 min</span></div>
+    <h1>Fine-Tuning <span class="grad">&amp; PEFT</span></h1>
+    <p class="lead">Fine-tuning teaches a model <i>behaviour</i> — a format, a voice, a task convention. It is remarkably bad at teaching it <i>facts</i>, which is what people usually reach for it to do. This chapter covers when to fine-tune, how LoRA makes it cheap, and how to serve a hundred adapters on one GPU.</p>
+    <ul class="objectives">
+      <li>Decide between prompting, retrieval and fine-tuning — with reasons</li>
+      <li>Explain LoRA's low-rank update and size an adapter</li>
+      <li>Build an instruction-tuning dataset that doesn't wreck the base model</li>
+      <li>Recognise and avoid catastrophic forgetting</li>
+      <li>Serve many adapters efficiently, and know when to merge instead</li>
+    </ul>
+  </section>
+
+  <h2>First: should you fine-tune at all?</h2>
+  <p>Fine-tuning adds a training pipeline, a dataset to maintain, an eval suite, a model artefact to version and a serving story. Reach for it when the cheaper options genuinely fall short.</p>
+
+  <div class="panel">
+    <div class="panel-head"><div class="dots"><i></i><i></i><i></i></div><span class="p-title">Should you fine-tune?</span><span class="p-tag">Interactive</span></div>
+    <div class="panel-body">
+      <div class="decide" id="decide"></div>
+      <div id="verdict"></div>
+    </div>
+  </div>
+
+  <div class="table-wrap">
+    <table class="t">
+      <thead><tr><th>Need</th><th>Right tool</th><th>Why</th></tr></thead>
+      <tbody>
+        <tr><td>Current or private facts</td><td><b>RAG</b> (Ch 21)</td><td>Facts change; retrieval updates instantly and gives citations</td></tr>
+        <tr><td>A specific output format or style</td><td><b>Fine-tuning</b></td><td>Behaviour is exactly what gradient updates encode well</td></tr>
+        <tr><td>A niche task with thousands of examples</td><td><b>Fine-tuning</b></td><td>Beats few-shot prompting and needs no examples at inference</td></tr>
+        <tr><td>Cheaper inference than a frontier model</td><td><b>Fine-tuning / distillation</b> (Ch 27)</td><td>A tuned small model can match a big one on a narrow task</td></tr>
+        <tr><td>Multi-step tool use over live systems</td><td><b>Agents</b> (Ch 22)</td><td>Needs orchestration, not weights</td></tr>
+        <tr><td>One-off, low volume, evolving requirements</td><td><b>Prompting</b></td><td>Iteration in seconds, no artefacts to maintain</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="callout warn">
+    <div class="ico">📚</div>
+    <div class="body"><div class="title">“We'll fine-tune it on our documentation”</div>
+      <p>This almost never works the way people expect. Fine-tuning shifts the output distribution; it doesn't build a reliable lookup table. The model learns to sound like your docs while still inventing specifics, and updating one fact means retraining. Put the documents in a retrieval index and fine-tune only for the <i>format and behaviour</i> of the answers.</p></div>
+  </div>
+
+  <h2>Full fine-tuning</h2>
+  <p>Update every weight, exactly like pretraining but on a small curated dataset with a low learning rate (1e-5 to 5e-5). It gives the most control and costs the most: optimizer state and gradients for every parameter (Chapter 10's memory arithmetic), plus a full model copy per task.</p>
+
+  <div class="callout danger">
+    <div class="ico">🧠</div>
+    <div class="body"><div class="title">Catastrophic forgetting</div>
+      <p>Train hard on 5,000 customer-support conversations and the model gets better at support and measurably worse at everything else — coding, other languages, general reasoning. Mitigations: low learning rate, few epochs, mix in 10–30% general instruction data, use PEFT so most weights stay frozen, and <b>always evaluate on general benchmarks, not just your task</b>.</p></div>
+  </div>
+
+  <h2>LoRA: train 0.1% of the weights</h2>
+  <p>The insight: the <i>change</i> a fine-tune makes to a weight matrix is approximately low-rank. So don't learn ΔW (d×d). Learn two thin matrices whose product approximates it:</p>
+
+  <pre class="code">W' = W + BA        <span class="c"># W frozen (d×d), B is d×r, A is r×d, r ≈ 8–64</span>
+                   <span class="c"># trainable params: 2·d·r instead of d²</span>
+                   <span class="c"># d=4096, r=16  →  131k instead of 16.8M  (0.8%)</span>
+
+<span class="c"># A is initialised randomly, B to zeros, so the model starts unchanged.</span>
+<span class="c"># output scaled by alpha/r, so changing r doesn't change effective strength.</span></pre>
+
+  <div class="panel">
+    <div class="panel-head"><div class="dots"><i></i><i></i><i></i></div><span class="p-title">LoRA sizing</span><span class="p-tag">Interactive</span></div>
+    <div class="panel-body">
+      <div class="svg-scroll"><svg id="loraSvg" class="diagram lora-svg" viewBox="0 0 640 190"></svg></div>
+      <div class="range-row"><label for="lBase">Base model size (B params)</label><input type="range" id="lBase" min="0.5" max="70" step="0.5" value="7"><output id="lBaseV"></output></div>
+      <div class="range-row"><label for="lRank">LoRA rank r</label><input type="range" id="lRank" min="1" max="256" step="1" value="16"><output id="lRankV"></output></div>
+      <div class="seg" id="lTarget"><button data-v="qv" class="active">q,v only</button><button data-v="attn">all attention</button><button data-v="all">attention + MLP</button></div>
+      <div class="stats" style="margin-top:12px">
+        <div class="stat acc"><div class="k">Trainable parameters</div><div class="v" id="lParams" style="font-size:18px">–</div></div>
+        <div class="stat"><div class="k">% of base model</div><div class="v" id="lPct" style="font-size:18px">–</div></div>
+        <div class="stat good"><div class="k">Adapter file size</div><div class="v" id="lFile" style="font-size:18px">–</div></div>
+        <div class="stat warn"><div class="k">Training memory</div><div class="v" id="lMem" style="font-size:18px">–</div></div>
+      </div>
+      <div class="callout" id="lInfo" style="margin-top:12px"><div class="ico">📘</div><div class="body"><p style="margin:0"></p></div></div>
+    </div>
+  </div>
+
+  <div class="grid c3">
+    <div class="card feature reveal"><div class="f-ico">🪡</div><h4>LoRA</h4><p>Low-rank deltas on chosen matrices. Adapter is a few MB, training memory is a fraction, and quality is close to full fine-tuning on most tasks.</p></div>
+    <div class="card feature reveal"><div class="f-ico" style="background:var(--accent-2-soft)">🗜️</div><h4>QLoRA</h4><p>Base weights quantized to 4-bit and frozen; LoRA trained on top in bf16. Fine-tune a 70B model on a single 48 GB GPU — the technique that made fine-tuning accessible.</p></div>
+    <div class="card feature reveal"><div class="f-ico" style="background:var(--green-soft)">🎛️</div><h4>Prefix / prompt tuning</h4><p>Learn a handful of virtual tokens prepended to the input. Tiny artefacts; generally weaker than LoRA and it eats context length.</p></div>
+  </div>
+
+  <div class="callout tip">
+    <div class="ico">🔀</div>
+    <div class="body"><div class="title">Merge, or keep the adapter separate?</div>
+      <p><b>Merge</b> (<code>W ← W + BA</code>) when one task dominates: zero inference overhead, but you now own a full-size model per task. <b>Keep separate</b> when serving many tenants: modern servers hold one base model in memory and apply per-request adapters in the same batch (multi-LoRA), so 100 customers share one GPU. That capability is often the reason to choose LoRA over full fine-tuning in the first place.</p></div>
+  </div>
+
+  <h2>The dataset is the whole job</h2>
+  <p>For instruction tuning, quality beats quantity by a wide margin — the LIMA result showed 1,000 excellent examples outperforming 50,000 mediocre ones. Aim for correct, diverse, consistently formatted, and representative of real inputs.</p>
+
+  <div class="split">
+    <div class="card"><h4 class="mt0">✅ Good dataset</h4><p class="small mb0">500–5,000 examples · real user phrasings including messy ones · consistent answer format · verified correctness · a held-out set drawn from the same distribution · explicit refusals and edge cases.</p></div>
+    <div class="card"><h4 class="mt0">❌ Bad dataset</h4><p class="small mb0">50,000 generated examples nobody read · one phrasing style · answers of wildly varying length and format · no negatives · test examples that leaked from training · all happy-path.</p></div>
+  </div>
+
+  <h3>Templates and loss masking</h3>
+  <p>Two mechanical details that quietly decide whether a fine-tune works:</p>
+
+  <div class="tmpl"><span class="mask">&lt;|system|&gt;You are a support assistant for Acme Cloud.</span>
+<span class="mask">&lt;|user|&gt;My deploy is stuck in "pending". What do I check?</span>
+<span class="asst">&lt;|assistant|&gt;Check three things, in order:
+1. Quota — `acme quota show` …</span></div>
+  <p class="small muted" style="margin-top:8px">Struck-through tokens are <b>masked out of the loss</b>: you train the model to produce the assistant turn, not to reproduce prompts. And the template must be byte-identical to the one used at inference — a mismatched special token is the most common silent cause of a fine-tune that “did nothing”.</p>
+
+  <div class="table-wrap">
+    <table class="t">
+      <thead><tr><th>Hyperparameter</th><th>Typical</th><th>Note</th></tr></thead>
+      <tbody>
+        <tr><td>Learning rate</td><td>1e-4 – 3e-4 (LoRA); 1e-5 – 2e-5 (full)</td><td>LoRA tolerates ~10× higher rates than full fine-tuning</td></tr>
+        <tr><td>Epochs</td><td>1–3</td><td>Overfitting happens <i>fast</i> on small sets; watch eval loss per epoch</td></tr>
+        <tr><td>Rank r / alpha</td><td>8–32 / 2r</td><td>Higher rank rarely helps below ~10k examples</td></tr>
+        <tr><td>Batch (effective)</td><td>16–128 sequences</td><td>Use gradient accumulation to reach it on small GPUs</td></tr>
+        <tr><td>Target modules</td><td>q,k,v,o + MLP</td><td>Including the MLP usually helps; q,v only is the cheap default</td></tr>
+        <tr><td>Sequence length</td><td>Cover the 95th percentile of real inputs</td><td>Padding waste is real — pack or bucket by length</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h2>Continued pretraining vs fine-tuning</h2>
+  <p>If your domain's <i>language</i> is unusual — legal filings, clinical notes, chip-design netlists, a proprietary codebase — instruction tuning on a few thousand examples won't fix it. <b>Continued (domain-adaptive) pretraining</b> on billions of in-domain tokens does, and is then followed by instruction tuning. Budget it like a small pretraining run, and mix in general data to limit forgetting.</p>
+
+  <div class="callout tip">
+    <div class="ico">🧭</div>
+    <div class="body"><div class="title">The realistic order of attempts</div>
+      <p>1) Prompt well, with examples. 2) Add retrieval. 3) Build an eval set — <i>before</i> training anything. 4) LoRA fine-tune on a few thousand good examples. 5) Scale the data or move to full fine-tuning if the eval justifies it. 6) Consider continued pretraining only for genuinely unusual domains. Most teams jump to step 4 without step 3 and then cannot tell whether it helped.</p></div>
+  </div>
+
+  <div class="callout danger"><div class="ico">⚠️</div><div class="body"><div class="title">Common mistakes</div>
+    <ul class="mb0">
+      <li><b>Fine-tuning to inject facts.</b> Use retrieval; fine-tune for behaviour.</li>
+      <li><b>No eval set built before training.</b> Then you cannot tell improvement from regression, and you'll ship on vibes.</li>
+      <li><b>Training on prompt tokens.</b> The model learns to generate the question as well as the answer, wasting capacity and degrading outputs.</li>
+      <li><b>A different chat template at inference.</b> Silently destroys most of the gain — check the exact special tokens.</li>
+      <li><b>Too many epochs.</b> Three epochs on 800 examples will memorise them; eval loss turns up while train loss keeps falling.</li>
+      <li><b>Only measuring the target task.</b> Check general capability too, or you'll ship a model that forgot how to write code.</li>
+    </ul></div></div>
+
+  <div class="callout interview"><div class="ico">🎤</div><div class="body"><div class="title">Interview drill</div>
+    <p class="small" style="margin:10px 0 0"><b>Warm-up:</b> Why does LoRA work — what's the assumption?</p>
+    <details class="ans"><summary>How a strong answer sounds</summary><div>That the weight <i>update</i> needed to adapt a pretrained model to a narrow task has low intrinsic rank: the model already has the capabilities, and fine-tuning mostly re-weights and re-routes them rather than learning new structure. So ΔW ≈ BA with r ≪ d captures most of the useful change. Practically it also means the adapter is tiny, B initialised to zero makes training start from the exact base model, and the low-rank form composes — you can swap adapters per request. Where the assumption breaks — genuinely new domains or long continued pretraining — full-rank training does better.</div></details>
+    <p class="small" style="margin:10px 0 0"><b>Deeper:</b> Design fine-tuning for 200 enterprise customers who each want a model in their own voice.</p>
+    <details class="ans"><summary>How a strong answer sounds</summary><div>One shared base model plus 200 LoRA adapters of a few megabytes each — never 200 full checkpoints. Serving uses a multi-LoRA-capable engine so requests from different tenants batch together on one GPU with per-request adapter weights, keeping utilization high. Each tenant gets an isolated dataset, its own eval set and a versioned adapter with a rollback path; training is a templated job, so onboarding a customer is data collection rather than engineering. I'd also guard against per-tenant forgetting by mixing in general instruction data, and enforce strict tenancy isolation on both training data and adapter artefacts (Chapters 37, 39). If one customer's volume is huge and latency-critical, merge their adapter into a dedicated copy.</div></details>
+  </div></div>
+
+  <div class="takeaways">
+    <h3>🧠 Key takeaways</h3>
+    <ul>
+      <li>Fine-tune for behaviour and format; use retrieval for facts.</li>
+      <li>LoRA learns a low-rank delta: ~0.1–1% of parameters trained, megabyte-sized adapters, near-full-FT quality.</li>
+      <li>QLoRA quantizes the frozen base so large models fine-tune on a single GPU.</li>
+      <li>A few thousand excellent, consistently templated examples beat tens of thousands of mediocre ones.</li>
+      <li>Always evaluate general capability alongside the target task to catch forgetting.</li>
+    </ul>
+  </div>
+
+  <div class="quiz-wrap">
+    <h2>Check your understanding</h2>
+    <div class="quiz-score"></div>
+
+    <div class="quiz" data-answer="2">
+      <p class="q">Your support bot must answer from a knowledge base that changes weekly. Best approach?</p>
+      <div class="opts">
+        <button class="opt">Fine-tune weekly on the knowledge base</button>
+        <button class="opt">Continued pretraining on all documents</button>
+        <button class="opt">Retrieval over the knowledge base, optionally fine-tuning for answer style</button>
+        <button class="opt">Increase the model size</button>
+      </div>
+      <div class="explain">Facts that change belong in an index you can update in seconds, with citations. Fine-tuning would be a weekly retrain that still hallucinates specifics.</div>
+    </div>
+
+    <div class="quiz" data-answer="1">
+      <p class="q">With d = 4096 and rank 16, how many parameters does one LoRA-adapted matrix train?</p>
+      <div class="opts">
+        <button class="opt">16.8M (the full matrix)</button>
+        <button class="opt">131k (2 × 4096 × 16)</button>
+        <button class="opt">65k</button>
+        <button class="opt">4096</button>
+      </div>
+      <div class="explain">Two matrices of 4096×16 — about 0.8% of the full matrix. That ratio is why adapters are megabytes and training memory collapses.</div>
+    </div>
+
+    <div class="quiz" data-answer="3">
+      <p class="q">After fine-tuning on support tickets, your model writes great support replies but its coding ability dropped sharply. What happened?</p>
+      <div class="opts">
+        <button class="opt">The learning rate was too low</button>
+        <button class="opt">LoRA rank was too small</button>
+        <button class="opt">The template was wrong</button>
+        <button class="opt">Catastrophic forgetting from narrow training data</button>
+      </div>
+      <div class="explain">Training hard on one narrow distribution shifts the model away from everything else. Mix in general data, use fewer epochs and a lower rate, and evaluate general benchmarks before shipping.</div>
+    </div>
+
+    <div class="quiz" data-answer="0">
+      <p class="q">Why mask prompt tokens out of the loss during instruction tuning?</p>
+      <div class="opts">
+        <button class="opt">So the model learns to produce answers, not to reproduce questions</button>
+        <button class="opt">To reduce memory usage</button>
+        <button class="opt">Because prompts contain PII</button>
+        <button class="opt">To make training deterministic</button>
+      </div>
+      <div class="explain">Unmasked prompts spend capacity modelling input text, which is not the behaviour you want and measurably weakens the response quality.</div>
+    </div>
+
+    <div class="quiz" data-answer="2">
+      <p class="q">You need to serve 50 customer-specific models on limited GPUs. Best design?</p>
+      <div class="opts">
+        <button class="opt">50 full fine-tuned models, one per GPU</button>
+        <button class="opt">One model prompted with each customer's style guide</button>
+        <button class="opt">One base model with 50 LoRA adapters applied per request</button>
+        <button class="opt">Merge all 50 adapters into one model</button>
+      </div>
+      <div class="explain">Multi-LoRA serving batches requests from different tenants against one shared base, with per-request adapter weights — the standard way to make per-customer models economically viable. Merging them together would just average the behaviours into mush.</div>
+    </div>
+  </div>
+</main>
+<script src="assets/app.js"></script>
+<script>
+(function(){
+  const { $, $$, clamp, fmt } = ML;
+
+  /* ================= decision helper ================= */
+  const QS = [
+    ['What do you actually need to change?', [['facts', 'Facts / knowledge the model lacks'], ['behaviour', 'Format, tone or task behaviour'], ['both', 'Both']]],
+    ['How many good labelled examples do you have?', [['few', 'Fewer than ~200'], ['some', '500 – 5,000'], ['many', 'More than 20,000']]],
+    ['How often does the underlying information change?', [['fast', 'Daily or weekly'], ['slow', 'Rarely']]],
+    ['What is the inference volume?', [['low', 'Low — cost is not a concern'], ['high', 'High — cost per token matters a lot']]],
+  ];
+  const ans = {};
+  function drawDecide() {
+    $('#decide').innerHTML = QS.map(([q, opts], i) =>
+      `<div class="q"><b>${i + 1}. ${q}</b><div class="seg" data-q="${i}">${opts.map(([v, l]) =>
+        `<button data-v="${v}" class="${ans[i] === v ? 'active' : ''}">${l}</button>`).join('')}</div></div>`).join('');
+    $$('#decide .seg').forEach(seg => {
+      seg.querySelectorAll('button').forEach(b => b.onclick = () => { ans[+seg.dataset.q] = b.dataset.v; drawDecide(); });
+    });
+    if (Object.keys(ans).length < QS.length) {
+      $('#verdict').innerHTML = `<p class="small muted" style="margin-top:10px">Answer all four to get a recommendation.</p>`;
+      return;
+    }
+    let title, body;
+    if (ans[0] === 'facts' && ans[2] === 'fast') {
+      title = '📚 Retrieval (RAG), not fine-tuning';
+      body = 'You need current knowledge. Build a retrieval pipeline (Chapter 21): it updates the moment a document changes, supports citations and access control, and costs nothing to "retrain". Fine-tuning here would be an expensive way to memorise something that expires.';
+    } else if (ans[1] === 'few' && ans[0] !== 'facts') {
+      title = '✍️ Prompt engineering first';
+      body = 'Under a couple of hundred examples, few-shot prompting with a carefully designed template usually matches a fine-tune — and you can iterate in seconds. Use those examples to build an <b>eval set</b> instead, then revisit fine-tuning when you have more data and a way to measure it (Chapters 19, 35).';
+    } else if (ans[3] === 'high' && ans[1] !== 'few') {
+      title = '🪡 LoRA fine-tune a smaller model' + (ans[0] === 'both' ? ' + retrieval' : '');
+      body = 'High volume makes a tuned small model the economical choice: it can match a much larger model on a narrow task at a fraction of the cost per token' + (ans[0] === 'both' ? ', with retrieval supplying the facts it must not invent' : '') + '. Start at rank 16 on attention + MLP, 1–3 epochs, and evaluate general capability alongside your task.';
+    } else if (ans[1] === 'many') {
+      title = '🏋️ Fine-tune — consider full fine-tuning';
+      body = 'With tens of thousands of examples you are past the point where LoRA is obviously sufficient. Start with LoRA anyway (it is cheap and often equal), and only move to full fine-tuning if the eval shows a real gap. Mix in general instruction data to limit forgetting.';
+    } else {
+      title = '🪡 LoRA fine-tune' + (ans[0] !== 'behaviour' ? ' plus retrieval' : '');
+      body = 'You have enough data to teach behaviour and the requirements are stable enough to be worth baking in. Build the eval set first, then LoRA at rank 8–32 for 1–3 epochs' + (ans[0] !== 'behaviour' ? ', with retrieval for anything factual' : '') + '.';
+    }
+    $('#verdict').innerHTML = `<div class="verdict"><h4>${title}</h4><p style="margin:0;font-size:14px">${body}</p></div>`;
+  }
+  drawDecide();
+
+  /* ================= LoRA sizing ================= */
+  function lora() {
+    const B = +$('#lBase').value, r = +$('#lRank').value;
+    const target = $('#lTarget').dataset.value || 'qv';
+    $('#lBaseV').textContent = B + ' B';
+    $('#lRankV').textContent = 'r = ' + r;
+    const N = B * 1e9;
+    const d = Math.round(Math.sqrt(N / (12 * 32)) / 128) * 128 || 4096;
+    const layers = 32;
+    const nMat = target === 'qv' ? 2 : target === 'attn' ? 4 : 4 + 3;   // +3 MLP matrices (approx)
+    const width = target === 'all' ? (4 * d + 3 * 4 * d) / 7 : d;
+    const trainable = layers * nMat * 2 * d * r;
+    $('#lParams').textContent = trainable >= 1e6 ? (trainable / 1e6).toFixed(1) + ' M' : (trainable / 1e3).toFixed(0) + ' K';
+    $('#lPct').textContent = (trainable / N * 100).toFixed(3) + '%';
+    $('#lFile').textContent = ML.bytes(trainable * 2);
+    const full = N * 16 / 1e9, loraMem = N * 2 / 1e9 + trainable * 16 / 1e9 + 4;
+    $('#lMem').textContent = loraMem.toFixed(1) + ' GB';
+    $('#lInfo p').innerHTML =
+      `Full fine-tuning this model needs roughly <b>${full.toFixed(0)} GB</b> (weights + gradients + AdamW state). LoRA needs about <b>${loraMem.toFixed(1)} GB</b>, because gradients and optimizer state exist only for the ${(trainable / 1e6).toFixed(1)}M adapter parameters. ` +
+      (r > 64 ? 'At this rank you are approaching the parameter count where full fine-tuning becomes competitive — ranks above ~64 rarely help unless you have a very large dataset.' :
+       r < 8 ? 'Very low rank is cheap but limits how much behaviour you can encode; r = 8–32 is the usual sweet spot.' :
+       'This is the typical production range. Note the adapter file is small enough to ship per customer and hot-swap per request.');
+
+    // diagram
+    const scale = 110;
+    $('#loraSvg').innerHTML =
+      `<rect class="w" x="40" y="35" width="${scale}" height="${scale}" rx="6"/><text x="${40 + scale / 2 - 28}" y="${35 + scale / 2}">W (frozen)</text><text x="${40 + scale / 2 - 18}" y="${35 + scale / 2 + 14}">d × d</text>` +
+      `<text x="${40 + scale + 14}" y="${35 + scale / 2 + 5}" style="font-size:18px;fill:var(--text)">+</text>` +
+      `<rect class="b" x="${40 + scale + 40}" y="35" width="${Math.max(10, r / 256 * 60 + 8)}" height="${scale}" rx="4"/><text x="${40 + scale + 40}" y="${35 + scale + 16}">B (d × r)</text>` +
+      `<text x="${40 + scale + 40 + Math.max(10, r / 256 * 60 + 8) + 6}" y="${35 + scale / 2 + 5}" style="font-size:16px;fill:var(--text)">×</text>` +
+      `<rect class="a" x="${40 + scale + 40 + Math.max(10, r / 256 * 60 + 8) + 20}" y="35" width="${scale}" height="${Math.max(8, r / 256 * 60 + 8)}" rx="4"/><text x="${40 + scale + 40 + Math.max(10, r / 256 * 60 + 8) + 20}" y="${35 + Math.max(8, r / 256 * 60 + 8) + 16}">A (r × d)</text>` +
+      `<text x="40" y="180">trainable: only the two thin matrices — shown to scale for r = ${r}</text>`;
+  }
+  ['#lBase', '#lRank'].forEach(id => $(id).addEventListener('input', lora));
+  $('#lTarget').addEventListener('segchange', lora);
+  lora();
+})();
+</script>
+</body>
+</html>

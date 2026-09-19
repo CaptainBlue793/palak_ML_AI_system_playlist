@@ -1,0 +1,330 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Case Study: Ad Click Prediction at 1M QPS</title>
+<link rel="stylesheet" href="assets/style.css">
+<script>try{var t=JSON.parse(localStorage.getItem('ml-theme'));if(t)document.documentElement.setAttribute('data-theme',t)}catch(e){}</script>
+<style>
+  .req { display:grid; grid-template-columns:repeat(auto-fit,minmax(160px,1fr)); gap:8px }
+  .req > div { padding:10px 12px; border-radius:12px; background:var(--surface-2); border:1px solid var(--border) }
+  .req b { display:block; font-size:11px; color:var(--muted); text-transform:uppercase; letter-spacing:.05em }
+  .req span { font-family:var(--mono); font-size:17px; font-weight:800 }
+  .auction { display:grid; gap:6px; margin-top:10px }
+  .auction .r { display:grid; grid-template-columns:150px 1fr 70px 70px; gap:10px; align-items:center; font-size:13px }
+  .auction .tk { height:16px; border-radius:6px; background:var(--surface-3); overflow:hidden }
+  .auction .tk i { display:block; height:100%; background:var(--accent) }
+  .auction .v { font-family:var(--mono); text-align:right; font-size:12px; color:var(--muted) }
+  .auction .r.win { font-weight:700 }
+  .auction .r.win .tk i { background:var(--green) }
+  .budget-bar { display:flex; height:34px; border-radius:10px; overflow:hidden; border:1px solid var(--border); margin-top:10px }
+  .budget-bar div { display:grid; place-items:center; font-size:11px; font-family:var(--mono); color:#fff }
+</style>
+</head>
+<body data-chapter="43">
+<main class="content">
+
+  <section class="hero">
+    <div class="eyebrow"><span class="pill accent">Chapter 43</span><span class="pill pink">Case Study</span><span class="pill">⏱ 50 min</span></div>
+    <h1>Case Study: <span class="grad">Ad Click Prediction</span></h1>
+    <p class="lead">Predict the click-through rate of an ad, one million times a second, in under ten milliseconds, well enough that an auction can charge real money against it. This is the most latency-constrained, most calibration-critical, most adversarially-incentivised ML system in common use.</p>
+    <ul class="objectives">
+      <li>Understand why calibration — not ranking — is the requirement here</li>
+      <li>Handle billions of sparse feature values in a fixed memory budget</li>
+      <li>Meet a 10 ms budget at 1M QPS</li>
+      <li>Train with delayed conversions and position bias</li>
+      <li>Handle budget pacing, exploration and cold-start advertisers</li>
+    </ul>
+  </section>
+
+  <h2>1 · Requirements</h2>
+  <div class="req">
+    <div><b>Ad requests/s</b><span>1M</span></div>
+    <div><b>Candidates per request</b><span>~500</span></div>
+    <div><b>Scorings/s</b><span>500M</span></div>
+    <div><b>Latency budget</b><span>10 ms p99</span></div>
+    <div><b>Base CTR</b><span>~0.8%</span></div>
+    <div><b>Conversion window</b><span>up to 30 days</span></div>
+  </div>
+
+  <div class="callout warn">
+    <div class="ico">💷</div>
+    <div class="body"><div class="title">This is a pricing model, not a ranking model</div>
+      <p>The auction computes <code>eCPM = bid × P(click)</code> (and for conversion campaigns, × P(convert | click)). The prediction directly sets what an advertiser pays. A model with perfect ranking but systematically inflated probabilities overcharges everyone and quietly destroys advertiser trust; deflated probabilities under-deliver and leave revenue on the table. <b>Calibration is the product requirement</b> — ranking quality alone is not sufficient (Chapter 7).</p></div>
+  </div>
+
+  <div class="callout tip">
+    <div class="ico">🎯</div>
+    <div class="body"><div class="title">Metrics</div>
+      <p><b>Offline:</b> log loss (proper scoring rule — rewards honest probabilities), calibration error overall and per slice (advertiser, placement, device, country), and AUC as a secondary. <b>Online:</b> revenue per thousand requests, advertiser ROI/ROAS, fill rate, and delivery against budget. <b>Guardrails:</b> p99 latency, per-advertiser over/under-delivery, and new-advertiser exposure. <b>Baseline:</b> historical CTR per (ad, placement) with Bayesian shrinkage — genuinely strong for head advertisers, useless for new ones.</p></div>
+  </div>
+
+  <h2>2 · Features: billions of sparse values</h2>
+  <div class="table-wrap">
+    <table class="t">
+      <thead><tr><th>Family</th><th>Examples</th><th>Cardinality</th></tr></thead>
+      <tbody>
+        <tr><td><b>Identity</b></td><td>ad id, campaign, advertiser, creative</td><td>10⁸</td></tr>
+        <tr><td><b>Context</b></td><td>placement, position, device, OS, hour, country</td><td>10⁵</td></tr>
+        <tr><td><b>User</b></td><td>interest segments, recent categories, frequency of seeing this ad</td><td>10⁸</td></tr>
+        <tr><td><b>Content</b></td><td>creative text/image embeddings, category</td><td>dense</td></tr>
+        <tr><td><b>Crosses</b></td><td>ad × placement, user-segment × category, hour × device</td><td>10¹⁰+</td></tr>
+        <tr><td><b>Counters</b></td><td>impressions and clicks for each id at several time scales</td><td>dense per id</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="callout tip">
+    <div class="ico">🗜️</div>
+    <div class="body"><div class="title">Hashing plus embeddings, with a bounded table</div>
+      <p>Cross features are effectively unbounded, so hash them into a fixed slot space (Chapter 4) — collisions between two rare values cost little. Head ids get learned embeddings; the tail shares hashed buckets and leans on descriptive features. The embedding table is the model: tens of gigabytes, sharded across parameter servers, with frequency-based admission (an id must be seen N times before it gets its own row) and eviction of ids that stop appearing. Fixed memory is a hard design constraint, not an optimisation.</p></div>
+  </div>
+
+  <h2>3 · The 10 ms budget</h2>
+  <div class="table-wrap">
+    <table class="t">
+      <thead><tr><th>Stage</th><th>Budget</th><th>How</th></tr></thead>
+      <tbody>
+        <tr><td>Candidate selection (targeting, budget, eligibility)</td><td>2.0 ms</td><td>Inverted indexes over targeting predicates; budget-exhausted campaigns removed upstream</td></tr>
+        <tr><td>Feature fetch</td><td>1.5 ms</td><td>Co-located in-memory store; one batched read; hard timeout with a default</td></tr>
+        <tr><td>Embedding lookups</td><td>1.5 ms</td><td>Sharded, batched, prefetched; the dominant memory-bound step</td></tr>
+        <tr><td>Model forward (500 candidates)</td><td>3.0 ms</td><td>Small MLP over sparse embeddings, quantized, SIMD on CPU — batched across candidates</td></tr>
+        <tr><td>Calibration + auction + pacing</td><td>1.0 ms</td><td>Isotonic/Platt map per segment, then the auction itself</td></tr>
+        <tr><td>Buffer</td><td>1.0 ms</td><td>Tail absorption</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="callout warn">
+    <div class="ico">🖥️</div>
+    <div class="body"><div class="title">This runs on CPUs, and that's deliberate</div>
+      <p>The model is shallow and the work is dominated by sparse lookups rather than dense matrix multiplication, so GPUs offer little — and CPU fleets co-located with the ad server avoid a network hop that would consume a quarter of the budget. The scaling lever is <i>horizontal</i>: thousands of small replicas, each holding a shard of the embedding table or reading from a co-located store. Serving cost is measured in fractions of a cent per thousand requests, and at 500M scorings a second, a 5% efficiency gain is a large number.</p></div>
+  </div>
+
+  <h2>4 · Deep dive: what miscalibration costs</h2>
+  <div class="panel">
+    <div class="panel-head"><div class="dots"><i></i><i></i><i></i></div><span class="p-title">One auction, four bidders</span><span class="p-tag">Interactive</span></div>
+    <div class="panel-body">
+      <div class="range-row"><label for="calBias">Model calibration (1.0 = perfect)</label><input type="range" id="calBias" min="0.5" max="2" step="0.05" value="1"><output id="calBiasV"></output></div>
+      <div class="range-row"><label for="calNoise">Per-advertiser calibration spread</label><input type="range" id="calNoise" min="0" max="0.6" step="0.05" value="0"><output id="calNoiseV"></output></div>
+      <div class="auction" id="auctionRows"></div>
+      <div class="stats" style="margin-top:12px">
+        <div class="stat acc"><div class="k">Winner</div><div class="v" id="aWin" style="font-size:15px">–</div></div>
+        <div class="stat"><div class="k">Charged (2nd price)</div><div class="v" id="aPrice" style="font-size:18px">–</div></div>
+        <div class="stat good"><div class="k">Actual value delivered</div><div class="v" id="aValue" style="font-size:18px">–</div></div>
+        <div class="stat bad"><div class="k">Advertiser ROI vs expected</div><div class="v" id="aRoi" style="font-size:18px">–</div></div>
+      </div>
+      <div class="callout" id="calInfo" style="margin-top:12px"><div class="ico">⚖️</div><div class="body"><p style="margin:0"></p></div></div>
+    </div>
+  </div>
+
+  <h2>5 · Deep dive: delayed conversions</h2>
+  <p>A click is observed in seconds. A conversion may arrive 30 days later — or never. Training a conversion model on “has it converted yet?” systematically labels recent positives as negatives.</p>
+
+  <div class="grid c3">
+    <div class="card feature reveal"><div class="f-ico">⏳</div><h4>Wait for the window</h4><p>Correct labels, but the model is always 30 days stale. Unusable alone in a market that moves weekly.</p></div>
+    <div class="card feature reveal"><div class="f-ico" style="background:var(--accent-2-soft)">📐</div><h4>Delay modelling</h4><p>Model the conversion-delay distribution explicitly and correct the likelihood for censored examples. The standard approach — it lets you train on recent data honestly.</p></div>
+    <div class="card feature reveal"><div class="f-ico" style="background:var(--green-soft)">🔁</div><h4>Importance weighting</h4><p>Train on fresh data with weights reflecting the probability that a conversion has not yet landed, and re-ingest positives as they arrive.</p></div>
+  </div>
+
+  <h2>6 · Deep dive: budget pacing and exploration</h2>
+  <div class="panel">
+    <div class="panel-head"><div class="dots"><i></i><i></i><i></i></div><span class="p-title">Pacing a £10,000 daily budget</span><span class="p-tag">Interactive</span></div>
+    <div class="panel-body">
+      <div class="seg" id="paceSeg"><button data-v="asap" class="active">Spend as fast as possible</button><button data-v="even">Even pacing</button><button data-v="predict">Traffic-aware pacing</button></div>
+      <div class="budget-bar" id="paceBar"></div>
+      <div class="stats" style="margin-top:12px">
+        <div class="stat acc"><div class="k">Budget spent</div><div class="v" id="pSpent" style="font-size:18px">–</div></div>
+        <div class="stat good"><div class="k">Avg CPC paid</div><div class="v" id="pCpc" style="font-size:18px">–</div></div>
+        <div class="stat"><div class="k">Conversions</div><div class="v" id="pConv" style="font-size:18px">–</div></div>
+        <div class="stat warn"><div class="k">Audience reached</div><div class="v" id="pReach" style="font-size:18px">–</div></div>
+      </div>
+      <div class="callout" id="paceInfo" style="margin-top:12px"><div class="ico">⏱️</div><div class="body"><p style="margin:0"></p></div></div>
+    </div>
+  </div>
+
+  <div class="callout danger">
+    <div class="ico">🥶</div>
+    <div class="body"><div class="title">Cold-start advertisers and the exploration tax</div>
+      <p>A new campaign has no impressions, so its predicted CTR is the prior, so it loses auctions, so it never gets impressions. Left alone, the marketplace ossifies around incumbents. Fixes: optimistic priors from similar creatives and advertisers (a hierarchical model that borrows strength from the campaign, advertiser and category levels), an explicit exploration budget — Thompson sampling over the CTR posterior — and a guaranteed minimum impression allocation for new campaigns. This costs measurable short-term revenue and is the price of a functioning market, exactly as in Chapter 41.</p></div>
+  </div>
+
+  <h2>7 · Training</h2>
+  <div class="table-wrap">
+    <table class="t">
+      <thead><tr><th>Choice</th><th>Decision</th><th>Why</th></tr></thead>
+      <tbody>
+        <tr><td>Cadence</td><td>Continuous / hourly incremental</td><td>Creatives, budgets and audiences change hourly; a daily model is already stale</td></tr>
+        <tr><td>Architecture</td><td>Sparse embeddings → shallow MLP (DLRM-style), or FTRL logistic for the simplest tier</td><td>Latency budget rules out depth; the signal is in the sparse crosses</td></tr>
+        <tr><td>Negative sampling</td><td>Downsample negatives, then correct the intercept</td><td>0.8% positives means 99% of the data is nearly redundant — but the correction is mandatory or calibration breaks (Chapter 7)</td></tr>
+        <tr><td>Position handling</td><td>Position as a feature at train time, fixed to a constant at serving</td><td>Removes position bias without needing a separate propensity model</td></tr>
+        <tr><td>Calibration</td><td>Isotonic regression per major slice, refit frequently</td><td>Global calibration hides per-advertiser and per-placement drift</td></tr>
+        <tr><td>Evaluation</td><td>Log loss + calibration by slice, then a small live traffic holdout</td><td>An uncalibrated improvement in AUC can lose money</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="callout interview"><div class="ico">🎤</div><div class="body"><div class="title">Interview drill</div>
+    <p class="small" style="margin:10px 0 0"><b>Follow-up:</b> “AUC improved 1.2% and revenue fell.” How?</p>
+    <details class="ans"><summary>How a strong answer sounds</summary><div>AUC only measures ordering; the auction consumes the probability. If the new model ranks slightly better but is systematically under-confident, every eCPM drops, fewer auctions clear the reserve price, and revenue falls despite better ranking. Or the miscalibration is uneven — better for large advertisers, worse for a segment — which shifts who wins and at what price. I'd check calibration overall and per slice first, refit the calibration map, and re-run. It's also why log loss rather than AUC should be the headline offline metric here: it's a proper scoring rule, so it can't be improved by distorting probabilities.</div></details>
+    <p class="small" style="margin:10px 0 0"><b>Follow-up:</b> “Third-party cookies are going away.” What changes?</p>
+    <details class="ans"><summary>How a strong answer sounds</summary><div>The user-identity features — cross-site history and long-lived segments — get much weaker or disappear, which hits the features that carried most of the personalisation signal. The system shifts weight toward first-party and contextual signals: page and creative content embeddings, placement, session behaviour within the site, and coarse cohort-level features. Conversion measurement moves to aggregated and privacy-preserving APIs, so attribution becomes noisier and delayed — which means the conversion model needs delay modelling and noise-aware training rather than exact per-user joins. Practically I'd expect a real accuracy drop, so the honest plan is to re-baseline expectations, invest in contextual and creative understanding, and rebuild evaluation around aggregate measurement rather than pretending the old per-user pipeline still works.</div></details>
+  </div></div>
+
+  <div class="takeaways">
+    <h3>🧠 Key takeaways</h3>
+    <ul>
+      <li>The probability is a price: calibration, measured per slice, is the primary requirement.</li>
+      <li>Hashing plus frequency-gated embeddings keeps an unbounded feature space in fixed memory.</li>
+      <li>A 10 ms budget at 500M scorings/second means shallow models on co-located CPUs.</li>
+      <li>Delayed conversions need explicit delay modelling, not “has it converted yet?” labels.</li>
+      <li>Pacing and cold-start exploration are market-health requirements that cost short-term revenue.</li>
+    </ul>
+  </div>
+
+  <div class="quiz-wrap">
+    <h2>Check your understanding</h2>
+    <div class="quiz-score"></div>
+
+    <div class="quiz" data-answer="1">
+      <p class="q">Why is calibration more important than AUC in ad CTR prediction?</p>
+      <div class="opts">
+        <button class="opt">AUC is harder to compute at scale</button>
+        <button class="opt">The predicted probability sets the price in the auction, so bias becomes over- or under-charging</button>
+        <button class="opt">Calibration is easier to optimise</button>
+        <button class="opt">AUC doesn't work with sparse features</button>
+      </div>
+      <div class="explain">eCPM = bid × P(click). A systematically inflated probability overcharges advertisers; a deflated one leaves revenue unearned. Ranking alone doesn't determine either.</div>
+    </div>
+
+    <div class="quiz" data-answer="2">
+      <p class="q">You downsample negatives 10:1 for training. What must you do?</p>
+      <div class="opts">
+        <button class="opt">Nothing — the ranking is unaffected</button>
+        <button class="opt">Increase the learning rate</button>
+        <button class="opt">Correct the intercept (or recalibrate) so probabilities reflect the true base rate</button>
+        <button class="opt">Switch to AUC as the training loss</button>
+      </div>
+      <div class="explain">The model now believes positives are ten times more common than they are. Without correction every predicted probability — and therefore every price — is inflated.</div>
+    </div>
+
+    <div class="quiz" data-answer="0">
+      <p class="q">A conversion can arrive up to 30 days after the click. What's the standard training approach?</p>
+      <div class="opts">
+        <button class="opt">Model the conversion-delay distribution and correct for censored examples</button>
+        <button class="opt">Only train on data older than 30 days</button>
+        <button class="opt">Treat all unconverted clicks as negatives</button>
+        <button class="opt">Ignore conversions and optimise clicks</button>
+      </div>
+      <div class="explain">Waiting makes the model 30 days stale; naive negatives systematically mislabel recent positives. Delay modelling lets you train on fresh data honestly.</div>
+    </div>
+
+    <div class="quiz" data-answer="3">
+      <p class="q">Why do these systems typically serve on CPUs rather than GPUs?</p>
+      <div class="opts">
+        <button class="opt">CPUs are more accurate for sparse models</button>
+        <button class="opt">GPU memory is too small for the model</button>
+        <button class="opt">Regulatory constraints</button>
+        <button class="opt">The work is dominated by sparse lookups, the model is shallow, and co-location avoids a network hop in a 10 ms budget</button>
+      </div>
+      <div class="explain">There's little dense matrix work to accelerate, and the round trip to a separate GPU tier would consume much of the latency budget.</div>
+    </div>
+
+    <div class="quiz" data-answer="1">
+      <p class="q">A new advertiser's campaign gets no impressions. Why, and what's the fix?</p>
+      <div class="opts">
+        <button class="opt">Their bid is too low; nothing to fix</button>
+        <button class="opt">No history means a low prior CTR, so they lose auctions and never accumulate data — fix with optimistic hierarchical priors and an exploration budget</button>
+        <button class="opt">Their creative is invalid</button>
+        <button class="opt">Pacing is too aggressive</button>
+      </div>
+      <div class="explain">A self-reinforcing cold start. Borrow strength from advertiser and category levels, and reserve exploration impressions so new campaigns can be measured at all.</div>
+    </div>
+  </div>
+</main>
+<script src="assets/app.js"></script>
+<script>
+(function(){
+  const { $, $$, clamp } = ML;
+
+  /* ================= auction ================= */
+  const BIDDERS = [
+    { n: 'Advertiser A', bid: 2.40, trueCtr: 0.011 },
+    { n: 'Advertiser B', bid: 4.10, trueCtr: 0.004 },
+    { n: 'Advertiser C', bid: 1.80, trueCtr: 0.019 },
+    { n: 'Advertiser D', bid: 3.00, trueCtr: 0.007 },
+  ];
+  function auction() {
+    const bias = +$('#calBias').value, spread = +$('#calNoise').value;
+    $('#calBiasV').textContent = bias.toFixed(2) + '×';
+    $('#calNoiseV').textContent = '±' + (spread * 100).toFixed(0) + '%';
+    const scored = BIDDERS.map((b, i) => {
+      const perAdv = 1 + (i % 2 === 0 ? spread : -spread);
+      const pred = b.trueCtr * bias * perAdv;
+      return { ...b, pred, ecpm: b.bid * pred * 1000, trueEcpm: b.bid * b.trueCtr * 1000 };
+    }).sort((a, b) => b.ecpm - a.ecpm);
+    const mx = Math.max(...scored.map(s => s.ecpm));
+    $('#auctionRows').innerHTML = scored.map((s, k) =>
+      `<div class="r ${k === 0 ? 'win' : ''}"><span>${s.n}${k === 0 ? ' 🏆' : ''}</span><div class="tk"><i style="width:${(s.ecpm / mx * 100).toFixed(0)}%"></i></div><span class="v">£${s.bid.toFixed(2)}</span><span class="v">${(s.pred * 100).toFixed(2)}%</span></div>`).join('') +
+      `<div class="small muted" style="margin-top:4px">bar = eCPM (bid × predicted CTR) · columns: bid, predicted CTR</div>`;
+    const winner = scored[0], second = scored[1];
+    const price = second.ecpm / (winner.pred * 1000);   // 2nd-price on eCPM → CPC
+    const value = winner.trueCtr * 1000;
+    const roi = (winner.trueCtr / winner.pred);
+    // best possible allocation by true eCPM
+    const best = BIDDERS.slice().sort((a, b) => b.bid * b.trueCtr - a.bid * a.trueCtr)[0];
+    $('#aWin').textContent = winner.n + (winner.n === best.n ? ' ✅' : ' ⚠️ misallocated');
+    $('#aPrice').textContent = '£' + price.toFixed(2) + ' CPC';
+    $('#aValue').textContent = (winner.trueCtr * 100).toFixed(2) + '% true CTR';
+    $('#aRoi').textContent = ((roi - 1) * 100).toFixed(0) + '%';
+    $('#calInfo p').innerHTML = Math.abs(bias - 1) < 0.03 && spread < 0.03
+      ? `✅ <b>Well calibrated.</b> The auction allocates to the highest true eCPM (${best.n}) and the price reflects real expected value. Everything downstream — pacing, ROI reporting, advertiser trust — depends on this property holding, per slice, continuously.`
+      : spread > 0.15
+        ? `🚩 <b>Uneven calibration across advertisers</b> is worse than uniform bias. Some advertisers are systematically over-predicted and win auctions they shouldn't${winner.n !== best.n ? ` — here <b>${winner.n}</b> won instead of <b>${best.n}</b>` : ''}, paying for clicks that don't arrive, while the under-predicted ones quietly get starved. Uniform bias distorts prices; <i>differential</i> bias redistributes money between customers, which is how you lose them. Calibrate per slice and monitor the residual by advertiser.`
+        : bias > 1
+          ? `⚠️ <b>Over-predicting by ${((bias - 1) * 100).toFixed(0)}%.</b> eCPMs are inflated, so advertisers pay ${((bias - 1) * 100).toFixed(0)}% more per actual click than expected and their measured ROI comes in ${((1 / bias - 1) * 100).toFixed(0)}% below target. Short-term revenue rises; budgets get cut next quarter when the advertisers do their own arithmetic.`
+          : `⚠️ <b>Under-predicting by ${((1 - bias) * 100).toFixed(0)}%.</b> eCPMs are deflated, more auctions fail to clear reserve prices, and you leave revenue unearned on every impression. Less visible than over-prediction and just as expensive.`;
+  }
+  ['#calBias', '#calNoise'].forEach(id => $(id).addEventListener('input', auction));
+  auction();
+
+  /* ================= pacing ================= */
+  function pace() {
+    const mode = $('#paceSeg').dataset.value || 'asap';
+    // hourly traffic shape
+    const traffic = Array.from({ length: 24 }, (_, h) => 0.3 + 0.7 * Math.exp(-Math.pow((h - 15) / 5.5, 2)) + (h > 19 ? 0.25 : 0));
+    const totalT = traffic.reduce((a, b) => a + b, 0);
+    let budget = 10000, spend = new Array(24).fill(0);
+    if (mode === 'asap') {
+      for (let h = 0; h < 24 && budget > 0; h++) { const s = Math.min(budget, traffic[h] * 4200); spend[h] = s; budget -= s; }
+    } else if (mode === 'even') {
+      for (let h = 0; h < 24; h++) { const s = Math.min(10000 / 24, traffic[h] * 4200); spend[h] = s; }
+    } else {
+      for (let h = 0; h < 24; h++) spend[h] = 10000 * traffic[h] / totalT;
+    }
+    const spent = spend.reduce((a, b) => a + b, 0);
+    $('#paceBar').innerHTML = spend.map((s, h) =>
+      `<div style="flex:${Math.max(0.3, s)};background:${s > 0 ? (h < 9 ? 'var(--amber)' : h < 18 ? 'var(--accent)' : 'var(--accent-2)') : 'var(--surface-3)'}">${s > 380 ? h + 'h' : ''}</div>`).join('');
+    // quality: spending during low-traffic hours means paying for worse inventory
+    const quality = spend.reduce((s, v, h) => s + v * traffic[h], 0) / Math.max(1, spent);
+    const cpc = 0.42 / (0.55 + quality * 0.55);
+    const conv = spent / cpc * 0.031 * (0.7 + quality * 0.4);
+    const reach = clamp(spend.filter(s => s > 50).length / 24, 0, 1);
+    $('#pSpent').textContent = '£' + spent.toFixed(0);
+    $('#pCpc').textContent = '£' + cpc.toFixed(2);
+    $('#pConv').textContent = Math.round(conv);
+    $('#pReach').textContent = (reach * 100).toFixed(0) + '% of the day';
+    const notes = {
+      asap: `🚩 <b>Spend as fast as possible.</b> The budget is exhausted by mid-morning on whatever inventory happens to be available, missing the afternoon and evening peak entirely — the hours with the best audience. Average CPC is higher because the campaign competes hardest in a compressed window, and the advertiser reaches only ${(reach * 100).toFixed(0)}% of the day.`,
+      even: `⚠️ <b>Even pacing</b> spreads spend equally across hours regardless of traffic, so quiet hours are over-funded and peak hours are rationed. Better than ASAP, and it still under-delivers precisely when the audience is largest.`,
+      predict: `✅ <b>Traffic-aware pacing.</b> Spend is allocated proportionally to forecast opportunity, so the campaign is present throughout the day and strongest at peak. Lower average CPC, more conversions, and full-day reach. In practice this is a controller with feedback: forecast the hour, set a bid multiplier or admission probability, and correct every few minutes against actual spend.`,
+    };
+    $('#paceInfo p').innerHTML = notes[mode];
+  }
+  $('#paceSeg').addEventListener('segchange', pace);
+  pace();
+})();
+</script>
+</body>
+</html>

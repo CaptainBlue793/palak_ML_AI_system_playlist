@@ -1,0 +1,405 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Training Deep Networks in Practice</title>
+<link rel="stylesheet" href="assets/style.css">
+<script>try{var t=JSON.parse(localStorage.getItem('ml-theme'));if(t)document.documentElement.setAttribute('data-theme',t)}catch(e){}</script>
+<style>
+  .opt-svg { width:100%; }
+  .opt-svg .contour { fill:none; stroke:var(--border); stroke-width:1 }
+  .opt-svg .path-sgd { fill:none; stroke:var(--accent-2); stroke-width:2.4 }
+  .opt-svg .path-mom { fill:none; stroke:var(--amber); stroke-width:2.4 }
+  .opt-svg .path-adam { fill:none; stroke:var(--accent); stroke-width:2.4 }
+  .opt-svg .goal { fill:var(--green) }
+  .opt-svg text, .init-svg text, .sched-svg text { font-size:10.5px; fill:var(--muted); font-family:var(--mono) }
+  .init-svg { width:100%; height:200px }
+  .init-svg rect { fill:var(--accent); transition:height .3s, y .3s }
+  .init-svg rect.dead { fill:var(--red) }
+  .init-svg rect.boom { fill:var(--amber) }
+  .sched-svg { width:100%; height:160px }
+  .sched-svg .ln { fill:none; stroke:var(--accent); stroke-width:2.6 }
+  .recipe { counter-reset:r; display:grid; gap:8px }
+  .recipe > div { position:relative; padding:12px 14px 12px 46px; border-radius:12px; background:var(--surface-2); border:1px solid var(--border); font-size:14px }
+  .recipe > div::before { counter-increment:r; content:counter(r); position:absolute; left:12px; top:11px; width:24px; height:24px; border-radius:8px; background:var(--accent); color:#fff; display:grid; place-items:center; font-weight:800; font-size:12px; font-family:var(--mono) }
+  .recipe b { display:block; margin-bottom:2px }
+</style>
+</head>
+<body data-chapter="9">
+<main class="content">
+
+  <section class="hero">
+    <div class="eyebrow"><span class="pill accent">Chapter 9</span><span class="pill green">Beginner</span><span class="pill">⏱ 45 min</span></div>
+    <h1>Training Deep Networks <span class="grad">in Practice</span></h1>
+    <p class="lead">Backprop is the theory. This is the craft: the initialization, normalization, optimizer, schedule and regularization choices that decide whether a model converges in two hours or diverges into NaN at step 300.</p>
+    <ul class="objectives">
+      <li>Initialize weights so signal survives depth</li>
+      <li>Choose between BatchNorm, LayerNorm and RMSNorm</li>
+      <li>Explain what Adam does that SGD doesn't — and when SGD still wins</li>
+      <li>Design a learning-rate schedule with warmup and decay</li>
+      <li>Apply regularization, mixed precision and clipping without breaking anything</li>
+      <li>Follow a debugging order when a run misbehaves</li>
+    </ul>
+  </section>
+
+  <h2>Initialization: the first thing that can kill a run</h2>
+  <p>Each layer multiplies its input by a weight matrix. If those weights are slightly too small, activations shrink layer after layer until the signal is noise; slightly too big and they explode. The fix is to scale the random initialization by the layer's fan-in.</p>
+
+  <div class="panel">
+    <div class="panel-head"><div class="dots"><i></i><i></i><i></i></div><span class="p-title">Activation scale through 20 layers</span><span class="p-tag">Interactive</span></div>
+    <div class="panel-body">
+      <div class="seg" id="initSeg"><button data-v="he" class="active">He / Kaiming (ReLU)</button><button data-v="xavier">Xavier / Glorot</button><button data-v="small">σ = 0.01 (too small)</button><button data-v="big">σ = 0.5 (too big)</button></div>
+      <div class="svg-scroll"><svg id="initSvg" class="diagram init-svg" viewBox="0 0 640 200"></svg></div>
+      <div class="callout" id="initInfo" style="margin-top:10px"><div class="ico">📘</div><div class="body"><div class="title"></div><p style="margin:0"></p></div></div>
+      <p class="small muted">Bars show the standard deviation of activations at each layer (log scale). Healthy training keeps this roughly constant with depth — that is precisely what He and Xavier initialization are engineered to do.</p>
+    </div>
+  </div>
+
+  <div class="table-wrap">
+    <table class="t">
+      <thead><tr><th>Scheme</th><th>Std dev</th><th>Use with</th></tr></thead>
+      <tbody>
+        <tr><td><b>Xavier / Glorot</b></td><td>√(2 / (fan_in + fan_out))</td><td>tanh, sigmoid — keeps variance stable in both directions</td></tr>
+        <tr><td><b>He / Kaiming</b></td><td>√(2 / fan_in)</td><td>ReLU-family — compensates for half the activations being zeroed</td></tr>
+        <tr><td><b>Scaled residual init</b></td><td>divide output layers by √(2·n_layers)</td><td>Deep transformers, so residual streams don't grow with depth</td></tr>
+        <tr><td><b>Zeros</b></td><td>–</td><td>Biases only. Never weights (symmetry never breaks).</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h2>Normalization: keep the scale under control</h2>
+  <p>Initialization sets the scale at step 0. Normalization layers keep it stable for the rest of training, by re-centring and re-scaling activations inside the network.</p>
+
+  <div class="grid c3">
+    <div class="card feature reveal"><div class="f-ico">📦</div><h4>BatchNorm</h4><p>Normalizes each feature <b>across the batch</b>. Great for CNNs. Depends on batch size, behaves differently at inference (running averages), and is awkward for sequences and distributed training.</p></div>
+    <div class="card feature reveal"><div class="f-ico" style="background:var(--accent-2-soft)">📏</div><h4>LayerNorm</h4><p>Normalizes <b>across features within one example</b>. Batch-size independent, identical at train and inference — the default for transformers and anything sequential.</p></div>
+    <div class="card feature reveal"><div class="f-ico" style="background:var(--green-soft)">⚡</div><h4>RMSNorm</h4><p>LayerNorm without the mean subtraction: just divide by the root-mean-square. Slightly cheaper, works as well — used in most recent LLMs.</p></div>
+  </div>
+
+  <div class="callout tip">
+    <div class="ico">🏗️</div>
+    <div class="body"><div class="title">Pre-norm vs post-norm</div>
+      <p>Original transformers normalized <i>after</i> each sub-layer (post-norm) and needed careful warmup to avoid diverging. Modern ones normalize <i>before</i> (pre-norm: <code>x + f(norm(x))</code>), which keeps a clean residual path and trains far more stably at depth. If you ever see a training run that only works with a long warmup, post-norm is a likely culprit.</p></div>
+  </div>
+
+  <h2>Optimizers: SGD, momentum, Adam</h2>
+  <p>Plain SGD steps directly against the gradient. Momentum accumulates velocity so it powers through noise and small ravines. Adam additionally keeps a per-parameter running estimate of gradient magnitude and divides by it, giving every parameter its own effective learning rate.</p>
+
+  <div class="panel">
+    <div class="panel-head"><div class="dots"><i></i><i></i><i></i></div><span class="p-title">Optimizer race on an ill-conditioned valley</span><span class="p-tag">Interactive</span></div>
+    <div class="panel-body">
+      <div class="svg-scroll"><svg id="optSvg" class="diagram opt-svg" viewBox="0 0 640 300"></svg></div>
+      <div class="range-row"><label for="optLr">Learning rate</label><input type="range" id="optLr" min="-2.6" max="-0.5" step="0.05" value="-1.6"><output id="optLrV"></output></div>
+      <div class="controls">
+        <button class="btn sm primary" id="optRun">▶ Race</button>
+        <button class="btn sm ghost" id="optReset">↺ Reset</button>
+      </div>
+      <div class="stats" style="margin-top:10px">
+        <div class="stat"><div class="k">SGD steps to converge</div><div class="v" id="sSGD">–</div></div>
+        <div class="stat acc"><div class="k">+ Momentum</div><div class="v" id="sMOM">–</div></div>
+        <div class="stat good"><div class="k">Adam</div><div class="v" id="sADAM">–</div></div>
+      </div>
+      <div class="legend"><span><i style="background:var(--accent-2)"></i>SGD</span><span><i style="background:var(--amber)"></i>SGD + momentum</span><span><i style="background:var(--accent)"></i>Adam</span><span><i style="background:var(--green)"></i>minimum</span></div>
+      <p class="small muted" style="margin-top:8px">The surface is 20× steeper in one direction than the other — exactly what unscaled features or unequal layer scales produce. SGD zig-zags, momentum damps the oscillation, and Adam rescales each axis so both directions move at a similar rate.</p>
+    </div>
+  </div>
+
+  <div class="table-wrap">
+    <table class="t">
+      <thead><tr><th>Optimizer</th><th>Typical LR</th><th>Where it's used</th><th>Notes</th></tr></thead>
+      <tbody>
+        <tr><td><b>SGD + momentum</b></td><td>0.1 (with decay)</td><td>Vision CNNs, ResNets</td><td>Often generalizes slightly better; needs more tuning</td></tr>
+        <tr><td><b>Adam</b></td><td>1e-3</td><td>Almost everything else</td><td>Robust defaults (β₁=0.9, β₂=0.999); couples L2 with the adaptive scaling</td></tr>
+        <tr><td><b>AdamW</b></td><td>1e-4 … 3e-4 for LLMs</td><td><b>Transformers, LLMs</b></td><td>Decouples weight decay from the gradient — the correct default today</td></tr>
+        <tr><td><b>Adafactor / 8-bit Adam</b></td><td>as Adam</td><td>Very large models</td><td>Cuts optimizer memory (Adam stores 2 extra states per parameter — Ch 23)</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="callout warn">
+    <div class="ico">💾</div>
+    <div class="body"><div class="title">Adam costs memory, and that memory decides your cluster</div>
+      <p>Adam keeps two extra floats per parameter (first and second moments). For a 7B model in mixed precision that's roughly <b>14 GB of weights + 14 GB of gradients + 56 GB of optimizer state</b> in fp32 — the optimizer is the biggest single item. This arithmetic is why ZeRO and FSDP exist (Chapter 23).</p></div>
+  </div>
+
+  <h2>Learning-rate schedules</h2>
+  <p>A constant learning rate is almost never optimal. You want to start small (weights are random and gradients are wild), rise to a peak, then decay so the model can settle into a minimum.</p>
+
+  <div class="panel">
+    <div class="panel-head"><div class="dots"><i></i><i></i><i></i></div><span class="p-title">Schedule shapes</span><span class="p-tag">Interactive</span></div>
+    <div class="panel-body">
+      <div class="seg" id="schedSeg"><button data-v="cosine" class="active">Warmup + cosine</button><button data-v="step">Step decay</button><button data-v="linear">Warmup + linear</button><button data-v="const">Constant</button><button data-v="restart">Cosine with restarts</button></div>
+      <div class="svg-scroll"><svg id="schedSvg" class="diagram sched-svg" viewBox="0 0 640 160"></svg></div>
+      <div class="callout" id="schedInfo" style="margin-top:10px"><div class="ico">📘</div><div class="body"><p style="margin:0"></p></div></div>
+    </div>
+  </div>
+
+  <div class="callout tip">
+    <div class="ico">🔥</div>
+    <div class="body"><div class="title">Why warmup exists</div>
+      <p>At step 0, Adam's second-moment estimate is based on almost no data, so its effective step size is erratic and can be enormous. Ramping the learning rate over the first few hundred to few thousand steps lets those statistics stabilise. For large-batch and transformer training, removing warmup is one of the most reliable ways to blow up a run.</p></div>
+  </div>
+
+  <h2>Regularization</h2>
+  <div class="table-wrap">
+    <table class="t">
+      <thead><tr><th>Technique</th><th>What it does</th><th>Typical setting</th></tr></thead>
+      <tbody>
+        <tr><td><b>Weight decay</b></td><td>Shrinks weights each step (L2 done properly, via AdamW)</td><td>0.01–0.1; exclude biases and norm parameters</td></tr>
+        <tr><td><b>Dropout</b></td><td>Randomly zeroes activations so units can't co-adapt</td><td>0.1 in transformers, 0.5 in old-style MLPs; often 0 for large LLM pretraining</td></tr>
+        <tr><td><b>Label smoothing</b></td><td>Targets 0.9/0.1 instead of 1/0 — discourages overconfidence</td><td>0.1; improves calibration, slightly hurts top-1 sometimes</td></tr>
+        <tr><td><b>Early stopping</b></td><td>Stop when validation stops improving</td><td>Patience of 3–10 evaluations; always keep the best checkpoint</td></tr>
+        <tr><td><b>Data augmentation</b></td><td>Synthetic variety: crops, flips, mixup, paraphrase</td><td>Usually the highest-value regularizer when data is limited (Ch 12)</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h2>Precision, clipping and accumulation</h2>
+  <p>Three practical mechanics that appear in every real training script.</p>
+
+  <div class="grid c3">
+    <div class="card"><h4 class="mt0">🎚️ Mixed precision</h4><p class="small mb0">Compute in bf16/fp16, keep a fp32 master copy of weights. Roughly 2× faster and half the activation memory. <b>bf16</b> has fp32's exponent range so it doesn't need loss scaling — prefer it where hardware supports it.</p></div>
+    <div class="card"><h4 class="mt0">✂️ Gradient clipping</h4><p class="small mb0">Rescale gradients whose global norm exceeds a threshold (commonly 1.0). Turns a would-be divergence into a slightly wasted step. Effectively mandatory for language models.</p></div>
+    <div class="card"><h4 class="mt0">➕ Gradient accumulation</h4><p class="small mb0">Sum gradients over k micro-batches before stepping to simulate a k× larger batch on small GPUs. Remember to divide the loss by k, or your effective learning rate silently multiplies.</p></div>
+  </div>
+
+  <h2>The debugging order</h2>
+  <p>When a run misbehaves, work down this list rather than randomly changing hyperparameters.</p>
+
+  <div class="recipe">
+    <div><b>Overfit 16 examples</b>Can the model drive the loss to ~0 on a tiny batch? If not, it's a bug — labels, masking, a frozen layer, a detached graph — not a tuning issue.</div>
+    <div><b>Check the input pipeline</b>Print one batch. Shapes, dtypes, value ranges, and the label next to the input. Eyeball five samples decoded back to text/image.</div>
+    <div><b>Watch gradient norms per layer</b>Vanishing (≈1e-8) or exploding (≈1e4) points straight at initialization, normalization or learning rate.</div>
+    <div><b>Sanity-check the loss at step 0</b>For K-class cross-entropy it should be ≈ln(K) (e.g. 2.30 for 10 classes, ~10.8 for a 50k vocabulary). A wildly different value means a label or shape bug.</div>
+    <div><b>Run the LR range test</b>Increase the learning rate exponentially over a few hundred steps and plot the loss. Take roughly one-tenth of the rate where it first diverges.</div>
+    <div><b>Only then tune</b>Schedule, weight decay, dropout, batch size. Change one thing at a time and log it (Chapter 31).</div>
+  </div>
+
+  <div class="callout warn">
+    <div class="ico">🎲</div>
+    <div class="body"><div class="title">Reproducibility is partial, and that's fine</div>
+      <p>Seed Python, NumPy and the framework, and log the seed. Bit-exact reproducibility additionally needs deterministic kernels (often slower), fixed data order and identical hardware and library versions. For most work, aim for “same conclusions across seeds” instead — and if a result only appears with one seed, it isn't a result. Report mean ± std over 3 seeds for anything you'd defend in a review.</p></div>
+  </div>
+
+  <h2>Hyperparameter search that isn't a waste of GPUs</h2>
+  <div class="split">
+    <div class="card"><h4 class="mt0">Random &gt; grid</h4><p class="small mb0">With 2 important and 6 irrelevant parameters, a grid wastes almost all of its budget on the irrelevant axes. Random sampling explores the important ones far better for the same cost. Sample learning rate and weight decay <b>log-uniformly</b>.</p></div>
+    <div class="card"><h4 class="mt0">Kill bad runs early</h4><p class="small mb0">Successive halving / ASHA: start many short runs, keep the best fraction, extend them, repeat. Combined with Bayesian search (Optuna, Ray Tune) this is typically 5–10× cheaper than running everything to completion.</p></div>
+  </div>
+
+  <div class="callout danger"><div class="ico">⚠️</div><div class="body"><div class="title">Common mistakes</div>
+    <ul class="mb0">
+      <li><b>Applying weight decay to biases and LayerNorm parameters.</b> It quietly hurts; exclude them (most reference implementations do).</li>
+      <li><b>Dropout left on at inference.</b> Frameworks handle this with train/eval modes — forgetting <code>model.eval()</code> produces mysteriously noisy predictions.</li>
+      <li><b>Changing batch size without touching the learning rate.</b> Effective step size changes; scale the rate accordingly and keep warmup.</li>
+      <li><b>Not dividing by the accumulation count.</b> Gradient accumulation without normalization multiplies your effective learning rate by k.</li>
+      <li><b>Tuning on the test set.</b> Every hyperparameter decision belongs to validation.</li>
+      <li><b>Chasing hyperparameters when the data is the problem.</b> A 2% tuning gain will not rescue a leaked feature or noisy labels.</li>
+    </ul></div></div>
+
+  <div class="callout interview"><div class="ico">🎤</div><div class="body"><div class="title">Interview drill</div>
+    <p class="small" style="margin:10px 0 0"><b>Warm-up:</b> Your transformer diverges at step 400 with loss going to NaN. Name five things you'd check, in order.</p>
+    <details class="ans"><summary>How a strong answer sounds</summary><div>(1) Learning rate and warmup — is the peak rate reached too early for this batch size? (2) Gradient clipping — is it on, and what's the global norm just before the spike? (3) Precision — fp16 without loss scaling overflows; switch to bf16 or enable the scaler. (4) Data — is there a corrupt batch at that step? Log the batch index and re-run it alone. (5) Initialization and normalization — pre-norm vs post-norm, and residual scaling with depth. I'd also save a checkpoint just before the spike so I can replay the exact batch rather than guessing.</div></details>
+    <p class="small" style="margin:10px 0 0"><b>Deeper:</b> Why does AdamW exist when Adam already supports weight decay?</p>
+    <details class="ans"><summary>How a strong answer sounds</summary><div>In Adam, L2 regularization is added to the gradient, so it then gets divided by the same per-parameter second-moment estimate as everything else. Parameters with large historical gradients therefore receive much weaker decay — the regularization strength becomes an accident of gradient history. AdamW decouples it: the decay is applied directly to the weights, independent of the adaptive scaling. In practice this makes weight decay tunable in a meaningful way and generalizes better, which is why it is the default for transformer training.</div></details>
+  </div></div>
+
+  <div class="takeaways">
+    <h3>🧠 Key takeaways</h3>
+    <ul>
+      <li>Initialize with fan-in scaling (He for ReLU, Xavier for tanh) so activation scale survives depth.</li>
+      <li>LayerNorm/RMSNorm for sequences, BatchNorm for CNNs; pre-norm residual blocks train more stably.</li>
+      <li>AdamW is the default for transformers; its optimizer state dominates training memory.</li>
+      <li>Use warmup plus decay, and find the peak rate with an LR range test rather than folklore.</li>
+      <li>Debug in order: overfit 16 examples, inspect the batch, check gradient norms, verify step-0 loss — then tune.</li>
+    </ul>
+  </div>
+
+  <div class="quiz-wrap">
+    <h2>Check your understanding</h2>
+    <div class="quiz-score"></div>
+
+    <div class="quiz" data-answer="2">
+      <p class="q">You're training a 24-layer transformer. Which normalization is the natural default?</p>
+      <div class="opts">
+        <button class="opt">BatchNorm, because it's fastest</button>
+        <button class="opt">No normalization — residuals are enough</button>
+        <button class="opt">LayerNorm or RMSNorm, applied pre-residual</button>
+        <button class="opt">BatchNorm on the sequence dimension</button>
+      </div>
+      <div class="explain">LayerNorm normalizes within an example, so it's independent of batch size and identical at train and inference — essential for variable-length sequences and distributed training.</div>
+    </div>
+
+    <div class="quiz" data-answer="0">
+      <p class="q">A 10-class classifier's loss at step 0 is 6.8 instead of about 2.3. What does that suggest?</p>
+      <div class="opts">
+        <button class="opt">A bug — labels, shapes or the loss are wrong</button>
+        <button class="opt">The learning rate is too low</button>
+        <button class="opt">Normal variation at initialization</button>
+        <button class="opt">The model needs more capacity</button>
+      </div>
+      <div class="explain">A randomly initialized model should be uniformly uncertain: <code>ln(10) ≈ 2.30</code>. A much higher value means the outputs are confidently wrong — often shuffled labels or a shape mismatch.</div>
+    </div>
+
+    <div class="quiz" data-answer="1">
+      <p class="q">You double the batch size from 256 to 512. What should you usually do to the learning rate?</p>
+      <div class="opts">
+        <button class="opt">Halve it</button>
+        <button class="opt">Increase it (roughly linearly or by √2), keeping warmup</button>
+        <button class="opt">Leave it — batch size and rate are independent</button>
+        <button class="opt">Set it to zero for the first epoch</button>
+      </div>
+      <div class="explain">A bigger batch gives a less noisy gradient estimate, so you can afford a larger step. Linear scaling with warmup is the standard recipe; √2 scaling is a more conservative alternative.</div>
+    </div>
+
+    <div class="quiz" data-answer="3">
+      <p class="q">What problem does gradient clipping solve?</p>
+      <div class="opts">
+        <button class="opt">Overfitting</button>
+        <button class="opt">Class imbalance</button>
+        <button class="opt">Slow data loading</button>
+        <button class="opt">Occasional huge gradients that would blow up the weights</button>
+      </div>
+      <div class="explain">A single bad batch can produce a gradient orders of magnitude larger than usual. Clipping caps the global norm, turning a potential divergence into a slightly wasted step.</div>
+    </div>
+
+    <div class="quiz" data-answer="2">
+      <p class="q">Why is bf16 usually preferred over fp16 for training on modern hardware?</p>
+      <div class="opts">
+        <button class="opt">It has more mantissa bits, so it's more accurate</button>
+        <button class="opt">It uses half the memory of fp16</button>
+        <button class="opt">It has fp32's exponent range, so it rarely overflows and needs no loss scaling</button>
+        <button class="opt">It is supported by more frameworks</button>
+      </div>
+      <div class="explain">bf16 trades mantissa precision for dynamic range. Deep learning tolerates low precision but not overflow, so bf16 removes a whole class of training instability — with no loss-scaling machinery.</div>
+    </div>
+  </div>
+</main>
+<script src="assets/app.js"></script>
+<script>
+(function(){
+  const { $, $$, clamp } = ML;
+
+  /* ================= initialization ================= */
+  const INIT = {
+    he: { s: (n) => Math.sqrt(2 / n), t: 'He / Kaiming initialization', n: 'Standard deviation √(2/fan_in) exactly compensates for ReLU zeroing half the activations, so the scale stays flat across all 20 layers. This is the default for ReLU/GELU networks, and it is why you rarely think about initialization any more.' },
+    xavier: { s: (n) => Math.sqrt(1 / n), t: 'Xavier / Glorot initialization', n: 'Tuned for symmetric activations like tanh. With ReLU it is slightly too small, so the signal decays gently with depth — survivable at 20 layers, a problem at 100.' },
+    small: { s: () => 0.01, t: 'σ = 0.01 — far too small', n: 'Every layer multiplies the signal down. By layer 10 the activations are effectively zero, the gradients that flow back are zero too, and the early layers never learn. The loss looks flat and people blame the learning rate.' },
+    big: { s: () => 0.5, t: 'σ = 0.5 — far too large', n: 'Activations grow geometrically. Within a few layers you overflow the numeric range, producing infinities and then NaN on the very first forward pass. The bar chart runs off the top of the scale.' },
+  };
+  function drawInit() {
+    const k = $('#initSeg').dataset.value || 'he', cfg = INIT[k];
+    const W = 256, L = 20;
+    let std = 1, stds = [];
+    for (let l = 0; l < L; l++) {
+      // variance propagation for ReLU: Var_out = fan_in * s^2 * Var_in / 2
+      const s = cfg.s(W);
+      std = Math.sqrt(W * s * s / 2) * std;
+      stds.push(std);
+    }
+    const lg = (v) => Math.log10(Math.max(v, 1e-12));
+    const lo = -12, hi = 6;
+    let g = '';
+    stds.forEach((v, i) => {
+      const y = clamp((lg(v) - lo) / (hi - lo), 0, 1);
+      const cls = v < 1e-4 ? 'dead' : v > 50 ? 'boom' : '';
+      g += `<rect class="${cls}" x="${24 + i * 30}" y="${175 - y * 160}" width="22" height="${y * 160}" rx="3"/>`;
+    });
+    g += `<line stroke="var(--border-strong)" x1="20" y1="175" x2="630" y2="175"/>` +
+      `<line stroke="var(--green)" stroke-dasharray="4 4" x1="20" y1="${175 - (lg(1) - lo) / (hi - lo) * 160}" x2="630" y2="${175 - (lg(1) - lo) / (hi - lo) * 160}"/>` +
+      `<text x="24" y="190">layer 1</text><text x="560" y="190">layer 20</text>` +
+      `<text x="540" y="${175 - (lg(1) - lo) / (hi - lo) * 160 - 5}" style="fill:var(--green)">healthy: std ≈ 1</text>`;
+    $('#initSvg').innerHTML = g;
+    $('#initInfo .title').textContent = cfg.t;
+    $('#initInfo p').innerHTML = cfg.n + ` <b>Final layer std: ${stds[L - 1] < 1e-4 || stds[L - 1] > 1e4 ? stds[L - 1].toExponential(1) : stds[L - 1].toFixed(3)}</b>.`;
+  }
+  $('#initSeg').addEventListener('segchange', drawInit);
+  drawInit();
+
+  /* ================= optimizer race ================= */
+  const A_ = 20, B_ = 1;   // f(x,y) = A x^2 + B y^2  (ill-conditioned)
+  const f = (x, y) => A_ * x * x + B_ * y * y;
+  const gradF = (x, y) => [2 * A_ * x, 2 * B_ * y];
+  const X0 = -0.85, Y0 = 0.9;
+
+  function runOpt(kind, lr, maxSteps = 260) {
+    let x = X0, y = Y0, vx = 0, vy = 0, mx = 0, my = 0, sx = 0, sy = 0, t = 0;
+    const path = [[x, y]];
+    let conv = null;
+    for (let i = 0; i < maxSteps; i++) {
+      const [gx, gy] = gradF(x, y);
+      if (kind === 'sgd') { x -= lr * gx; y -= lr * gy; }
+      else if (kind === 'mom') { vx = 0.9 * vx + gx; vy = 0.9 * vy + gy; x -= lr * vx; y -= lr * vy; }
+      else {
+        t++;
+        mx = 0.9 * mx + 0.1 * gx; my = 0.9 * my + 0.1 * gy;
+        sx = 0.999 * sx + 0.001 * gx * gx; sy = 0.999 * sy + 0.001 * gy * gy;
+        const mhx = mx / (1 - Math.pow(0.9, t)), mhy = my / (1 - Math.pow(0.9, t));
+        const shx = sx / (1 - Math.pow(0.999, t)), shy = sy / (1 - Math.pow(0.999, t));
+        x -= lr * 8 * mhx / (Math.sqrt(shx) + 1e-8);
+        y -= lr * 8 * mhy / (Math.sqrt(shy) + 1e-8);
+      }
+      if (!isFinite(x) || !isFinite(y) || Math.abs(x) > 4 || Math.abs(y) > 4) { path.push([clamp(x, -4, 4), clamp(y, -4, 4)]); break; }
+      path.push([x, y]);
+      if (conv === null && f(x, y) < 0.002) conv = i + 1;
+    }
+    return { path, conv };
+  }
+  function drawOpt(progress = 1) {
+    const lr = Math.pow(10, +$('#optLr').value);
+    $('#optLrV').textContent = lr.toFixed(4);
+    const X = (x) => 320 + x * 300, Y = (y) => 150 - y * 130;
+    let g = '';
+    for (const lev of [0.05, 0.2, 0.5, 1, 2, 4, 8, 14]) {
+      const rx = Math.sqrt(lev / A_) * 300, ry = Math.sqrt(lev / B_) * 130;
+      g += `<ellipse class="contour" cx="320" cy="150" rx="${rx.toFixed(1)}" ry="${ry.toFixed(1)}"/>`;
+    }
+    const runs = [['sgd', 'path-sgd'], ['mom', 'path-mom'], ['adam', 'path-adam']];
+    const conv = {};
+    runs.forEach(([k, cls]) => {
+      const r = runOpt(k, lr);
+      conv[k] = r.conv;
+      const pts = r.path.slice(0, Math.max(2, Math.floor(r.path.length * progress)));
+      const d = pts.map(([x, y]) => `${X(clamp(x, -1.2, 1.2)).toFixed(1)},${Y(clamp(y, -1.2, 1.2)).toFixed(1)}`).join(' L');
+      g += `<path class="${cls}" d="M${d}"/>`;
+      const last = pts[pts.length - 1];
+      g += `<circle cx="${X(clamp(last[0], -1.2, 1.2)).toFixed(1)}" cy="${Y(clamp(last[1], -1.2, 1.2)).toFixed(1)}" r="4.5" fill="${cls === 'path-sgd' ? 'var(--accent-2)' : cls === 'path-mom' ? 'var(--amber)' : 'var(--accent)'}"/>`;
+    });
+    g += `<circle class="goal" cx="320" cy="150" r="6"/>`;
+    $('#optSvg').innerHTML = g;
+    const fmtC = (c) => (c === null ? 'did not converge' : c + ' steps');
+    $('#sSGD').textContent = fmtC(conv.sgd);
+    $('#sMOM').textContent = fmtC(conv.mom);
+    $('#sADAM').textContent = fmtC(conv.adam);
+  }
+  $('#optLr').addEventListener('input', () => drawOpt());
+  $('#optReset').onclick = () => drawOpt(0.02);
+  $('#optRun').onclick = async () => {
+    for (let p = 0.02; p <= 1.0001; p += 0.03) { drawOpt(p); await ML.sleep(30); }
+  };
+  drawOpt();
+
+  /* ================= LR schedules ================= */
+  const SCHED = {
+    cosine: { f: (t) => (t < 0.06 ? t / 0.06 : 0.5 * (1 + Math.cos(Math.PI * (t - 0.06) / 0.94))), n: '<b>Warmup + cosine decay.</b> The standard recipe for transformers and LLMs: a short linear ramp so Adam’s statistics settle, then a smooth decay to near zero. The long low-rate tail at the end is where much of the final quality is earned.' },
+    step: { f: (t) => (t < 0.3 ? 1 : t < 0.6 ? 0.1 : t < 0.85 ? 0.01 : 0.001), n: '<b>Step decay.</b> The classic vision recipe: divide by 10 at fixed milestones. You can usually see the loss drop visibly at each step, which makes it easy to reason about — but the milestones are another thing to tune.' },
+    linear: { f: (t) => (t < 0.06 ? t / 0.06 : 1 - (t - 0.06) / 0.94), n: '<b>Warmup + linear decay to zero.</b> Common for fine-tuning (BERT-era default). Simple, predictable, and it guarantees the run ends at a rate of zero, which helps reproducibility.' },
+    const: { f: () => 1, n: '<b>Constant.</b> Fine for quick experiments and online learning, but the model keeps bouncing around the minimum instead of settling in — usually leaving 1–3% of quality on the table.' },
+    restart: { f: (t) => { const c = (t * 3) % 1; return 0.5 * (1 + Math.cos(Math.PI * c)) * (1 - t * 0.35); }, n: '<b>Cosine with warm restarts.</b> Periodically jumping the rate back up can knock the model out of a mediocre basin and gives you several usable checkpoints for ensembling. Less common now, but useful when training time is fixed and you want multiple snapshots.' },
+  };
+  function drawSched() {
+    const k = $('#schedSeg').dataset.value || 'cosine', s = SCHED[k];
+    let d = '';
+    for (let t = 0; t <= 1.0001; t += 0.002) d += (d ? 'L' : 'M') + (30 + t * 580).toFixed(1) + ',' + (135 - clamp(s.f(t), 0, 1) * 115).toFixed(1) + ' ';
+    $('#schedSvg').innerHTML =
+      `<line stroke="var(--border-strong)" x1="30" y1="135" x2="620" y2="135"/><line stroke="var(--border-strong)" x1="30" y1="10" x2="30" y2="135"/>` +
+      `<path class="ln" d="${d}"/><text x="270" y="152">training progress</text><text x="2" y="24">LR</text>`;
+    $('#schedInfo p').innerHTML = s.n;
+  }
+  $('#schedSeg').addEventListener('segchange', drawSched);
+  drawSched();
+})();
+</script>
+</body>
+</html>

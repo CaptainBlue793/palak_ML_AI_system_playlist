@@ -1,0 +1,354 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Multi-Tenant AI Platforms &amp; Gateways</title>
+<link rel="stylesheet" href="assets/style.css">
+<script>try{var t=JSON.parse(localStorage.getItem('ml-theme'));if(t)document.documentElement.setAttribute('data-theme',t)}catch(e){}</script>
+<style>
+  .gwviz text { font-size:10.5px; fill:var(--text-2); font-family:var(--font); font-weight:600 }
+  .gwviz .sub { font-size:9px; fill:var(--muted); font-family:var(--mono); font-weight:400 }
+  .routetbl td.n { font-family:var(--mono); text-align:right }
+  .tenants { display:grid; gap:6px }
+  .tenants .r { display:grid; grid-template-columns:140px 1fr 96px; gap:10px; align-items:center; font-size:13px }
+  .tenants .tk { height:18px; border-radius:6px; background:var(--surface-3); overflow:hidden; display:flex }
+  .tenants .tk i { display:block; height:100% }
+  .tenants .v { font-family:var(--mono); text-align:right; color:var(--muted); font-size:12px }
+  .golden { display:grid; gap:8px }
+  .golden .r { display:grid; grid-template-columns:44px 1fr; gap:12px; padding:10px 12px; border-radius:12px; background:var(--surface-2); border:1px solid var(--border); font-size:13.5px }
+  .golden .r b { font-family:var(--mono); color:var(--accent) }
+</style>
+</head>
+<body data-chapter="39">
+<main class="content">
+
+  <section class="hero">
+    <div class="eyebrow"><span class="pill accent">Chapter 39</span><span class="pill amber">Expert</span><span class="pill">⏱ 45 min</span></div>
+    <h1>Multi-Tenant AI Platforms <span class="grad">&amp; Gateways</span></h1>
+    <p class="lead">Once a second team wants to call a model, you have a platform whether you planned one or not. The question is whether it's a shared gateway with quotas, routing and attribution — or fifteen teams with their own API keys, their own retry logic and one shared invoice nobody can explain.</p>
+    <ul class="objectives">
+      <li>Design an AI gateway and know what belongs in it</li>
+      <li>Route requests by capability, cost and load, with fallback chains</li>
+      <li>Isolate tenants so one cannot degrade another</li>
+      <li>Offer a self-service path that doesn't become a bottleneck</li>
+      <li>Decide what to build and what to buy</li>
+    </ul>
+  </section>
+
+  <h2>The gateway</h2>
+  <div class="panel">
+    <div class="panel-head"><div class="dots"><i></i><i></i><i></i></div><span class="p-title">One entry point, many concerns</span><span class="p-tag">Diagram</span></div>
+    <div class="panel-body svg-scroll">
+      <svg class="diagram gwviz" viewBox="0 0 800 300">
+        <defs><marker id="gh" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" class="arrow-head"/></marker></defs>
+        <path class="edge" d="M140,80 L195,80" marker-end="url(#gh)"/>
+        <path class="edge" d="M355,60 L555,40" marker-end="url(#gh)"/>
+        <path class="edge" d="M355,80 L555,105" marker-end="url(#gh)"/>
+        <path class="edge" d="M355,100 L555,170" marker-end="url(#gh)"/>
+        <path class="edge dash" d="M355,120 L555,235" marker-end="url(#gh)"/>
+        <path class="edge dash" d="M275,145 L275,215" marker-end="url(#gh)"/>
+        <g class="node" transform="translate(20,45)"><rect width="120" height="70" rx="12"/><text x="60" y="26" text-anchor="middle">Teams &amp; apps</text><text x="60" y="44" text-anchor="middle" class="sub">14 services</text><text x="60" y="60" text-anchor="middle" class="sub">one SDK</text></g>
+        <g class="node" transform="translate(195,30)"><rect width="160" height="115" rx="12"/><text x="80" y="24" text-anchor="middle">AI Gateway</text><text x="80" y="42" text-anchor="middle" class="sub">authn/z · quotas</text><text x="80" y="58" text-anchor="middle" class="sub">routing · fallback</text><text x="80" y="74" text-anchor="middle" class="sub">cache · rate limit</text><text x="80" y="90" text-anchor="middle" class="sub">logging · redaction</text><text x="80" y="106" text-anchor="middle" class="sub">cost attribution</text></g>
+        <g class="node" transform="translate(555,18)"><rect width="150" height="46" rx="12"/><text x="75" y="21" text-anchor="middle">Self-hosted small</text><text x="75" y="37" text-anchor="middle" class="sub">8B · own GPUs</text></g>
+        <g class="node" transform="translate(555,85)"><rect width="150" height="46" rx="12"/><text x="75" y="21" text-anchor="middle">Self-hosted large</text><text x="75" y="37" text-anchor="middle" class="sub">70B · own GPUs</text></g>
+        <g class="node" transform="translate(555,150)"><rect width="150" height="46" rx="12"/><text x="75" y="21" text-anchor="middle">Frontier API</text><text x="75" y="37" text-anchor="middle" class="sub">vendor, per token</text></g>
+        <g class="node" transform="translate(555,215)"><rect width="150" height="46" rx="12"/><text x="75" y="21" text-anchor="middle">Specialist models</text><text x="75" y="37" text-anchor="middle" class="sub">embeddings · rerank · ASR</text></g>
+        <g class="node" transform="translate(200,215)"><rect width="150" height="46" rx="12" style="stroke-dasharray:5 4"/><text x="75" y="21" text-anchor="middle">Platform telemetry</text><text x="75" y="37" text-anchor="middle" class="sub">per tenant · per model</text></g>
+      </svg>
+    </div>
+  </div>
+
+  <div class="table-wrap">
+    <table class="t">
+      <thead><tr><th>Gateway responsibility</th><th>Why it belongs there and not in each app</th></tr></thead>
+      <tbody>
+        <tr><td><b>AuthN/Z and tenancy</b></td><td>One implementation of “who may call what with whose data”</td></tr>
+        <tr><td><b>Quotas &amp; rate limits</b></td><td>Per tenant, per model, per minute and per month — the only place that sees the whole picture</td></tr>
+        <tr><td><b>Routing &amp; fallbacks</b></td><td>Provider outages and model swaps become config, not a deploy in 14 services</td></tr>
+        <tr><td><b>Caching</b></td><td>Exact and prefix caching benefit everyone; done per app it's duplicated and inconsistent</td></tr>
+        <tr><td><b>Logging &amp; redaction</b></td><td>One audit trail, one PII policy, one place to get the retention right (Chapter 37)</td></tr>
+        <tr><td><b>Cost attribution</b></td><td>Every request tagged with tenant, team, feature and model — the basis of Chapter 38</td></tr>
+        <tr><td><b>Safety filters</b></td><td>Input/output policy enforced consistently, and updatable in one place (Chapter 36)</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="callout warn">
+    <div class="ico">🪶</div>
+    <div class="body"><div class="title">Keep the gateway thin</div>
+      <p>Every millisecond and every feature you add sits on the critical path of every AI call in the company. Auth, routing, quotas, logging and caching — yes. Business logic, prompt templates, retrieval and agent orchestration — no: those belong to the applications, or they become a shared bottleneck that every team waits on and nobody can change safely.</p></div>
+  </div>
+
+  <h2>Routing</h2>
+  <div class="panel">
+    <div class="panel-head"><div class="dots"><i></i><i></i><i></i></div><span class="p-title">Routing policy simulator</span><span class="p-tag">Interactive</span></div>
+    <div class="panel-body">
+      <div class="seg" id="routeSeg"><button data-v="all-big" class="active">Everything to the big model</button><button data-v="static">Static per use case</button><button data-v="classifier">Classifier-based</button><button data-v="cascade">Cascade with verification</button></div>
+      <div class="table-wrap" style="margin-top:12px">
+        <table class="t routetbl">
+          <thead><tr><th>Traffic class</th><th>Share</th><th>Routed to</th><th class="n">Cost / 1k</th><th class="n">Quality</th></tr></thead>
+          <tbody id="routeRows"></tbody>
+        </table>
+      </div>
+      <div class="stats">
+        <div class="stat acc"><div class="k">Blended cost / 1k requests</div><div class="v" id="rCost" style="font-size:18px">–</div></div>
+        <div class="stat good"><div class="k">Blended quality</div><div class="v" id="rQual" style="font-size:18px">–</div></div>
+        <div class="stat"><div class="k">p50 latency</div><div class="v" id="rLat" style="font-size:18px">–</div></div>
+        <div class="stat warn"><div class="k">vs all-big baseline</div><div class="v" id="rDelta" style="font-size:18px">–</div></div>
+      </div>
+      <div class="callout" id="rInfo" style="margin-top:12px"><div class="ico">🔀</div><div class="body"><p style="margin:0"></p></div></div>
+    </div>
+  </div>
+
+  <div class="callout tip">
+    <div class="ico">🪜</div>
+    <div class="body"><div class="title">Fallback chains are a reliability feature</div>
+      <p>Primary model → secondary model → smaller self-hosted model → cached/templated response → honest error. Each step degrades quality rather than availability, and every fallback must be <b>logged and monitored</b>: a silent fallback that becomes permanent is a quality regression nobody can see. Test the chain deliberately — a fallback path that has never run is a fallback path that doesn't work.</p></div>
+  </div>
+
+  <h2>Tenancy isolation</h2>
+  <div class="panel">
+    <div class="panel-head"><div class="dots"><i></i><i></i><i></i></div><span class="p-title">The noisy neighbour</span><span class="p-tag">Interactive</span></div>
+    <div class="panel-body">
+      <div class="seg" id="tenSeg"><button data-v="none" class="active">Shared pool, no limits</button><button data-v="quota">Per-tenant quotas</button><button data-v="prio">Priority classes</button><button data-v="isolate">Dedicated capacity for tier 1</button></div>
+      <div class="tenants" id="tenBars" style="margin-top:12px"></div>
+      <div class="stats" style="margin-top:12px">
+        <div class="stat acc"><div class="k">Tier-1 p95 latency</div><div class="v" id="tLat" style="font-size:18px">–</div></div>
+        <div class="stat bad"><div class="k">Tier-1 SLO breached</div><div class="v" id="tBreach" style="font-size:18px">–</div></div>
+        <div class="stat good"><div class="k">Fleet utilization</div><div class="v" id="tUtil" style="font-size:18px">–</div></div>
+      </div>
+      <div class="callout" id="tInfo" style="margin-top:12px"><div class="ico">🏢</div><div class="body"><p style="margin:0"></p></div></div>
+    </div>
+  </div>
+
+  <div class="table-wrap">
+    <table class="t">
+      <thead><tr><th>Isolation dimension</th><th>Risk if shared</th><th>Control</th></tr></thead>
+      <tbody>
+        <tr><td><b>Data</b></td><td>One tenant's documents retrieved for another</td><td>ACL filters inside retrieval, tested automatically (Chapters 20, 21)</td></tr>
+        <tr><td><b>Adapters / fine-tunes</b></td><td>Wrong adapter applied to a request</td><td>Adapter id bound to the tenant, asserted at load time (Chapter 17)</td></tr>
+        <tr><td><b>Capacity</b></td><td>One tenant's spike starves everyone</td><td>Quotas, priority classes, admission control</td></tr>
+        <tr><td><b>Cache</b></td><td>A cached response served across tenants</td><td>Tenant id in the cache key — always, even for “public” content</td></tr>
+        <tr><td><b>Logs</b></td><td>Support engineers seeing other tenants' content</td><td>Scoped access, redaction, short retention</td></tr>
+        <tr><td><b>Cost</b></td><td>Unattributable spend</td><td>Tenant tag on every request and every GPU-second</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="callout danger">
+    <div class="ico">🔑</div>
+    <div class="body"><div class="title">The cache key is a security boundary</div>
+      <p>A semantic cache that returns tenant A's answer to tenant B is a data breach that looks like a performance optimisation. Include the tenant (and the user's permission set, where retrieval is involved) in every cache key, and write a test that asserts cross-tenant misses. This is a classic, embarrassing and entirely preventable incident.</p></div>
+  </div>
+
+  <h2>Self-service: the golden path</h2>
+  <div class="golden">
+    <div class="r"><b>1</b><span><b>Register</b> the use case: owner, risk tier, data classification, expected volume. Generates the governance record (Chapter 37) rather than a separate document.</span></div>
+    <div class="r"><b>2</b><span><b>Get credentials</b> scoped to that use case, with default quotas and a cost budget attached.</span></div>
+    <div class="r"><b>3</b><span><b>Start from a template</b>: a working repo with the SDK, prompt versioning, an eval harness and tracing already wired in.</span></div>
+    <div class="r"><b>4</b><span><b>Bring an eval set</b> — the platform requires one before production access. This single requirement does more for quality than any review board.</span></div>
+    <div class="r"><b>5</b><span><b>Ship behind the standard rollout</b>: shadow, canary, guardrails, automatic rollback (Chapter 33) — provided by the platform, not reimplemented per team.</span></div>
+    <div class="r"><b>6</b><span><b>Get a dashboard for free</b>: latency, cost, quality samples, fallback rate, quota headroom, per tenant.</span></div>
+  </div>
+
+  <div class="callout tip">
+    <div class="ico">🛤️</div>
+    <div class="body"><div class="title">Make the safe path the easy path</div>
+      <p>Platform teams fail when they act as gatekeepers — a review queue that teams route around. They succeed when the paved road is genuinely faster than doing it yourself: a template that works in ten minutes, observability you'd otherwise have to build, and quotas that protect you from your own bugs. Governance that arrives as a side effect of the golden path is the only kind that scales.</p></div>
+  </div>
+
+  <h2>Build or buy</h2>
+  <div class="split">
+    <div class="card"><h4 class="mt0">Buy / adopt</h4><p class="small mb0">Gateways, tracing, prompt management, eval tooling and vector databases are commodity now. Buying gets you a working platform this quarter — and the integration work is still real, so budget for it.</p></div>
+    <div class="card"><h4 class="mt0">Build</h4><p class="small mb0">Build what encodes <i>your</i> policy: tenancy model, routing rules, quota semantics, governance records, and the glue to your identity and billing systems. These are the parts no vendor can know.</p></div>
+  </div>
+
+  <div class="callout danger"><div class="ico">⚠️</div><div class="body"><div class="title">Common mistakes</div>
+    <ul class="mb0">
+      <li><b>A thick gateway.</b> Prompts and business logic inside it make every team wait on the platform team.</li>
+      <li><b>No tenant in the cache key.</b> A cross-tenant leak presented as a latency improvement.</li>
+      <li><b>Shared pool with no quotas.</b> One team's batch job takes the interactive SLO down at 2pm.</li>
+      <li><b>Untested fallback chains.</b> Discovered to be broken during the outage they exist for.</li>
+      <li><b>Platform as gatekeeper.</b> Teams route around it, and you lose the visibility that was the point.</li>
+      <li><b>No cost attribution from day one.</b> Retrofitting tags across 14 services is far harder than starting with them.</li>
+    </ul></div></div>
+
+  <div class="callout interview"><div class="ico">🎤</div><div class="body"><div class="title">Interview drill</div>
+    <p class="small" style="margin:10px 0 0"><b>Warm-up:</b> Why put an AI gateway in front of a vendor API rather than letting each service call it directly?</p>
+    <details class="ans"><summary>How a strong answer sounds</summary><div>Because the cross-cutting concerns have to live somewhere: authentication and tenancy, per-team quotas and spend caps, caching, consistent logging and redaction for audit, safety filtering, and cost attribution. It also buys portability — switching or adding a provider becomes a config change rather than a change in every service — and it gives you one place to implement fallbacks when a provider degrades. The discipline is keeping it thin: it should be latency-cheap and free of business logic, or it becomes the bottleneck it was meant to remove.</div></details>
+    <p class="small" style="margin:10px 0 0"><b>Deeper:</b> Design multi-tenancy for an AI platform serving 200 enterprise customers.</p>
+    <details class="ans"><summary>How a strong answer sounds</summary><div>Isolation on six axes. Data: per-tenant retrieval indexes or strict ACL filters applied during search, with an automated cross-tenant test. Models: one shared base with per-tenant LoRA adapters served in the same batch, adapter id bound to the tenant and asserted at load (Chapter 17). Capacity: priority classes with per-tenant token quotas and admission control so no tenant can starve another, plus dedicated capacity for the few that pay for it. Cache: tenant and permission set in every key. Logs: scoped access, redaction, per-tenant retention honouring their contract. Cost: every request and GPU-second tagged for attribution and billing. On top of that, per-tenant dashboards and quota headroom alerts, because the support question “why is it slow for us?” must be answerable in one click. And the isolation properties get automated tests, because they are security properties, not performance ones.</div></details>
+  </div></div>
+
+  <div class="takeaways">
+    <h3>🧠 Key takeaways</h3>
+    <ul>
+      <li>A thin gateway centralises auth, quotas, routing, caching, logging and cost attribution.</li>
+      <li>Routing by capability and difficulty is the biggest cost lever; fallback chains are a reliability feature.</li>
+      <li>Isolate data, adapters, capacity, cache, logs and cost — and test the isolation.</li>
+      <li>A golden path with a mandatory eval set beats a review board.</li>
+      <li>Buy commodity tooling; build the parts that encode your tenancy, policy and billing.</li>
+    </ul>
+  </div>
+
+  <div class="quiz-wrap">
+    <h2>Check your understanding</h2>
+    <div class="quiz-score"></div>
+
+    <div class="quiz" data-answer="1">
+      <p class="q">Which belongs in the AI gateway?</p>
+      <div class="opts">
+        <button class="opt">Retrieval and prompt templates for each product</button>
+        <button class="opt">Per-tenant quotas, routing, caching, logging and cost attribution</button>
+        <button class="opt">Agent orchestration logic</button>
+        <button class="opt">Business rules for refunds</button>
+      </div>
+      <div class="explain">Cross-cutting infrastructure concerns belong in the gateway; application logic belongs in applications, or the platform becomes everyone's bottleneck.</div>
+    </div>
+
+    <div class="quiz" data-answer="2">
+      <p class="q">Your semantic cache returns a stored answer to a different customer. What went wrong?</p>
+      <div class="opts">
+        <button class="opt">The similarity threshold was too high</button>
+        <button class="opt">The cache was too large</button>
+        <button class="opt">The tenant (and permission set) wasn't part of the cache key</button>
+        <button class="opt">The embedding model changed</button>
+      </div>
+      <div class="explain">A cross-tenant cache hit is a data breach. Tenant identity belongs in every key, with an automated test asserting cross-tenant misses.</div>
+    </div>
+
+    <div class="quiz" data-answer="0">
+      <p class="q">One team's nightly batch job pushes interactive p95 latency over the SLO. What's the fix?</p>
+      <div class="opts">
+        <button class="opt">Priority classes and per-tenant quotas with admission control</button>
+        <button class="opt">A bigger model</button>
+        <button class="opt">More aggressive caching</button>
+        <button class="opt">Asking them to run it later</button>
+      </div>
+      <div class="explain">Interactive and batch traffic should never compete on equal terms. Separate queues with weights, or separate pools, make it structural rather than social.</div>
+    </div>
+
+    <div class="quiz" data-answer="3">
+      <p class="q">Why require an eval set before granting production access?</p>
+      <div class="opts">
+        <button class="opt">It satisfies the vendor contract</button>
+        <button class="opt">It reduces GPU cost</button>
+        <button class="opt">It speeds up inference</button>
+        <button class="opt">It's the cheapest lever the platform has on quality, and it makes every later change measurable</button>
+      </div>
+      <div class="explain">Teams without evals ship on anecdote and cannot safely change anything afterwards. Requiring one at the door does more than any review meeting.</div>
+    </div>
+
+    <div class="quiz" data-answer="1">
+      <p class="q">What is the risk of an untested fallback chain?</p>
+      <div class="opts">
+        <button class="opt">It uses more memory</button>
+        <button class="opt">It fails during the outage it exists for, or silently becomes permanent and degrades quality unnoticed</button>
+        <button class="opt">It breaks caching</button>
+        <button class="opt">It increases cost per token</button>
+      </div>
+      <div class="explain">Exercise fallbacks deliberately (game days, forced failures) and alert on fallback rate — a silent permanent fallback is a quality regression with no error attached.</div>
+    </div>
+  </div>
+</main>
+<script src="assets/app.js"></script>
+<script>
+(function(){
+  const { $, $$, clamp, fmt } = ML;
+
+  /* ================= routing ================= */
+  const CLASSES = [
+    { n: 'Simple lookups / FAQ', share: 0.42, needBig: false },
+    { n: 'Summarisation', share: 0.22, needBig: false },
+    { n: 'Structured extraction', share: 0.14, needBig: false },
+    { n: 'Multi-step reasoning', share: 0.14, needBig: true },
+    { n: 'Complex code generation', share: 0.08, needBig: true },
+  ];
+  const MODELS = {
+    small: { n: 'self-hosted 8B', cost: 0.35, lat: 320, qSimple: 0.94, qHard: 0.58 },
+    large: { n: 'self-hosted 70B', cost: 2.10, lat: 900, qSimple: 0.97, qHard: 0.83 },
+    frontier: { n: 'frontier API', cost: 6.80, lat: 1400, qSimple: 0.98, qHard: 0.93 },
+  };
+  function route() {
+    const mode = $('#routeSeg').dataset.value || 'all-big';
+    let cost = 0, qual = 0, lat = 0;
+    const rows = CLASSES.map(c => {
+      let m, extra = 0;
+      if (mode === 'all-big') m = 'frontier';
+      else if (mode === 'static') m = c.needBig ? 'frontier' : 'small';
+      else if (mode === 'classifier') m = c.needBig ? 'frontier' : (c.n.includes('Structured') ? 'large' : 'small');
+      else { m = c.needBig ? 'large' : 'small'; extra = c.needBig ? 0.18 : 0.04; }   // cascade: some escalate
+      const mm = MODELS[m];
+      const q = c.needBig ? mm.qHard : mm.qSimple;
+      const cEff = mm.cost * (1 + extra * 3);
+      const qEff = clamp(q + extra * 0.5, 0, 0.99);
+      cost += c.share * cEff; qual += c.share * qEff; lat += c.share * mm.lat * (1 + extra);
+      return `<tr><td>${c.n}</td><td>${(c.share * 100).toFixed(0)}%</td><td>${mm.n}${extra ? ' + escalation' : ''}</td><td class="n">$${cEff.toFixed(2)}</td><td class="n">${(qEff * 100).toFixed(0)}%</td></tr>`;
+    });
+    $('#routeRows').innerHTML = rows.join('');
+    const baseCost = CLASSES.reduce((s, c) => s + c.share * MODELS.frontier.cost, 0);
+    $('#rCost').textContent = '$' + cost.toFixed(2);
+    $('#rQual').textContent = (qual * 100).toFixed(1) + '%';
+    $('#rLat').textContent = lat.toFixed(0) + ' ms';
+    $('#rDelta').textContent = ((cost / baseCost - 1) * 100).toFixed(0) + '%';
+    const notes = {
+      'all-big': `<b>Everything to the frontier model.</b> Highest quality, highest cost, highest latency — and 78% of the traffic didn't need it. This is where nearly every product starts, and it is the correct starting point: ship first, then measure which classes can be downgraded without anyone noticing.`,
+      static: `<b>Static routing by use case.</b> Each product surface is pinned to a model by a human decision. Cheap to implement, transparent, and it captures most of the available saving. The weakness is that it can't react to an unusually hard request inside an “easy” surface.`,
+      classifier: `<b>Classifier-based routing.</b> A small model predicts difficulty per request and picks a tier. More adaptive, and it introduces a new failure mode — misrouting — so the classifier needs its own eval and a bias toward the safer (bigger) model when uncertain.`,
+      cascade: `<b>Cascade with verification.</b> Try the cheap model first, check the answer (schema validity, a verifier, self-consistency, retrieval support), escalate only on failure. The best cost/quality frontier here — blended quality ${(qual * 100).toFixed(1)}% at ${((cost / baseCost - 1) * 100).toFixed(0)}% of baseline cost — and the most engineering to build, because the verifier is the hard part (Chapter 27).`,
+    };
+    $('#rInfo p').innerHTML = notes[mode];
+  }
+  $('#routeSeg').addEventListener('segchange', route);
+  route();
+
+  /* ================= noisy neighbour ================= */
+  const TENANTS = [
+    { n: 'Tier 1 · checkout', demand: 30, tier: 1 },
+    { n: 'Tier 1 · support', demand: 25, tier: 1 },
+    { n: 'Tier 2 · analytics', demand: 20, tier: 2 },
+    { n: 'Tier 3 · batch job', demand: 140, tier: 3 },
+  ];
+  function tenancy() {
+    const mode = $('#tenSeg').dataset.value || 'none';
+    const CAP = 100;
+    let alloc;
+    const total = TENANTS.reduce((s, t) => s + t.demand, 0);
+    if (mode === 'none') alloc = TENANTS.map(t => CAP * t.demand / total);
+    else if (mode === 'quota') alloc = TENANTS.map(t => Math.min(t.demand, t.tier === 1 ? 35 : t.tier === 2 ? 25 : 20));
+    else if (mode === 'prio') {
+      let left = CAP; alloc = TENANTS.map(() => 0);
+      [1, 2, 3].forEach(tier => {
+        TENANTS.forEach((t, i) => { if (t.tier === tier) { const g = Math.min(t.demand, left); alloc[i] = g; left -= g; } });
+      });
+    } else {
+      alloc = TENANTS.map(t => t.tier === 1 ? Math.min(t.demand, 40) : 0);
+      let left = CAP - alloc.reduce((a, b) => a + b, 0);
+      TENANTS.forEach((t, i) => { if (t.tier !== 1) { const g = Math.min(t.demand, left * (t.tier === 2 ? 0.4 : 0.6)); alloc[i] = g; } });
+    }
+    const used = alloc.reduce((a, b) => a + b, 0);
+    $('#tenBars').innerHTML = TENANTS.map((t, i) => {
+      const got = alloc[i], need = t.demand;
+      const satisfied = clamp(got / need, 0, 1);
+      return `<div class="r"><span>${t.n}</span><div class="tk"><i style="width:${(satisfied * 100).toFixed(0)}%;background:${t.tier === 1 ? 'var(--accent)' : t.tier === 2 ? 'var(--accent-2)' : 'var(--amber)'}"></i><i style="width:${((1 - satisfied) * 100).toFixed(0)}%;background:var(--red-soft)"></i></div><span class="v">${(satisfied * 100).toFixed(0)}% served</span></div>`;
+    }).join('') + `<div class="small muted" style="margin-top:4px">red = demand that queued or was rejected</div>`;
+    const t1 = TENANTS.map((t, i) => t.tier === 1 ? alloc[i] / t.demand : null).filter(v => v !== null);
+    const t1sat = t1.reduce((a, b) => a + b, 0) / t1.length;
+    $('#tLat').textContent = (120 / Math.max(0.15, t1sat)).toFixed(0) + ' ms';
+    $('#tBreach').textContent = t1sat < 0.98 ? 'yes ❌' : 'no ✅';
+    $('#tUtil').textContent = (used / CAP * 100).toFixed(0) + '%';
+    const notes = {
+      none: `🚨 <b>No isolation.</b> The batch tenant has 140 units of demand against a 100-unit cluster, so fair-share allocation starves the interactive tenants — their latency rises and the SLO breaks, caused entirely by a workload with no deadline at all. This is the single most common multi-tenant failure.`,
+      quota: `✅ <b>Per-tenant quotas.</b> Each tenant is capped, so the batch job cannot consume more than its share. Simple and effective — the cost is that quotas are static, so spare capacity goes unused when a tenant is quiet (utilization ${(used / CAP * 100).toFixed(0)}%).`,
+      prio: `✅ <b>Priority classes.</b> Tier 1 is served first, tier 3 gets whatever is left. Interactive SLOs hold and the cluster stays busy, because low-priority work absorbs the slack. The batch job simply takes longer, which is exactly the right trade.`,
+      isolate: `✅ <b>Dedicated capacity for tier 1.</b> The strongest guarantee and the least efficient: reserved capacity sits idle when tier 1 is quiet. Appropriate when a contract specifies it, or when the blast radius of noisy-neighbour interference is commercially unacceptable.`,
+    };
+    $('#tInfo p').innerHTML = notes[mode];
+  }
+  $('#tenSeg').addEventListener('segchange', tenancy);
+  tenancy();
+})();
+</script>
+</body>
+</html>

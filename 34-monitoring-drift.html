@@ -1,0 +1,320 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Monitoring, Drift &amp; ML Observability</title>
+<link rel="stylesheet" href="assets/style.css">
+<script>try{var t=JSON.parse(localStorage.getItem('ml-theme'));if(t)document.documentElement.setAttribute('data-theme',t)}catch(e){}</script>
+<style>
+  .drift-svg { width:100%; height:200px }
+  .drift-svg .ref { fill:var(--accent); opacity:.55 }
+  .drift-svg .cur { fill:var(--amber); opacity:.55 }
+  .drift-svg text { font-size:10.5px; fill:var(--muted); font-family:var(--mono) }
+  .tri { display:grid; gap:8px }
+  .tri .q { padding:12px 14px; border-radius:12px; background:var(--surface-2); border:1px solid var(--border) }
+  .tri .q b { display:block; margin-bottom:8px; font-size:14px }
+  .tri .verdict { padding:14px; border-radius:12px; border:1px solid var(--accent); background:var(--accent-soft); font-size:14px }
+  .logline { font-family:var(--mono); font-size:12px; line-height:1.65; background:var(--surface-2); border:1px solid var(--border); border-radius:12px; padding:12px 14px; white-space:pre-wrap }
+  .layers { display:grid; gap:8px }
+  .layers .r { display:grid; grid-template-columns:130px 1fr; gap:12px; padding:11px 13px; border-radius:12px; background:var(--surface-2); border:1px solid var(--border); font-size:13.5px }
+  .layers .r b { font-family:var(--mono); color:var(--accent) }
+</style>
+</head>
+<body data-chapter="34">
+<main class="content">
+
+  <section class="hero">
+    <div class="eyebrow"><span class="pill accent">Chapter 34</span><span class="pill amber">Expert</span><span class="pill">⏱ 45 min</span></div>
+    <h1>Monitoring, Drift <span class="grad">&amp; ML Observability</span></h1>
+    <p class="lead">A broken web service pages you. A broken model returns 200 OK with a slightly worse answer, every time, for three months. ML monitoring exists because the failure mode is <i>silence</i> — and because the metric you most want to watch usually arrives weeks late.</p>
+    <ul class="objectives">
+      <li>Monitor four layers: system, data, model and business</li>
+      <li>Distinguish data drift, concept drift and label shift, and measure each</li>
+      <li>Watch quality without labels, using prediction and proxy signals</li>
+      <li>Design alerts people don't learn to ignore</li>
+      <li>Triage an ML incident to the right layer quickly</li>
+    </ul>
+  </section>
+
+  <h2>Four layers, four kinds of question</h2>
+  <div class="layers">
+    <div class="r"><b>System</b><span>Is it up and fast? Error rate, p50/p99 latency, saturation, queue depth, GPU memory, cost per request. Familiar, and necessary but nowhere near sufficient.</span></div>
+    <div class="r"><b>Data</b><span>Are the inputs what we expect? Schema, null and default rates, feature distributions, freshness, volume. <b>Most ML incidents start here.</b></span></div>
+    <div class="r"><b>Model</b><span>Is the behaviour stable? Prediction distribution, confidence, per-slice accuracy once labels arrive, calibration, refusal and fallback rates.</span></div>
+    <div class="r"><b>Business</b><span>Is it still useful? Conversion, fraud losses, tickets deflected, escalation rate, complaints. Slow, noisy, and the only thing that actually matters.</span></div>
+  </div>
+
+  <div class="callout tip">
+    <div class="ico">🧾</div>
+    <div class="body"><div class="title">Log one row per prediction</div>
+      <p>Almost all ML observability comes from a single well-designed log line. Without it, every investigation begins with instrumentation work you should have done months earlier.</p>
+      <div class="logline" style="margin-top:8px">{ request_id, timestamp, user_segment, model_name, model_version,
+  features_hash, feature_values (or a sampled subset), defaults_used,
+  prediction, confidence, threshold, decision, latency_ms,
+  fallback_used, prompt_version, cache_hit, cost_estimate }</div>
+      <p class="small muted" style="margin:8px 0 0">Sample heavily if volume or privacy demands it — 1% of requests fully logged is enough to detect drift, and far better than 100% of nothing. Labels join onto this table later by <code>request_id</code>.</p></div>
+  </div>
+
+  <h2>Three kinds of drift</h2>
+  <div class="table-wrap">
+    <table class="t">
+      <thead><tr><th>Type</th><th>What changed</th><th>Example</th><th>Detectable without labels?</th></tr></thead>
+      <tbody>
+        <tr><td><b>Data (covariate) drift</b></td><td>P(x) — the inputs</td><td>A marketing campaign brings a younger user base</td><td>✅ Yes</td></tr>
+        <tr><td><b>Concept drift</b></td><td>P(y|x) — the relationship</td><td>Fraudsters change tactics; the same features now mean something different</td><td>❌ No — needs labels or proxies</td></tr>
+        <tr><td><b>Label shift</b></td><td>P(y) — the base rate</td><td>Fraud attempts triple during a holiday</td><td>⚠️ Partially, via prediction distribution</td></tr>
+        <tr><td><b>Upstream break</b></td><td>The data itself is wrong</td><td>A pipeline change makes a feature always zero</td><td>✅ Yes — and this is the most common of all</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="panel">
+    <div class="panel-head"><div class="dots"><i></i><i></i><i></i></div><span class="p-title">Drift detector</span><span class="p-tag">Interactive</span></div>
+    <div class="panel-body">
+      <div class="seg" id="driftSeg"><button data-v="none" class="active">No drift</button><button data-v="shift">Gradual shift</button><button data-v="spike">New segment appears</button><button data-v="broken">Feature broken (zeros)</button></div>
+      <div class="svg-scroll"><svg id="driftSvg" class="diagram drift-svg" viewBox="0 0 640 200"></svg></div>
+      <div class="stats">
+        <div class="stat acc"><div class="k">PSI</div><div class="v" id="dPsi">–</div></div>
+        <div class="stat"><div class="k">KS statistic</div><div class="v" id="dKs">–</div></div>
+        <div class="stat good"><div class="k">Null / default rate</div><div class="v" id="dNull">–</div></div>
+        <div class="stat bad"><div class="k">Alert</div><div class="v" id="dAlert" style="font-size:15px">–</div></div>
+      </div>
+      <div class="callout" id="dInfo" style="margin-top:12px"><div class="ico">📡</div><div class="body"><p style="margin:0"></p></div></div>
+      <div class="legend"><span><i style="background:var(--accent)"></i>reference (training)</span><span><i style="background:var(--amber)"></i>current (production)</span></div>
+      <p class="small muted">Rules of thumb for PSI: &lt;0.1 stable, 0.1–0.25 moderate shift worth investigating, &gt;0.25 significant. Treat them as triggers for a look, not as automatic retraining decisions.</p>
+    </div>
+  </div>
+
+  <div class="callout warn">
+    <div class="ico">🔕</div>
+    <div class="body"><div class="title">Drift is a symptom, not a verdict</div>
+      <p>Inputs can drift with no effect on accuracy, and accuracy can collapse with no visible input drift. Alert on drift to prompt an <i>investigation</i>, and reserve paging for things that map to user harm: the fallback rate, the null-rate spike, the business metric, the slice that broke. Teams that page on every PSI excursion stop reading the alerts within a month.</p></div>
+  </div>
+
+  <h2>Monitoring quality when labels are late</h2>
+  <p>Fraud labels take 60 days. Churn labels take 30. Loan defaults take years. You cannot wait, so you watch leading indicators.</p>
+
+  <div class="grid c3">
+    <div class="card feature reveal"><div class="f-ico">📈</div><h4>Prediction drift</h4><p>The distribution of scores the model outputs. If the mean predicted fraud rate doubles overnight, something changed — inputs, population, or the model.</p></div>
+    <div class="card feature reveal"><div class="f-ico" style="background:var(--accent-2-soft)">🧑‍⚖️</div><h4>Proxy labels</h4><p>Human review outcomes, early signals (a chargeback filed, a session abandoned), rules-based checks. Biased, but fast — and correlated enough to be an alarm.</p></div>
+    <div class="card feature reveal"><div class="f-ico" style="background:var(--green-soft)">🎯</div><h4>Sampled ground truth</h4><p>Deliberately label a small random sample continuously. Expensive per item and the only unbiased signal you'll have before the real labels land.</p></div>
+  </div>
+
+  <div class="callout tip">
+    <div class="ico">⏳</div>
+    <div class="body"><div class="title">Backfill your dashboards</div>
+      <p>When labels finally arrive, recompute historical performance and write it back. You then get an honest curve of “how good was the model in week 12?” that's simply late — which is what tunes your leading indicators. Without backfilled evaluation you never learn whether your proxies were telling the truth.</p></div>
+  </div>
+
+  <h2>Alerting that survives contact with a team</h2>
+  <div class="table-wrap">
+    <table class="t">
+      <thead><tr><th>Principle</th><th>In practice</th></tr></thead>
+      <tbody>
+        <tr><td><b>Page on user impact</b></td><td>Error rate, latency SLO, fallback rate, a collapsed business metric. Not on PSI.</td></tr>
+        <tr><td><b>Ticket on investigations</b></td><td>Drift, rising null rates, slice degradation — a human looks within a day.</td></tr>
+        <tr><td><b>Compare like with like</b></td><td>Week-over-week at the same hour; traffic is seasonal and hourly thresholds page every Monday.</td></tr>
+        <tr><td><b>Alert on rate of change</b></td><td>A metric moving 20% in an hour matters more than its absolute level.</td></tr>
+        <tr><td><b>Every alert has a runbook</b></td><td>What it means, what to check first, who owns it, how to mitigate.</td></tr>
+        <tr><td><b>Review and delete</b></td><td>An alert that fired 40 times without action is noise — fix the threshold or remove it.</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h2>Triage</h2>
+  <div class="panel">
+    <div class="panel-head"><div class="dots"><i></i><i></i><i></i></div><span class="p-title">“The model got worse” — find the layer</span><span class="p-tag">Interactive</span></div>
+    <div class="panel-body">
+      <div class="tri" id="triage"></div>
+      <div id="triVerdict" style="margin-top:12px"></div>
+    </div>
+  </div>
+
+  <h2>What's different for LLM systems</h2>
+  <div class="table-wrap">
+    <table class="t">
+      <thead><tr><th>Signal</th><th>Why it matters</th></tr></thead>
+      <tbody>
+        <tr><td>Refusal and over-refusal rate</td><td>A safety change or a prompt edit can silently make the assistant useless</td></tr>
+        <tr><td>Output length distribution</td><td>Drifting length is a cheap early indicator of a model or prompt change — and of cost</td></tr>
+        <tr><td>Schema/parse failure rate</td><td>Structured-output regressions break downstream code before anyone notices quality</td></tr>
+        <tr><td>Retrieval hit rate &amp; citation validity</td><td>RAG quality collapses from the retrieval side far more often than the generation side (Ch 21)</td></tr>
+        <tr><td>Cache hit rate, tokens per request, cost</td><td>A prompt change that breaks prefix caching multiplies the bill overnight (Ch 19)</td></tr>
+        <tr><td>Sampled quality scores</td><td>Continuous judge or human grading on a traffic sample — the only real quality signal (Ch 35)</td></tr>
+        <tr><td>Thumbs-down and escalation rate</td><td>Noisy, biased, immediate — the best cheap alarm you have</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="callout danger"><div class="ico">⚠️</div><div class="body"><div class="title">Common mistakes</div>
+    <ul class="mb0">
+      <li><b>Monitoring only system metrics.</b> Uptime is 100% while quality quietly halves.</li>
+      <li><b>No per-prediction log.</b> Every investigation then starts with a week of instrumentation.</li>
+      <li><b>Paging on drift.</b> Alert fatigue within a month, and then nobody reads the real alerts either.</li>
+      <li><b>Aggregate-only monitoring.</b> A slice can collapse entirely while the average moves 0.3%.</li>
+      <li><b>No backfilled evaluation.</b> You never learn whether your leading indicators were right.</li>
+      <li><b>Ignoring the null/default rate.</b> The fastest signal of an upstream break, and the most often unmonitored.</li>
+    </ul></div></div>
+
+  <div class="callout interview"><div class="ico">🎤</div><div class="body"><div class="title">Interview drill</div>
+    <p class="small" style="margin:10px 0 0"><b>Warm-up:</b> How do you monitor a model whose labels arrive 60 days late?</p>
+    <details class="ans"><summary>How a strong answer sounds</summary><div>Layered. Immediately: input data quality — schema, null and default rates, feature distributions against a training reference — plus the prediction distribution and the rate at which predictions cross the decision threshold. Same-day: proxies such as human-review agreement, early outcome signals and complaint rates. Continuously: a small randomly sampled set sent for labelling so I have an unbiased, if small, quality estimate. Then, as real labels land, backfill the historical evaluation and check whether the leading indicators moved when quality did — that calibration is what makes the early signals trustworthy rather than decorative.</div></details>
+    <p class="small" style="margin:10px 0 0"><b>Deeper:</b> Prediction volume is normal, latency is normal, but conversion dropped 8% overnight. Walk through it.</p>
+    <details class="ans"><summary>How a strong answer sounds</summary><div>First, is it the model at all? Check whether anything deployed — model version, prompt version, feature pipeline, upstream service, or a product change elsewhere in the funnel. Then the data layer: null and default rates per feature, and distributions versus reference; a single feature going constant is the classic cause and shows up instantly. Then the model layer: prediction distribution and threshold-crossing rate, by slice — an 8% aggregate drop is often one segment collapsing. Then serving: fallback rate and cache behaviour, since a silent fallback to a smaller model looks healthy on every system metric. If all of that is clean, it's probably not the ML system — traffic mix, a marketing campaign or an upstream page change can move conversion without anything in my stack changing. Throughout, I'd compare week-over-week at the same hour rather than to yesterday.</div></details>
+  </div></div>
+
+  <div class="takeaways">
+    <h3>🧠 Key takeaways</h3>
+    <ul>
+      <li>Monitor system, data, model and business layers — system metrics alone hide every ML failure.</li>
+      <li>Data drift is detectable without labels; concept drift is not, so use proxies and sampled ground truth.</li>
+      <li>Alert on user impact, ticket on drift, and give every alert a runbook.</li>
+      <li>Log one row per prediction and backfill evaluation when labels arrive.</li>
+      <li>Monitor slices: the average is the last thing to move.</li>
+    </ul>
+  </div>
+
+  <div class="quiz-wrap">
+    <h2>Check your understanding</h2>
+    <div class="quiz-score"></div>
+
+    <div class="quiz" data-answer="2">
+      <p class="q">Fraudsters change tactics but your input distributions look unchanged. What kind of drift is this?</p>
+      <div class="opts">
+        <button class="opt">Covariate drift</button>
+        <button class="opt">Label shift</button>
+        <button class="opt">Concept drift — P(y|x) changed</button>
+        <button class="opt">No drift</button>
+      </div>
+      <div class="explain">The same inputs now imply a different outcome. It is invisible to input monitoring, which is exactly why proxies and sampled labels matter.</div>
+    </div>
+
+    <div class="quiz" data-answer="1">
+      <p class="q">Which signal most quickly reveals “an upstream pipeline broke and a feature is now constant”?</p>
+      <div class="opts">
+        <button class="opt">Business conversion rate</button>
+        <button class="opt">Feature null/default rate and distribution vs reference</button>
+        <button class="opt">GPU utilization</button>
+        <button class="opt">Model accuracy once labels arrive</button>
+      </div>
+      <div class="explain">It shows up within minutes at the data layer. Accuracy will show it too — in sixty days.</div>
+    </div>
+
+    <div class="quiz" data-answer="0">
+      <p class="q">PSI for a feature is 0.32. What's the appropriate response?</p>
+      <div class="opts">
+        <button class="opt">Raise a ticket and investigate — significant shift, but not necessarily user harm</button>
+        <button class="opt">Page the on-call engineer immediately</button>
+        <button class="opt">Retrain automatically</button>
+        <button class="opt">Ignore it below 0.5</button>
+      </div>
+      <div class="explain">Drift is a symptom. It may be a harmless population change or the first sign of a break — investigate, but reserve paging for signals tied to user impact.</div>
+    </div>
+
+    <div class="quiz" data-answer="3">
+      <p class="q">Why backfill evaluation metrics when delayed labels arrive?</p>
+      <div class="opts">
+        <button class="opt">To reduce storage costs</button>
+        <button class="opt">To satisfy the data contract</button>
+        <button class="opt">To retrain faster</button>
+        <button class="opt">To learn whether your leading indicators actually predicted quality changes</button>
+      </div>
+      <div class="explain">Backfilled truth is how you calibrate the proxies you rely on day to day — otherwise they're guesses you never checked.</div>
+    </div>
+
+    <div class="quiz" data-answer="1">
+      <p class="q">Aggregate accuracy is flat, but one customer segment has collapsed. What was missing?</p>
+      <div class="opts">
+        <button class="opt">Latency monitoring</button>
+        <button class="opt">Per-slice monitoring with its own thresholds</button>
+        <button class="opt">A bigger model</button>
+        <button class="opt">More frequent retraining</button>
+      </div>
+      <div class="explain">A small segment can fail completely and barely move the mean. Track key slices individually and alert on each.</div>
+    </div>
+  </div>
+</main>
+<script src="assets/app.js"></script>
+<script>
+(function(){
+  const { $, $$, clamp } = ML;
+
+  /* ================= drift detector ================= */
+  function drift() {
+    const mode = $('#driftSeg').dataset.value || 'none';
+    let seed = 3;
+    const rnd = () => { seed = (seed * 1103515245 + 12345) % 2147483648; return seed / 2147483648; };
+    const ref = [], cur = [];
+    for (let i = 0; i < 4000; i++) {
+      const g = 45 + (rnd() + rnd() + rnd() - 1.5) * 26;
+      ref.push(clamp(g, 0, 100));
+      let c;
+      if (mode === 'none') c = 45 + (rnd() + rnd() + rnd() - 1.5) * 26;
+      else if (mode === 'shift') c = 58 + (rnd() + rnd() + rnd() - 1.5) * 26;
+      else if (mode === 'spike') c = rnd() < 0.28 ? 12 + rnd() * 10 : 45 + (rnd() + rnd() + rnd() - 1.5) * 26;
+      else c = rnd() < 0.62 ? 0 : 45 + (rnd() + rnd() + rnd() - 1.5) * 26;
+      cur.push(clamp(c, 0, 100));
+    }
+    const B = 20, hr = new Array(B).fill(0), hc = new Array(B).fill(0);
+    ref.forEach(v => hr[clamp(Math.floor(v / 100 * B), 0, B - 1)]++);
+    cur.forEach(v => hc[clamp(Math.floor(v / 100 * B), 0, B - 1)]++);
+    const mx = Math.max(...hr, ...hc);
+    let g = '';
+    for (let i = 0; i < B; i++) {
+      const x = 35 + i * (590 / B);
+      g += `<rect class="ref" x="${x}" y="${160 - hr[i] / mx * 135}" width="${590 / B - 2}" height="${hr[i] / mx * 135}"/>`;
+      g += `<rect class="cur" x="${x}" y="${160 - hc[i] / mx * 135}" width="${590 / B - 2}" height="${hc[i] / mx * 135}"/>`;
+    }
+    g += `<line stroke="var(--border-strong)" x1="35" y1="160" x2="625" y2="160"/><text x="35" y="178">feature: days_since_signup (bucketed)</text>`;
+    $('#driftSvg').innerHTML = g;
+
+    let psi = 0;
+    for (let i = 0; i < B; i++) {
+      const a = Math.max(hr[i] / ref.length, 1e-5), b = Math.max(hc[i] / cur.length, 1e-5);
+      psi += (b - a) * Math.log(b / a);
+    }
+    let cdfR = 0, cdfC = 0, ks = 0;
+    for (let i = 0; i < B; i++) { cdfR += hr[i] / ref.length; cdfC += hc[i] / cur.length; ks = Math.max(ks, Math.abs(cdfR - cdfC)); }
+    const nulls = cur.filter(v => v === 0).length / cur.length;
+    $('#dPsi').textContent = psi.toFixed(3);
+    $('#dKs').textContent = ks.toFixed(3);
+    $('#dNull').textContent = (nulls * 100).toFixed(1) + '%';
+    const notes = {
+      none: ['✅ none', 'Distributions overlap; PSI is comfortably under 0.1. This is what the monitor should show most days — and the reason to keep watching is that it stops looking like this without anyone deploying anything.'],
+      shift: ['🎫 ticket', `A real but gradual population shift (PSI ${psi.toFixed(2)}) — a campaign, a new market, a seasonal change. It may not hurt accuracy at all, so this should open an investigation rather than page anyone. Check per-slice performance and whether the training data still covers this range.`],
+      spike: ['🎫 ticket', `A new sub-population has appeared (a cluster of very new accounts) alongside the existing one. Aggregate statistics like the mean barely move, which is why distribution comparison matters more than summary statistics. Check whether the model has ever seen this segment and how it performs on it.`],
+      broken: ['🚨 page', `<b>62% of values are exactly zero.</b> That is not drift, it is a break — an upstream job failed or a join silently stopped matching. This is the one to page on: it maps directly to degraded predictions right now, and the null/default rate is the fastest signal you have.`],
+    };
+    $('#dAlert').innerHTML = notes[mode][0];
+    $('#dInfo p').innerHTML = notes[mode][1];
+  }
+  $('#driftSeg').addEventListener('segchange', drift);
+  drift();
+
+  /* ================= triage ================= */
+  const QS = [
+    ['Did anything deploy in the last 24 hours?', [['yes', 'Yes — model, prompt, features or an upstream service'], ['no', 'No deployments anywhere']]],
+    ['Are input distributions and null rates normal?', [['yes', 'Normal'], ['no', 'A feature shifted or nulls spiked']]],
+    ['Is the fallback / error / timeout rate elevated?', [['yes', 'Yes'], ['no', 'No']]],
+    ['Is the drop concentrated in one slice?', [['yes', 'Yes — one segment, locale or device'], ['no', 'Broad across all slices']]],
+  ];
+  const ans = {};
+  function triage() {
+    $('#triage').innerHTML = QS.map(([q, opts], i) =>
+      `<div class="q"><b>${i + 1}. ${q}</b><div class="seg" data-q="${i}">${opts.map(([v, l]) => `<button data-v="${v}" class="${ans[i] === v ? 'active' : ''}">${l}</button>`).join('')}</div></div>`).join('');
+    $$('#triage .seg').forEach(seg => seg.querySelectorAll('button').forEach(b => b.onclick = () => { ans[+seg.dataset.q] = b.dataset.v; triage(); }));
+    if (Object.keys(ans).length < QS.length) { $('#triVerdict').innerHTML = '<p class="small muted">Answer all four for a triage verdict.</p>'; return; }
+    let v;
+    if (ans[1] === 'no') v = ['🧱 Data layer', 'Start upstream. A shifted distribution or a spike in nulls means the pipeline, a join, or a producer changed. Compare the feature against its training reference, find the exact time it changed, and correlate with upstream deploy history. Fixing the data usually fixes the model — retraining on broken data does not.'];
+    else if (ans[2] === 'yes') v = ['⚙️ Serving layer', 'Elevated fallbacks or timeouts mean many requests are not being served by the model you think. Check dependency health, feature-store latency, the fallback path’s own quality, and whether retries are amplifying load. A silent fallback to a smaller model looks perfectly healthy on every system metric — which is why the fallback rate must be a monitored signal.'];
+    else if (ans[0] === 'yes') v = ['🚀 Change layer', 'Something shipped. Bisect the deploys — model version, prompt version, feature definitions, upstream services — and roll back the most likely candidate first. This is why pinned versions and a deploy timeline are worth the effort: the question “what changed at 14:00?” should take a minute, not a day.'];
+    else if (ans[3] === 'yes') v = ['🔍 Model / population layer', 'No deploys, clean data, no serving errors, and one slice affected: most likely a real population or behaviour change in that segment — concept drift, a new cohort, or a competitor’s change. Pull the slice’s recent examples, label a sample, and compare against training data coverage. This is the case where retraining is genuinely the answer.'];
+    else v = ['📉 Probably not the ML system', 'No deploys, clean data, no errors, broad effect: look outside the model. Traffic mix, a change elsewhere in the funnel, seasonality, or a measurement change in the metric itself. Confirm with a week-over-week comparison at the same hour and check whether the metric definition changed — an alarming number of “model regressions” are dashboard regressions.'];
+    $('#triVerdict').innerHTML = `<div class="verdict tri"><div class="verdict" style="padding:0;border:0;background:none"><b style="font-size:15px">${v[0]}</b><p style="margin:6px 0 0;font-size:14px">${v[1]}</p></div></div>`;
+  }
+  triage();
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,311 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Experiment Tracking, Registries &amp; Reproducibility</title>
+<link rel="stylesheet" href="assets/style.css">
+<script>try{var t=JSON.parse(localStorage.getItem('ml-theme'));if(t)document.documentElement.setAttribute('data-theme',t)}catch(e){}</script>
+<style>
+  .lin-svg { width:100%; height:270px }
+  .lin-svg .n { cursor:pointer }
+  .lin-svg .n rect { fill:var(--surface-2); stroke:var(--border-strong); stroke-width:1.5 }
+  .lin-svg .n.sel rect { fill:var(--accent-soft); stroke:var(--accent); stroke-width:2.5 }
+  .lin-svg text { font-size:10.5px; fill:var(--text-2); font-family:var(--font); font-weight:600 }
+  .lin-svg .sub { font-size:9px; fill:var(--muted); font-family:var(--mono); font-weight:400 }
+  .detail { font-family:var(--mono); font-size:12.5px; line-height:1.7; background:var(--surface-2); border:1px solid var(--border); border-radius:12px; padding:12px 14px; white-space:pre-wrap; min-height:130px }
+  .repro .r { display:flex; gap:10px; align-items:flex-start; padding:9px 11px; border-radius:10px; background:var(--surface-2); border:1px solid var(--border); font-size:13.5px; margin-bottom:6px }
+  .repro .r.on { border-color:var(--green); background:var(--green-soft) }
+  .repro .r.off { border-color:var(--amber); background:var(--amber-soft) }
+  .card-md { font-family:var(--mono); font-size:12px; line-height:1.6; white-space:pre-wrap; background:var(--surface-2); border:1px solid var(--border); border-radius:12px; padding:12px 14px }
+</style>
+</head>
+<body data-chapter="31">
+<main class="content">
+
+  <section class="hero">
+    <div class="eyebrow"><span class="pill accent">Chapter 31</span><span class="pill amber">Expert</span><span class="pill">⏱ 35 min</span></div>
+    <h1>Experiment Tracking, Registries <span class="grad">&amp; Reproducibility</span></h1>
+    <p class="lead">Six months after a model ships, someone asks: which data was it trained on, who approved it, and can we rebuild it? If the answer involves searching Slack, you don't have an ML platform — you have a collection of notebooks that happened to work.</p>
+    <ul class="objectives">
+      <li>Log everything a run needs to be re-creatable</li>
+      <li>Use a model registry with versions, stages and approvals</li>
+      <li>Trace lineage from raw data to a deployed prediction</li>
+      <li>Choose the right level of reproducibility for the cost</li>
+      <li>Write a model card that answers the questions people actually ask</li>
+    </ul>
+  </section>
+
+  <h2>What a run must record</h2>
+  <p>A training run is a function of many inputs. Record every one of them, automatically, or the run is not a result — it's an anecdote.</p>
+
+  <div class="table-wrap">
+    <table class="t">
+      <thead><tr><th>Category</th><th>Record</th><th>Why</th></tr></thead>
+      <tbody>
+        <tr><td><b>Code</b></td><td>Git commit, diff if dirty, entry point</td><td>“It worked on my branch” is not a version</td></tr>
+        <tr><td><b>Data</b></td><td>Dataset name + immutable version/snapshot id, row count, checksum</td><td>The single most commonly missing item</td></tr>
+        <tr><td><b>Config</b></td><td>Every hyperparameter, resolved (not the template)</td><td>Defaults change; the resolved config is the truth</td></tr>
+        <tr><td><b>Environment</b></td><td>Container digest, library versions, CUDA/driver</td><td>A framework upgrade silently changes numerics</td></tr>
+        <tr><td><b>Hardware</b></td><td>GPU type and count, parallelism layout</td><td>Explains throughput differences and some numeric differences</td></tr>
+        <tr><td><b>Randomness</b></td><td>Seeds for every library, determinism flags</td><td>Distinguishes a real gain from a lucky one</td></tr>
+        <tr><td><b>Outputs</b></td><td>Metrics over time, final metrics per slice, artifacts, logs</td><td>What you'll compare against next quarter</td></tr>
+        <tr><td><b>Provenance</b></td><td>Who ran it, when, why (the ticket or hypothesis)</td><td>Turns a run list into an experiment history</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="callout tip">
+    <div class="ico">⚙️</div>
+    <div class="body"><div class="title">Automatic or it won't happen</div>
+      <p>Manual logging decays within two sprints. Wrap training in a launcher that captures the commit, the resolved config, the environment digest and the dataset version without anyone remembering to. The minimum viable setup is a tracking server, an artifact store, and a rule that nothing untracked reaches production.</p></div>
+  </div>
+
+  <h2>Lineage: from raw event to prediction</h2>
+  <div class="panel">
+    <div class="panel-head"><div class="dots"><i></i><i></i><i></i></div><span class="p-title">Click any node to inspect it</span><span class="p-tag">Interactive</span></div>
+    <div class="panel-body">
+      <div class="svg-scroll"><svg id="linSvg" class="diagram lin-svg" viewBox="0 0 760 270"></svg></div>
+      <div class="detail" id="linDetail"></div>
+      <p class="small muted" style="margin-top:8px">Every arrow is a recorded relationship. When a prediction is disputed — by a customer, a regulator or an incident review — this chain is the answer, and it has to exist <i>before</i> the question is asked.</p>
+    </div>
+  </div>
+
+  <h2>The model registry</h2>
+  <p>A registry is the handoff between experimentation and production: a named, versioned entry per model with its artifacts, metrics, lineage and approval state.</p>
+
+  <div class="grid c4">
+    <div class="card feature reveal"><div class="f-ico">📦</div><h4>Versions</h4><p>Immutable and monotonically numbered. <code>fraud-scorer:v37</code> means one exact artifact, forever.</p></div>
+    <div class="card feature reveal"><div class="f-ico" style="background:var(--accent-2-soft)">🚦</div><h4>Stages</h4><p>staging → shadow → canary → production → archived. Serving asks for a stage, never for a path in someone's bucket.</p></div>
+    <div class="card feature reveal"><div class="f-ico" style="background:var(--green-soft)">✅</div><h4>Gates</h4><p>Promotion requires eval thresholds, slice checks, a signed-off model card, and a named approver.</p></div>
+    <div class="card feature reveal"><div class="f-ico" style="background:var(--pink-soft)">↩️</div><h4>Rollback</h4><p>The previous version stays loadable and deployable in one command. Rehearse this — a rollback you've never tested is a plan, not a capability.</p></div>
+  </div>
+
+  <div class="callout warn">
+    <div class="ico">🏷️</div>
+    <div class="body"><div class="title">Serving should reference a version, not “latest”</div>
+      <p>Pointing production at a floating tag means a training job can change production behaviour without a deployment. Pin the version in the deployment config and change it through the same review process as code — then “what changed at 14:00?” has an answer.</p></div>
+  </div>
+
+  <h2>How reproducible do you need to be?</h2>
+  <div class="panel">
+    <div class="panel-head"><div class="dots"><i></i><i></i><i></i></div><span class="p-title">Reproducibility audit</span><span class="p-tag">Interactive</span></div>
+    <div class="panel-body">
+      <div class="repro" id="reproList"></div>
+      <div class="stats" style="margin-top:12px">
+        <div class="stat acc"><div class="k">Reproducibility level</div><div class="v" id="reproLvl" style="font-size:17px">–</div></div>
+        <div class="stat"><div class="k">Score</div><div class="v" id="reproScore">–</div></div>
+      </div>
+      <div class="callout" id="reproInfo" style="margin-top:12px"><div class="ico">🔁</div><div class="body"><p style="margin:0"></p></div></div>
+    </div>
+  </div>
+
+  <div class="table-wrap">
+    <table class="t">
+      <thead><tr><th>Level</th><th>Means</th><th>Cost</th></tr></thead>
+      <tbody>
+        <tr><td><b>Re-runnable</b></td><td>The same command with the same inputs produces a model of similar quality</td><td>Low — and it is what most teams actually need</td></tr>
+        <tr><td><b>Statistically reproducible</b></td><td>Repeats across seeds land within a stated confidence interval</td><td>Moderate: several runs per experiment</td></tr>
+        <tr><td><b>Bit-exact</b></td><td>Identical weights, byte for byte</td><td>High: deterministic kernels, fixed data order, pinned hardware, lost throughput</td></tr>
+        <tr><td><b>Auditable</b></td><td>You can prove which data, code and approvals produced a deployed decision</td><td>Moderate — and often a legal requirement (Chapter 37)</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h2>The model card</h2>
+  <p>A short document shipped with every production model version. It exists so that the person debugging at 2am, the reviewer six months later and the regulator next year all get the same answers.</p>
+
+  <div class="card-md">model: fraud-scorer          version: v37        stage: production
+owner: risk-ml@                approved: 2026-03-14 by J. Okoro (Risk)
+
+intended use    Score card-not-present transactions for manual review.
+                NOT for account closure, credit decisions or pricing.
+training data   txn_events@2026-02-28 (18.4M rows, 2024-03 → 2026-02)
+                labels: chargebacks confirmed ≥60 days after the transaction
+metrics         PR-AUC 0.612 (prev 0.588) · recall@1% FPR 0.71
+                slices: new accounts 0.54 · EU 0.63 · mobile 0.60
+limitations     Weak on accounts &lt;7 days old; labels lag 60 days, so recent
+                fraud patterns are under-represented. Not evaluated outside EU/UK.
+ethical         Reviewed for disparate false-positive rate across regions (max
+                ratio 1.18). Human review required before any account action.
+monitoring      PSI on top-20 features; weekly recall backfill as labels land;
+                page if precision@threshold drops &gt;15% week-over-week.
+rollback        registry: fraud-scorer:v36 — one command, verified 2026-03-12.</div>
+
+  <div class="callout tip">
+    <div class="ico">🔬</div>
+    <div class="body"><div class="title">Comparing runs well</div>
+      <p>Log metrics <i>per slice</i>, not just in aggregate, and make comparison a first-class view: sort a sweep by the metric you care about, and look at parallel-coordinate plots to see which hyperparameters actually mattered. Most sweeps show that two parameters dominate and the rest are noise — which is the information you need for the next sweep.</p></div>
+  </div>
+
+  <div class="callout danger"><div class="ico">⚠️</div><div class="body"><div class="title">Common mistakes</div>
+    <ul class="mb0">
+      <li><b>Logging metrics but not the dataset version.</b> The most common gap, and the one that makes a run unreproducible.</li>
+      <li><b>Mutable dataset paths.</b> <code>s3://data/latest/</code> means the same run id refers to different data over time.</li>
+      <li><b>Production pointing at “latest”.</b> Behaviour changes without a deployment and without a record.</li>
+      <li><b>Comparing runs that differ in three things.</b> Change one variable per experiment or you learn nothing.</li>
+      <li><b>Single-seed conclusions.</b> A 0.4% gain from one seed is usually noise; report mean ± std over three.</li>
+      <li><b>No rollback rehearsal.</b> The first attempt should not be during an incident.</li>
+    </ul></div></div>
+
+  <div class="callout interview"><div class="ico">🎤</div><div class="body"><div class="title">Interview drill</div>
+    <p class="small" style="margin:10px 0 0"><b>Warm-up:</b> A model in production is behaving oddly. What do you need to be able to look up?</p>
+    <details class="ans"><summary>How a strong answer sounds</summary><div>Which registry version is deployed and since when; the run that produced it, with its code commit, resolved config and environment digest; the dataset snapshot it trained on; its evaluation metrics including slices; who approved the promotion; and the monitoring history since deployment. With those I can tell whether behaviour changed because the model changed, the data changed, or the world changed — three very different investigations. If any of that requires asking a person, the platform has a gap worth fixing before the next incident.</div></details>
+    <p class="small" style="margin:10px 0 0"><b>Deeper:</b> Is bit-exact reproducibility worth it?</p>
+    <details class="ans"><summary>How a strong answer sounds</summary><div>Usually not for training. It requires deterministic kernels, fixed collective algorithms, a fixed data order and pinned hardware, and it costs real throughput — for a guarantee that rarely answers a question you actually have. What matters is being able to re-run and land in the same place statistically, and being able to prove provenance for audit. I <i>would</i> insist on determinism in two places: inference, where the same input should give the same output for debugging and caching, and small regression tests, where non-determinism makes failures unreproducible. So: statistical reproducibility plus full lineage as the default, bit-exactness only where a regulator or a specific debugging need requires it.</div></details>
+  </div></div>
+
+  <div class="takeaways">
+    <h3>🧠 Key takeaways</h3>
+    <ul>
+      <li>Capture code, data version, resolved config, environment, hardware, seeds and outputs — automatically.</li>
+      <li>A registry gives immutable versions, stages, promotion gates and a tested rollback.</li>
+      <li>Lineage must link raw data → run → model version → deployment → prediction before you need it.</li>
+      <li>Aim for statistical reproducibility plus auditability; bit-exactness is rarely worth its cost.</li>
+      <li>Ship a model card with intended use, slice metrics, limitations, monitoring and rollback.</li>
+    </ul>
+  </div>
+
+  <div class="quiz-wrap">
+    <h2>Check your understanding</h2>
+    <div class="quiz-score"></div>
+
+    <div class="quiz" data-answer="1">
+      <p class="q">Which missing item most often makes a run unreproducible?</p>
+      <div class="opts">
+        <button class="opt">The learning-rate schedule</button>
+        <button class="opt">The immutable dataset version</button>
+        <button class="opt">The GPU model</button>
+        <button class="opt">The loss curve</button>
+      </div>
+      <div class="explain">Code and config are usually versioned by habit. Data is often referenced by a mutable path, so the same command produces a different model a month later.</div>
+    </div>
+
+    <div class="quiz" data-answer="2">
+      <p class="q">Why should serving reference an explicit model version rather than “latest”?</p>
+      <div class="opts">
+        <button class="opt">It's faster to load</button>
+        <button class="opt">It reduces storage costs</button>
+        <button class="opt">Otherwise a training job can change production behaviour with no deployment or record</button>
+        <button class="opt">It enables quantization</button>
+      </div>
+      <div class="explain">Pinning makes model changes go through the same review and leaves a timestamped record — which is what makes “what changed?” answerable.</div>
+    </div>
+
+    <div class="quiz" data-answer="0">
+      <p class="q">Run A scores 0.842 and run B scores 0.846, each with a single seed. What do you conclude?</p>
+      <div class="opts">
+        <button class="opt">Nothing yet — repeat across seeds and report mean ± std</button>
+        <button class="opt">B is better; ship it</button>
+        <button class="opt">A is more stable</button>
+        <button class="opt">The difference is significant at p &lt; 0.05</button>
+      </div>
+      <div class="explain">Seed variance commonly exceeds that gap. One run is an observation, not a comparison.</div>
+    </div>
+
+    <div class="quiz" data-answer="3">
+      <p class="q">What belongs in a model card that teams most often omit?</p>
+      <div class="opts">
+        <button class="opt">The aggregate accuracy</button>
+        <button class="opt">The training framework version</button>
+        <button class="opt">The number of parameters</button>
+        <button class="opt">Intended use, out-of-scope uses, and known limitations by slice</button>
+      </div>
+      <div class="explain">Those are the parts that prevent misuse — the model being applied to a population or a decision it was never evaluated for.</div>
+    </div>
+
+    <div class="quiz" data-answer="1">
+      <p class="q">Which level of reproducibility is the pragmatic default for most teams?</p>
+      <div class="opts">
+        <button class="opt">Bit-exact weights</button>
+        <button class="opt">Statistically reproducible plus full lineage</button>
+        <button class="opt">None — ML is inherently non-reproducible</button>
+        <button class="opt">Bit-exact only for inference</button>
+      </div>
+      <div class="explain">Matching quality across seeds, with provenance recorded for audit, answers the questions people actually ask — without the throughput cost of forcing determinism everywhere.</div>
+    </div>
+  </div>
+</main>
+<script src="assets/app.js"></script>
+<script>
+(function(){
+  const { $, $$ } = ML;
+
+  /* ================= lineage ================= */
+  const NODES = [
+    { id: 'raw', x: 20, y: 30, w: 130, h: 46, t: 'Raw events', s: 'txn_events topic',
+      d: 'source        kafka://txn.events.v3\nretention     90 days hot, 7 years in the lake\ncontract      checkout.completed v3 (payments-team)\npartitioned   by event_date, ~40M rows/day' },
+    { id: 'ds', x: 190, y: 30, w: 150, h: 46, t: 'Dataset snapshot', s: 'txn_events@2026-02-28',
+      d: 'snapshot      txn_events@2026-02-28T00:00:00Z\nrows          18,412,733\nsha256        9f3c71a4…e02b\nsplit         temporal — train ≤2025-12, val 2026-01, test 2026-02\nlabels        chargebacks confirmed ≥60 days after the transaction\nnotes         PII pseudonymised; EU rows carry a deletion key' },
+    { id: 'run', x: 380, y: 30, w: 150, h: 46, t: 'Training run', s: 'run_8831 · 3 seeds',
+      d: 'commit        a41f9c2 (clean tree)\nconfig        lr=3e-4, depth=8, leaves=63, 900 rounds, early stop 50\nenv           ghcr.io/…/trainer@sha256:7c1d…  CUDA 12.4\nhardware      1× A100-40GB, 42 min\nseeds         [11, 12, 13] → PR-AUC 0.612 ± 0.004\nstarted by    a.mensah  ·  ticket RISK-2291' },
+    { id: 'model', x: 570, y: 30, w: 160, h: 46, t: 'Model version', s: 'fraud-scorer:v37',
+      d: 'artifact      s3://models/fraud-scorer/v37/model.safetensors\nsize          14.2 MB (LightGBM, 900 trees)\nmetrics       PR-AUC 0.612 · recall@1%FPR 0.71\nslices        new accounts 0.54 · EU 0.63 · mobile 0.60\ncard          docs/cards/fraud-scorer-v37.md\napproved      2026-03-14 by J. Okoro (Risk)' },
+    { id: 'deploy', x: 570, y: 150, w: 160, h: 46, t: 'Deployment', s: 'prod · eu-west-1',
+      d: 'stage         production (since 2026-03-15 09:12Z)\nrollout       shadow 3d → canary 5% 2d → 100%\npinned        fraud-scorer:v37 (not "latest")\nprevious      v36 — rollback verified 2026-03-12\ntraffic       ~2,400 rps peak' },
+    { id: 'pred', x: 330, y: 150, w: 170, h: 46, t: 'Prediction', s: 'req_a91f… · 0.83',
+      d: 'request       req_a91f7c22  2026-04-02T14:07:11Z\nscore         0.83  → routed to manual review\nmodel         fraud-scorer:v37\nfeatures      logged vector f_2291 (28 features, 1 default-filled)\noutcome       reviewed, released, no chargeback after 90 days\n→ this row becomes training data for v38' },
+    { id: 'feat', x: 330, y: 215, w: 170, h: 40, t: 'Served features', s: 'vector f_2291',
+      d: 'definitions   feature_repo@a41f9c2\nvalues        card_velocity_10m=4, merchant_risk_30d=0.21, …\ndefaults      device_age_days missing → -1 (fetch timeout)\nparity        recomputed offline: max diff 0.4% ✅' },
+  ];
+  const EDGES = [['raw', 'ds'], ['ds', 'run'], ['run', 'model'], ['model', 'deploy'], ['deploy', 'pred'], ['feat', 'pred']];
+  let sel = 'model';
+  function drawLin() {
+    let g = '<defs><marker id="lh" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" class="arrow-head"/></marker></defs>';
+    EDGES.forEach(([a, b]) => {
+      const A = NODES.find(n => n.id === a), B = NODES.find(n => n.id === b);
+      const x1 = A.x + A.w / 2, y1 = A.y + A.h / 2, x2 = B.x + B.w / 2, y2 = B.y + B.h / 2;
+      const sx = x1 < x2 ? A.x + A.w : (Math.abs(y1 - y2) > 20 ? x1 : A.x);
+      const sy = Math.abs(y1 - y2) > 20 ? (y1 < y2 ? A.y + A.h : A.y) : y1;
+      const ex = x1 < x2 ? B.x : (Math.abs(y1 - y2) > 20 ? x2 : B.x + B.w);
+      const ey = Math.abs(y1 - y2) > 20 ? (y1 < y2 ? B.y : B.y + B.h) : y2;
+      g += `<path class="edge" d="M${sx},${sy} L${ex},${ey}" marker-end="url(#lh)"/>`;
+    });
+    NODES.forEach(n => {
+      g += `<g class="n ${n.id === sel ? 'sel' : ''}" data-id="${n.id}"><rect x="${n.x}" y="${n.y}" width="${n.w}" height="${n.h}" rx="11"/>` +
+        `<text x="${n.x + n.w / 2}" y="${n.y + 20}" text-anchor="middle">${n.t}</text>` +
+        `<text x="${n.x + n.w / 2}" y="${n.y + 36}" text-anchor="middle" class="sub">${n.s}</text></g>`;
+    });
+    $('#linSvg').innerHTML = g;
+    $$('#linSvg .n').forEach(el => el.onclick = () => { sel = el.dataset.id; drawLin(); });
+    $('#linDetail').textContent = NODES.find(n => n.id === sel).d;
+  }
+  drawLin();
+
+  /* ================= reproducibility audit ================= */
+  const ITEMS = [
+    { id: 'commit', on: true, w: 2, good: 'Code commit recorded (clean tree)', bad: 'No commit recorded — you cannot know which code ran' },
+    { id: 'data', on: true, w: 3, good: 'Immutable dataset snapshot id + checksum', bad: 'Dataset referenced by a mutable path — the biggest single gap' },
+    { id: 'config', on: true, w: 2, good: 'Resolved config logged (not the template)', bad: 'Only the config template logged — defaults may have changed since' },
+    { id: 'env', on: false, w: 2, good: 'Container digest and library versions pinned', bad: 'Environment not pinned — a framework upgrade changes numerics silently' },
+    { id: 'seed', on: true, w: 1, good: 'Seeds logged for every library', bad: 'Seeds not logged — cannot distinguish a real gain from a lucky run' },
+    { id: 'seeds3', on: false, w: 2, good: 'Run repeated across ≥3 seeds with mean ± std', bad: 'Single-seed result — small differences are indistinguishable from noise' },
+    { id: 'artifact', on: true, w: 2, good: 'Artifact stored immutably and addressable by version', bad: 'Artifact overwritten in place — the old model no longer exists' },
+    { id: 'approve', on: false, w: 1, good: 'Approval and model card recorded with the version', bad: 'No approval record — audit and incident review have nothing to point at' },
+  ];
+  function repro() {
+    $('#reproList').innerHTML = ITEMS.map(i =>
+      `<div class="r ${i.on ? 'on' : 'off'}" data-id="${i.id}"><span>${i.on ? '✅' : '⚠️'}</span><span>${i.on ? i.good : i.bad}</span></div>`).join('');
+    $$('#reproList .r').forEach(el => el.onclick = () => {
+      const it = ITEMS.find(i => i.id === el.dataset.id); it.on = !it.on; repro();
+    });
+    const score = ITEMS.filter(i => i.on).reduce((s, i) => s + i.w, 0);
+    const total = ITEMS.reduce((s, i) => s + i.w, 0);
+    $('#reproScore').textContent = score + ' / ' + total;
+    const pct = score / total;
+    const lvl = !ITEMS.find(i => i.id === 'data').on ? '❌ not reproducible'
+      : pct > 0.9 ? '🏆 auditable'
+      : pct > 0.7 ? '✅ statistically reproducible'
+      : pct > 0.45 ? '⚠️ re-runnable only' : '❌ not reproducible';
+    $('#reproLvl').textContent = lvl;
+    const missing = ITEMS.filter(i => !i.on);
+    $('#reproInfo p').innerHTML = missing.length
+      ? `Click a row to toggle it. Biggest gaps right now: <b>${missing.sort((a, b) => b.w - a.w).slice(0, 2).map(m => m.bad.split(' — ')[0]).join('</b>, <b>')}</b>. ` +
+        (!ITEMS.find(i => i.id === 'data').on ? 'Without an immutable dataset version nothing else matters — the same command will produce a different model tomorrow.' : 'Fix the highest-weight gaps first; each one is a question you cannot answer during an incident.')
+      : `✅ <b>Fully auditable.</b> You can rebuild this model, explain any prediction it made, and show who approved it. That is the standard a regulated environment expects — and the standard that makes debugging a six-month-old model a ten-minute job.`;
+  }
+  repro();
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,295 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Case Study: Recommendation Feed</title>
+<link rel="stylesheet" href="assets/style.css">
+<script>try{var t=JSON.parse(localStorage.getItem('ml-theme'));if(t)document.documentElement.setAttribute('data-theme',t)}catch(e){}</script>
+<style>
+  .req { display:grid; grid-template-columns:repeat(auto-fit,minmax(160px,1fr)); gap:8px }
+  .req > div { padding:10px 12px; border-radius:12px; background:var(--surface-2); border:1px solid var(--border) }
+  .req b { display:block; font-size:11px; color:var(--muted); text-transform:uppercase; letter-spacing:.05em }
+  .req span { font-family:var(--mono); font-size:17px; font-weight:800 }
+  .slots2 { display:grid; gap:6px; margin-top:10px }
+  .slots2 .r { display:grid; grid-template-columns:150px 1fr 60px; gap:10px; align-items:center; font-size:13px }
+  .slots2 .tk { height:18px; border-radius:6px; background:var(--surface-3); overflow:hidden }
+  .slots2 .tk i { display:block; height:100%; transition:width .3s }
+  .slots2 .v { font-family:var(--mono); text-align:right; color:var(--muted); font-size:12px }
+  .archviz text { font-size:10px; fill:var(--text-2); font-family:var(--font); font-weight:600 }
+  .archviz .sub { font-size:8.5px; fill:var(--muted); font-family:var(--mono); font-weight:400 }
+</style>
+</head>
+<body data-chapter="41">
+<main class="content">
+
+  <section class="hero">
+    <div class="eyebrow"><span class="pill accent">Chapter 41</span><span class="pill pink">Case Study</span><span class="pill">⏱ 50 min</span></div>
+    <h1>Case Study: <span class="grad">Recommendation Feed</span></h1>
+    <p class="lead">Design the “For You” feed for a short-video app: 400 million daily users, a catalogue of 2 billion videos, a new video must be able to find its audience within minutes, and the whole thing has to render in under 200 ms.</p>
+    <ul class="objectives">
+      <li>Turn a vague product brief into a metric and a budget</li>
+      <li>Design the retrieval → ranking → re-ranking pipeline at this scale</li>
+      <li>Handle freshness, cold start and the feedback loop</li>
+      <li>Size the serving fleet and the near-line pipelines</li>
+      <li>Say what you'd ship first and what breaks at 10×</li>
+    </ul>
+  </section>
+
+  <h2>1 · Requirements</h2>
+  <div class="req">
+    <div><b>DAU</b><span>400M</span></div>
+    <div><b>Feed requests/s (peak)</b><span>350k</span></div>
+    <div><b>Catalogue</b><span>2B videos</span></div>
+    <div><b>New uploads/day</b><span>80M</span></div>
+    <div><b>Latency budget</b><span>200 ms p95</span></div>
+    <div><b>Items per response</b><span>10</span></div>
+  </div>
+  <p class="small muted" style="margin-top:10px"><b>In scope:</b> ranking the personalised feed. <b>Out of scope:</b> video encoding and delivery, creator tools, ads insertion (a separate auction that interleaves with these results), moderation (Chapter 51).</p>
+
+  <div class="callout tip">
+    <div class="ico">🎯</div>
+    <div class="body"><div class="title">Metrics, stated before any architecture</div>
+      <p><b>Primary (online):</b> next-day retention, plus daily time-spent-per-user as a secondary. <b>Ranking proxies (offline):</b> multi-task AUC for watch-completion, like, share and follow; NDCG@10.<br>
+      <b>Guardrails:</b> p95 latency, creator concentration (share of impressions to the top 1% of creators), new-video exposure rate, reported-content rate, and the share of sessions ending in an explicit “not interested”.<br>
+      <b>Baseline:</b> trending-by-region plus content from accounts the user follows. It's a genuinely strong baseline, and it's what runs when the model fails.</p></div>
+  </div>
+
+  <h2>2 · Architecture</h2>
+  <div class="panel">
+    <div class="panel-head"><div class="dots"><i></i><i></i><i></i></div><span class="p-title">One feed request</span><span class="p-tag">Step-through</span></div>
+    <div class="panel-body svg-scroll">
+      <svg id="archSvg" class="diagram archviz" viewBox="0 0 900 320">
+        <defs><marker id="ah41" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" class="arrow-head"/></marker></defs>
+        <path id="f-e1" class="edge dimmable" d="M120,60 L165,60" marker-end="url(#ah41)"/>
+        <path id="f-e2" class="edge dimmable" d="M285,60 L330,60" marker-end="url(#ah41)"/>
+        <path id="f-e3" class="edge dimmable" d="M450,60 L495,60" marker-end="url(#ah41)"/>
+        <path id="f-e4" class="edge dimmable" d="M615,60 L660,60" marker-end="url(#ah41)"/>
+        <path id="f-e5" class="edge dimmable" d="M780,85 L780,135" marker-end="url(#ah41)"/>
+        <path id="f-e6" class="edge dimmable dash" d="M720,160 L200,160 L200,215" marker-end="url(#ah41)"/>
+        <path id="f-e7" class="edge dimmable dash" d="M320,240 L560,240" marker-end="url(#ah41)"/>
+        <path id="f-e8" class="edge dimmable dash" d="M640,215 L640,85" marker-end="url(#ah41)"/>
+        <g id="f-req" class="node dimmable" transform="translate(20,35)"><rect width="100" height="50" rx="11"/><text x="50" y="22" text-anchor="middle">Request</text><text x="50" y="38" text-anchor="middle" class="sub">user + context</text></g>
+        <g id="f-cand" class="node dimmable" transform="translate(165,35)"><rect width="120" height="50" rx="11"/><text x="60" y="22" text-anchor="middle">Candidates</text><text x="60" y="38" text-anchor="middle" class="sub">6 sources → 4,000</text></g>
+        <g id="f-filt" class="node dimmable" transform="translate(330,35)"><rect width="120" height="50" rx="11"/><text x="60" y="22" text-anchor="middle">Filter</text><text x="60" y="38" text-anchor="middle" class="sub">seen · blocked · policy</text></g>
+        <g id="f-pre" class="node dimmable" transform="translate(495,35)"><rect width="120" height="50" rx="11"/><text x="60" y="22" text-anchor="middle">Pre-rank</text><text x="60" y="38" text-anchor="middle" class="sub">light model → 500</text></g>
+        <g id="f-rank" class="node dimmable" transform="translate(660,35)"><rect width="120" height="50" rx="11"/><text x="60" y="22" text-anchor="middle">Heavy rank</text><text x="60" y="38" text-anchor="middle" class="sub">multi-task → 500</text></g>
+        <g id="f-mix" class="node dimmable" transform="translate(700,135)"><rect width="160" height="50" rx="11"/><text x="80" y="22" text-anchor="middle">Mixer</text><text x="80" y="38" text-anchor="middle" class="sub">diversity · fresh · explore</text></g>
+        <g id="f-log" class="node dimmable" transform="translate(140,215)"><rect width="180" height="50" rx="11"/><text x="90" y="22" text-anchor="middle">Impression + engagement log</text><text x="90" y="38" text-anchor="middle" class="sub">shown, not just clicked</text></g>
+        <g id="f-near" class="node dimmable" transform="translate(560,215)"><rect width="160" height="50" rx="11"/><text x="80" y="22" text-anchor="middle">Near-line trainer</text><text x="80" y="38" text-anchor="middle" class="sub">features + hourly refresh</text></g>
+        <text x="450" y="300" text-anchor="middle" class="sub">the dashed path is what makes tomorrow's model — and what closes the feedback loop</text>
+      </svg>
+    </div>
+    <div class="stepper" data-diagram="archSvg">
+      <ol class="steps">
+        <li data-title="Request arrives" data-on="f-req">User id, device, locale, time, session state (what they've just watched and for how long). Session context is the strongest short-term signal you have — a user who watched three cooking videos in a row is telling you more than their entire history.</li>
+        <li data-title="Candidate generation — six sources in parallel" data-on="f-req f-cand f-e1" data-packet="f-req>f-cand">Two-tower ANN retrieval on the user embedding (~1,500), co-visitation from the last watched videos (~800), followed creators (~400), trending in region (~600), fresh uploads under 6 hours old (~500), and a bandit-driven exploration slate (~200). Each source has its own budget and its own recall metric.</li>
+        <li data-title="Filter" data-on="f-cand f-filt f-e2" data-packet="f-cand>f-filt">Remove already-seen (a Bloom filter per user keeps this cheap), blocked creators, muted topics, region-restricted and policy-flagged content. Roughly 4,000 → 3,200.</li>
+        <li data-title="Pre-rank" data-on="f-filt f-pre f-e3" data-packet="f-filt>f-pre" data-color="var(--accent-2)">A deliberately cheap model — a few dozen features, no cross-attention — scores everything and keeps the top ~500. This stage exists purely so the expensive ranker sees a tractable number of items, and its own quality metric is “does the item the heavy ranker would have chosen survive?”.</li>
+        <li data-title="Heavy ranking" data-on="f-pre f-rank f-e4" data-packet="f-pre>f-rank" data-color="var(--accent-2)">A multi-task network predicts P(watch ≥ 80%), P(like), P(share), P(follow), P(hide). Hundreds of features: user history embeddings, creator stats, video content embeddings, crosses. One forward pass over 500 items, batched on GPU, ~25 ms.</li>
+        <li data-title="Mix" data-on="f-rank f-mix f-e5" data-packet="f-rank>f-mix" data-color="var(--green)">Combine heads into one score with product-negotiated weights, then apply constraints: at most 2 per creator in 10, topic diversity, a minimum share of fresh and exploratory items, and ad slots. Return 10.</li>
+        <li data-title="Log impressions, not just clicks" data-on="f-mix f-log f-e6" data-packet="f-mix>f-log" data-color="var(--amber)">Every item shown is logged with its position and the scores that produced it. Without impressions you cannot compute propensities, build negatives or evaluate off-policy — this single decision determines whether your training data is usable (Chapter 30).</li>
+        <li data-title="Near-line learning" data-on="f-log f-near f-e7" data-packet="f-log>f-near">Engagement events stream back within seconds. Video-level statistics update continuously; user embeddings refresh every few minutes; the ranker is retrained hourly on a sliding window and the retrieval towers nightly. Freshness of <i>statistics</i> matters more than freshness of <i>weights</i>.</li>
+        <li data-title="Close the loop" data-on="f-near f-rank f-e8" data-packet="f-near>f-rank" data-color="var(--pink)">New models flow into serving through the standard shadow → canary → A/B path (Chapter 33), with the guardrails from the metrics section attached as automatic rollback conditions.</li>
+      </ol>
+    </div>
+  </div>
+
+  <h2>3 · Deep dive: the latency budget</h2>
+  <div class="table-wrap">
+    <table class="t">
+      <thead><tr><th>Stage</th><th>Budget</th><th>How it's achieved</th></tr></thead>
+      <tbody>
+        <tr><td>Fetch user state &amp; embeddings</td><td>8 ms</td><td>Online store, single batched read, co-located with the ranker</td></tr>
+        <tr><td>Candidate generation (6 sources, parallel)</td><td>30 ms</td><td>Sharded ANN indexes, per-source timeout — a slow source is dropped, not waited for</td></tr>
+        <tr><td>Filter</td><td>6 ms</td><td>Per-user Bloom filter of seen items held in memory</td></tr>
+        <tr><td>Pre-rank 3,200 items</td><td>18 ms</td><td>Tiny model, quantized, vectorised over the batch</td></tr>
+        <tr><td>Heavy rank 500 items</td><td>45 ms</td><td>One batched GPU forward pass; features pre-joined</td></tr>
+        <tr><td>Mix &amp; constraints</td><td>10 ms</td><td>Greedy re-ranking with hard caps</td></tr>
+        <tr><td>Serialisation, network, buffer</td><td>~40 ms</td><td>Leaves headroom for the p95 tail</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="callout warn">
+    <div class="ico">⏱️</div>
+    <div class="body"><div class="title">Every stage needs its own timeout and its own fallback</div>
+      <p>At 350k requests per second, something is always slow. Each candidate source has a deadline and is simply omitted if it misses; if the heavy ranker is unavailable, the pre-rank ordering is served; if everything fails, the trending baseline is served. <b>The feed must never fail to render.</b> Each degradation is logged so you can see the quality cost of a bad minute.</p></div>
+  </div>
+
+  <h2>4 · Deep dive: feed composition</h2>
+  <p>The mixer is where product strategy becomes numbers. Move the sliders and watch engagement trade against ecosystem health.</p>
+
+  <div class="panel">
+    <div class="panel-head"><div class="dots"><i></i><i></i><i></i></div><span class="p-title">Slot allocation in a 10-item feed</span><span class="p-tag">Interactive</span></div>
+    <div class="panel-body">
+      <div class="range-row"><label for="sPers">Personalised (model's top picks)</label><input type="range" id="sPers" min="0" max="10" step="1" value="6"><output id="sPersV"></output></div>
+      <div class="range-row"><label for="sFresh">Fresh (&lt; 6 hours old)</label><input type="range" id="sFresh" min="0" max="5" step="1" value="2"><output id="sFreshV"></output></div>
+      <div class="range-row"><label for="sExpl">Exploration (bandit)</label><input type="range" id="sExpl" min="0" max="4" step="1" value="1"><output id="sExplV"></output></div>
+      <div class="range-row"><label for="sFoll">Followed creators</label><input type="range" id="sFoll" min="0" max="5" step="1" value="1"><output id="sFollV"></output></div>
+      <div class="slots2" id="slotBars"></div>
+      <div class="stats" style="margin-top:12px">
+        <div class="stat acc"><div class="k">Session engagement</div><div class="v" id="mEng" style="font-size:18px">–</div></div>
+        <div class="stat good"><div class="k">New-video exposure</div><div class="v" id="mFresh2" style="font-size:18px">–</div></div>
+        <div class="stat"><div class="k">Catalogue coverage</div><div class="v" id="mCov" style="font-size:18px">–</div></div>
+        <div class="stat warn"><div class="k">Projected 90-day retention</div><div class="v" id="mRet" style="font-size:18px">–</div></div>
+      </div>
+      <div class="callout" id="slotInfo" style="margin-top:12px"><div class="ico">🎛️</div><div class="body"><p style="margin:0"></p></div></div>
+    </div>
+  </div>
+
+  <h2>5 · Deep dive: cold start</h2>
+  <div class="split">
+    <div class="card"><h4 class="mt0">New video (80M/day)</h4><p class="small mb0">No engagement history, so collaborative signals are empty. It enters via the <b>fresh</b> and <b>exploration</b> slots, scored from content embeddings (video, audio, caption, OCR), creator priors and early-viewer response. The first few hundred impressions are effectively a measurement experiment: a bandit allocates them and the video graduates to normal retrieval within minutes if the early signal is strong. Guaranteeing that exposure budget is what keeps the catalogue alive.</p></div>
+    <div class="card"><h4 class="mt0">New user</h4><p class="small mb0">Region and device popularity for the first few items, updated after <i>every</i> interaction — the first session is where retention is won or lost, so the user embedding is recomputed within the session rather than nightly. An optional interest-picker at signup helps, but observed behaviour overtakes stated preference within about twenty videos.</p></div>
+  </div>
+
+  <h2>6 · Deep dive: the feedback loop</h2>
+  <div class="callout danger">
+    <div class="ico">🌀</div>
+    <div class="body"><div class="title">The failure mode that defines this product</div>
+      <p>The model shows what it predicts you'll watch → you watch it → that becomes training data → it becomes more certain. Within weeks, catalogue coverage narrows, a few creators take most impressions, and the system is blind to everything it stopped showing. Structural defences, all of which cost short-term engagement: a guaranteed exploration budget, impression logging with propensities for off-policy evaluation, diversity caps in the mixer, a floor on new-creator exposure, and <b>monitoring coverage and concentration as SLOs</b> rather than as curiosities. Report them next to engagement in every launch review, or they will lose every argument.</p></div>
+  </div>
+
+  <h2>7 · Capacity and cost</h2>
+  <div class="table-wrap">
+    <table class="t">
+      <thead><tr><th>Component</th><th>Sizing</th><th>Notes</th></tr></thead>
+      <tbody>
+        <tr><td>Ranker GPUs</td><td>~1,200</td><td>350k rps × 500 items, batched; the dominant cost</td></tr>
+        <tr><td>ANN retrieval</td><td>~600 nodes</td><td>2B vectors at 128 dims, int8, sharded and replicated</td></tr>
+        <tr><td>Online feature store</td><td>~40 TB RAM</td><td>User and video features; p99 under 5 ms</td></tr>
+        <tr><td>Event pipeline</td><td>~25M events/s</td><td>Impressions dominate — far more than engagements</td></tr>
+        <tr><td>Training</td><td>~300 GPUs continuous</td><td>Hourly ranker refresh, nightly towers, plus experiments</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h2>8 · What I'd ship first, and what breaks at 10×</h2>
+  <div class="split">
+    <div class="card"><h4 class="mt0">🚀 Week one</h4><p class="small mb0">Trending + followed baseline, full impression logging, and the metric dashboard. You cannot train anything useful without logged impressions, and the baseline is what the model must beat. Then: co-visitation candidates and a simple GBDT ranker. Two-tower retrieval and multi-task deep ranking come after there's data and a measurement loop.</p></div>
+    <div class="card"><h4 class="mt0">💥 At 10×</h4><p class="small mb0">The heavy ranker's GPU cost becomes the binding constraint — the fix is a better pre-ranker, not a bigger cluster. The seen-items filter grows unboundedly (bound it by time). The event pipeline's impression volume outgrows the warehouse budget, so you sample impressions while keeping all engagements. And feedback-loop effects that were tolerable become structural, because the model's influence on the catalogue grows with its reach.</p></div>
+  </div>
+
+  <div class="callout interview"><div class="ico">🎤</div><div class="body"><div class="title">Interview drill</div>
+    <p class="small" style="margin:10px 0 0"><b>Follow-up:</b> “Engagement is up 6% but creators are complaining.” What do you look at?</p>
+    <details class="ans"><summary>How a strong answer sounds</summary><div>Creator-side metrics, which the engagement number deliberately hides. Concentration: what share of impressions goes to the top 1% of creators, and how has it moved? New-creator exposure: is a first upload still getting its measurement budget? Catalogue coverage: how many distinct videos received meaningful impressions this week versus last? If concentration rose, the model is exploiting a narrowing set of reliable winners, which raises short-term engagement and starves supply — and in a two-sided market, supply leaving is a much slower and much more expensive problem than a 6% engagement dip. I'd check whether the exploration budget was reduced or the diversity caps loosened in the same release, and I'd put those guardrails into the launch criteria so this trade is made deliberately rather than discovered.</div></details>
+    <p class="small" style="margin:10px 0 0"><b>Follow-up:</b> “Why not skip retrieval and rank everything with the big model?”</p>
+    <details class="ans"><summary>How a strong answer sounds</summary><div>The arithmetic: 2 billion items × 350,000 requests per second is 7×10¹⁴ scorings per second. Even at a microsecond each that's impossible by many orders of magnitude, and the heavy ranker takes far longer than a microsecond per item. The funnel exists so each stage spends the most compute it can afford on the number of items it sees — and the metric that links the stages is candidate recall, because the ranker can only order what retrieval returned. The interesting engineering question isn't whether to have a funnel, it's how to measure what each stage loses.</div></details>
+  </div></div>
+
+  <div class="takeaways">
+    <h3>🧠 Key takeaways</h3>
+    <ul>
+      <li>Define retention as the primary metric and engagement proxies as ranking targets — and guardrail the ecosystem.</li>
+      <li>Six candidate sources with independent budgets, timeouts and recall metrics beat one clever retriever.</li>
+      <li>A cheap pre-ranker is what makes the expensive ranker affordable; measure what it discards.</li>
+      <li>Log impressions with positions and scores, or your training data and off-policy evaluation are unusable.</li>
+      <li>Exploration budgets and diversity caps are the structural defence against the feedback loop.</li>
+    </ul>
+  </div>
+
+  <div class="quiz-wrap">
+    <h2>Check your understanding</h2>
+    <div class="quiz-score"></div>
+
+    <div class="quiz" data-answer="2">
+      <p class="q">Why log impressions and not just engagements?</p>
+      <div class="opts">
+        <button class="opt">To measure storage costs</button>
+        <button class="opt">Because engagements are unreliable</button>
+        <button class="opt">Impressions give negatives, position propensities and the basis for off-policy evaluation</button>
+        <button class="opt">To comply with privacy rules</button>
+      </div>
+      <div class="explain">Without knowing what was shown, you can't construct negatives, correct for position bias, or estimate how an alternative ranker would have performed.</div>
+    </div>
+
+    <div class="quiz" data-answer="0">
+      <p class="q">A candidate source is slow at p99. What should the system do?</p>
+      <div class="opts">
+        <button class="opt">Drop that source for this request and serve the feed without it</button>
+        <button class="opt">Wait — completeness matters more than latency</button>
+        <button class="opt">Retry it twice</button>
+        <button class="opt">Fail the request</button>
+      </div>
+      <div class="explain">Each source has its own deadline. Losing 600 candidates costs a little quality; missing the latency budget costs the whole request. Log the drop so the quality cost is visible.</div>
+    </div>
+
+    <div class="quiz" data-answer="3">
+      <p class="q">How does a brand-new video get its first audience?</p>
+      <div class="opts">
+        <button class="opt">It waits until it accumulates engagement</button>
+        <button class="opt">It is boosted permanently for 24 hours</button>
+        <button class="opt">It is ranked by creator follower count alone</button>
+        <button class="opt">Via a guaranteed fresh/exploration slot budget, scored from content embeddings and creator priors</button>
+      </div>
+      <div class="explain">Waiting for engagement is circular. A reserved exploration budget buys the measurement, and strong early signal graduates the video into normal retrieval within minutes.</div>
+    </div>
+
+    <div class="quiz" data-answer="1">
+      <p class="q">Which is the clearest sign the feedback loop is closing?</p>
+      <div class="opts">
+        <button class="opt">Latency rising</button>
+        <button class="opt">Catalogue coverage falling and impressions concentrating on fewer creators</button>
+        <button class="opt">More users per day</button>
+        <button class="opt">Higher click-through rate</button>
+      </div>
+      <div class="explain">The system converges on a narrowing set of reliable winners. Engagement can rise while the catalogue quietly dies, which is why coverage and concentration belong in the launch criteria.</div>
+    </div>
+
+    <div class="quiz" data-answer="2">
+      <p class="q">What is the pre-ranker's own success metric?</p>
+      <div class="opts">
+        <button class="opt">Its AUC on engagement labels</button>
+        <button class="opt">Its inference latency</button>
+        <button class="opt">Whether the items the heavy ranker would have picked survive into its output</button>
+        <button class="opt">The number of candidates it returns</button>
+      </div>
+      <div class="explain">It exists to shrink the candidate set without discarding what matters. Agreement with the heavy ranker's top items — recall of the eventual winners — is the property to measure.</div>
+    </div>
+  </div>
+</main>
+<script src="assets/app.js"></script>
+<script>
+(function(){
+  const { $, $$, clamp } = ML;
+
+  function slots() {
+    let pers = +$('#sPers').value, fresh = +$('#sFresh').value, expl = +$('#sExpl').value, foll = +$('#sFoll').value;
+    const total = pers + fresh + expl + foll;
+    $('#sPersV').textContent = pers + ' slots';
+    $('#sFreshV').textContent = fresh + ' slots';
+    $('#sExplV').textContent = expl + ' slots';
+    $('#sFollV').textContent = foll + ' slots';
+    const rows = [
+      ['Personalised', pers, 'var(--accent)'],
+      ['Fresh', fresh, 'var(--accent-2)'],
+      ['Exploration', expl, 'var(--amber)'],
+      ['Followed', foll, 'var(--green)'],
+    ];
+    $('#slotBars').innerHTML = rows.map(([n, v, c]) =>
+      `<div class="r"><span>${n}</span><div class="tk"><i style="width:${clamp(v / Math.max(total, 10) * 100, 0, 100)}%;background:${c}"></i></div><span class="v">${v}</span></div>`).join('') +
+      `<div class="r"><span><b>Total slots</b></span><div class="tk"><i style="width:${clamp(total / 10 * 100, 0, 100)}%;background:${total === 10 ? 'var(--green)' : 'var(--red)'}"></i></div><span class="v"><b>${total} / 10</b></span></div>`;
+
+    const eng = clamp(0.42 + pers * 0.038 + foll * 0.021 - expl * 0.022 - fresh * 0.008, 0, 1);
+    const freshExp = clamp((fresh * 0.11 + expl * 0.07), 0, 1);
+    const cov = clamp(0.18 + expl * 0.14 + fresh * 0.08 - pers * 0.012, 0, 1);
+    const ret = clamp(0.55 + eng * 0.22 + cov * 0.26 + freshExp * 0.12 - Math.abs(total - 10) * 0.06, 0, 1);
+    $('#mEng').textContent = (eng * 100).toFixed(0) + '%';
+    $('#mFresh2').textContent = (freshExp * 100).toFixed(0) + '%';
+    $('#mCov').textContent = (cov * 100).toFixed(0) + '%';
+    $('#mRet').textContent = (ret * 100).toFixed(1) + '%';
+    $('#slotInfo p').innerHTML = total !== 10
+      ? `⚠️ <b>${total} slots allocated for a 10-item feed.</b> In production this is a hard constraint — the mixer fills exactly the slots that exist, so over-allocating one source means starving another. Adjust to 10.`
+      : expl === 0
+        ? `🚩 <b>No exploration.</b> Session engagement looks best right now, and the system is learning only about what it already shows. Coverage falls, new videos never get measured, and within weeks the catalogue narrows to what worked last month — with retention following it down.`
+        : pers >= 8
+          ? `⚠️ <b>Exploitation-heavy.</b> Strong short-term engagement, thin ecosystem: only ${(freshExp * 100).toFixed(0)}% of impressions reach new content. This is the setting that wins the A/B test and loses the creators.`
+          : `✅ <b>Balanced.</b> Roughly ${pers} exploit slots against ${expl + fresh} that buy information about the catalogue. Note the projected retention is higher than the pure-exploitation setting despite lower immediate engagement — the exploration is an investment in tomorrow's recommendations, which is precisely why it must be defended with a guardrail rather than tuned by whoever owns the engagement metric.`;
+  }
+  ['#sPers', '#sFresh', '#sExpl', '#sFoll'].forEach(id => $(id).addEventListener('input', slots));
+  slots();
+})();
+</script>
+</body>
+</html>

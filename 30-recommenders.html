@@ -1,0 +1,375 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Recommenders &amp; Ranking Systems</title>
+<link rel="stylesheet" href="assets/style.css">
+<script>try{var t=JSON.parse(localStorage.getItem('ml-theme'));if(t)document.documentElement.setAttribute('data-theme',t)}catch(e){}</script>
+<style>
+  .funnel2 { display:grid; gap:8px }
+  .funnel2 .st { display:grid; grid-template-columns:170px 1fr 120px 74px; gap:10px; align-items:center; font-size:13px }
+  .funnel2 .bar { height:26px; border-radius:7px; background:var(--surface-3); overflow:hidden }
+  .funnel2 .bar i { display:block; height:100%; background:linear-gradient(90deg,var(--accent),var(--accent-2)) }
+  .funnel2 .n, .funnel2 .ms { font-family:var(--mono); text-align:right; color:var(--muted); font-size:12px }
+  .feed { display:grid; gap:6px; margin-top:10px }
+  .feed .item { display:grid; grid-template-columns:28px 1fr 70px 70px; gap:10px; align-items:center; padding:8px 10px; border-radius:10px; background:var(--surface-2); border:1px solid var(--border); font-size:13px }
+  .feed .item .pos { font-family:var(--mono); color:var(--muted) }
+  .feed .item .sc { font-family:var(--mono); text-align:right; color:var(--muted); font-size:12px }
+  .feed .item.cat0 { border-left:4px solid var(--accent) }
+  .feed .item.cat1 { border-left:4px solid var(--amber) }
+  .feed .item.cat2 { border-left:4px solid var(--green) }
+  .feed .item.cat3 { border-left:4px solid var(--pink) }
+  .pos-svg { width:100%; height:180px }
+  .pos-svg .bar { fill:var(--accent) }
+  .pos-svg .corr { fill:var(--green) }
+  .pos-svg text { font-size:10.5px; fill:var(--muted); font-family:var(--mono) }
+</style>
+</head>
+<body data-chapter="30">
+<main class="content">
+
+  <section class="hero">
+    <div class="eyebrow"><span class="pill accent">Chapter 30</span><span class="pill">Advanced</span><span class="pill">⏱ 50 min</span></div>
+    <h1>Recommenders &amp; <span class="grad">Ranking Systems</span></h1>
+    <p class="lead">Pick 20 items out of 200 million, personalised, in 100 milliseconds, and do it in a way that doesn't quietly turn your product into a monoculture. Recommenders are the most commercially valuable ML systems in existence, and the ones where the feedback loops bite hardest.</p>
+    <ul class="objectives">
+      <li>Design the multi-stage retrieval → ranking → re-ranking funnel</li>
+      <li>Build candidate generators, including two-tower retrieval</li>
+      <li>Handle implicit feedback, position bias and negative sampling</li>
+      <li>Balance relevance against diversity, freshness and business rules</li>
+      <li>Recognise feedback loops and design exploration to escape them</li>
+    </ul>
+  </section>
+
+  <h2>Why a funnel</h2>
+  <p>You cannot score 200 million items with a heavy model in 100 ms. So you use a cascade: each stage handles fewer items with a more expensive model. Cheap and approximate at the top, expensive and precise at the bottom.</p>
+
+  <div class="panel">
+    <div class="panel-head"><div class="dots"><i></i><i></i><i></i></div><span class="p-title">The ranking funnel</span><span class="p-tag">Interactive</span></div>
+    <div class="panel-body">
+      <div class="range-row"><label for="fCorpus">Catalogue size</label><input type="range" id="fCorpus" min="100000" max="500000000" step="100000" value="50000000"><output id="fCorpusV"></output></div>
+      <div class="range-row"><label for="fCand">Candidates retrieved</label><input type="range" id="fCand" min="100" max="5000" step="100" value="1000"><output id="fCandV"></output></div>
+      <div class="range-row"><label for="fRank">Items scored by the heavy ranker</label><input type="range" id="fRank" min="50" max="1000" step="50" value="300"><output id="fRankV"></output></div>
+      <div class="funnel2" id="funnel2" style="margin-top:12px"></div>
+      <div class="stats" style="margin-top:12px">
+        <div class="stat acc"><div class="k">Total latency</div><div class="v" id="fLat" style="font-size:18px">–</div></div>
+        <div class="stat"><div class="k">Cost per 1k requests</div><div class="v" id="fCost" style="font-size:18px">–</div></div>
+        <div class="stat good"><div class="k">Recall ceiling</div><div class="v" id="fRecall" style="font-size:18px">–</div></div>
+      </div>
+      <div class="callout" id="fInfo" style="margin-top:12px"><div class="ico">🔻</div><div class="body"><p style="margin:0"></p></div></div>
+    </div>
+  </div>
+
+  <div class="callout warn">
+    <div class="ico">🚧</div>
+    <div class="body"><div class="title">Retrieval sets the ceiling</div>
+      <p>The ranker can only order what retrieval hands it. If the perfect item isn't in the 1,000 candidates, no amount of ranking sophistication recovers it. Teams routinely spend months tuning the ranker while the retrieval stage silently drops the best item — so measure <b>candidate recall</b> (how often the eventually-engaged item was in the candidate set) as a first-class metric.</p></div>
+  </div>
+
+  <h2>Candidate generation</h2>
+  <div class="table-wrap">
+    <table class="t">
+      <thead><tr><th>Source</th><th>How it works</th><th>Strength</th></tr></thead>
+      <tbody>
+        <tr><td><b>Collaborative filtering</b></td><td>“Users like you also watched…” from the interaction matrix</td><td>Captures taste without content features; strong for warm users</td></tr>
+        <tr><td><b>Two-tower retrieval</b></td><td>User tower and item tower produce embeddings; ANN search over item vectors (Ch 20)</td><td>The modern workhorse — personalised, sub-10 ms, scales to billions</td></tr>
+        <tr><td><b>Content-based</b></td><td>Similarity on item features/text/image embeddings</td><td>Solves item cold start; no interaction history needed</td></tr>
+        <tr><td><b>Graph / co-visitation</b></td><td>Items frequently consumed in the same session</td><td>Cheap, strong signal, easy to precompute</td></tr>
+        <tr><td><b>Heuristics</b></td><td>Trending, recent from followed accounts, editorial picks</td><td>Freshness and coverage; a safety net when models fail</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="callout tip">
+    <div class="ico">🗼</div>
+    <div class="body"><div class="title">Two-tower, precisely</div>
+      <p>Train two encoders — one for the user/context, one for the item — so that a dot product approximates relevance, using in-batch negatives (Chapter 15). Item vectors are precomputed nightly and indexed; at request time you embed the user once and run an ANN query. The separation is the point: <b>the item tower can be computed offline</b>, which is what makes millisecond retrieval over hundreds of millions of items possible. The cost is that the two sides never interact before the dot product, so subtle feature crosses have to wait for the ranker.</p></div>
+  </div>
+
+  <h2>Ranking</h2>
+  <p>The ranker sees a few hundred candidates and can afford hundreds of features per item: user history, item statistics, context (time, device, session), and crosses between them. Modern rankers are usually multi-task.</p>
+
+  <pre class="code"><span class="c"># one model, several heads — trained jointly, combined at serving</span>
+p_click, p_watch_30s, p_like, p_share, p_hide = model(user, item, context)
+
+score = w1·p_click + w2·p_watch_30s + w3·p_like + w4·p_share − w5·p_hide
+
+<span class="c"># the weights encode product strategy, and they are argued about constantly.</span>
+<span class="c"># optimising p_click alone is how you get clickbait.</span></pre>
+
+  <div class="callout warn">
+    <div class="ico">🎣</div>
+    <div class="body"><div class="title">Your objective becomes your product</div>
+      <p>A feed that optimises clicks gets clickbait. One that optimises watch time gets longer, slower videos. One that optimises engagement gets outrage. This isn't a modelling failure — the system is doing exactly what you asked. Multi-task heads with explicitly negotiated weights, plus explicit negative signals (hide, report, “not interested”) and long-horizon metrics like next-week retention, are how teams keep the objective pointed at something they actually want.</p></div>
+  </div>
+
+  <h2>Position bias and implicit feedback</h2>
+  <p>Your training labels are clicks — and clicks depend enormously on where an item was shown. Naively training on them teaches the model that whatever it already ranked first is good.</p>
+
+  <div class="panel">
+    <div class="panel-head"><div class="dots"><i></i><i></i><i></i></div><span class="p-title">Position bias and its correction</span><span class="p-tag">Interactive</span></div>
+    <div class="panel-body">
+      <div class="seg" id="posSeg"><button data-v="raw" class="active">Raw CTR by position</button><button data-v="corrected">After propensity correction</button></div>
+      <div class="svg-scroll"><svg id="posSvg" class="diagram pos-svg" viewBox="0 0 640 180"></svg></div>
+      <div class="callout" id="posInfo" style="margin-top:10px"><div class="ico">📉</div><div class="body"><p style="margin:0"></p></div></div>
+      <p class="small muted">Corrections: inverse propensity weighting (divide each label by the estimated probability the item was examined at that position), a position feature set to a constant at serving time, or randomised position swaps on a small traffic slice to estimate the curve honestly.</p>
+    </div>
+  </div>
+
+  <div class="table-wrap">
+    <table class="t">
+      <thead><tr><th>Bias</th><th>What it does</th><th>Mitigation</th></tr></thead>
+      <tbody>
+        <tr><td><b>Position bias</b></td><td>Top slots get clicks regardless of quality</td><td>Propensity weighting, position feature, randomised swaps</td></tr>
+        <tr><td><b>Exposure bias</b></td><td>You only observe feedback on what you chose to show</td><td>Exploration traffic, logging what was <i>not</i> shown, off-policy correction</td></tr>
+        <tr><td><b>Popularity bias</b></td><td>Popular items get more exposure, becoming more popular</td><td>Popularity-debiased sampling, diversity constraints, calibration by segment</td></tr>
+        <tr><td><b>Selection bias</b></td><td>Only engaged users generate data</td><td>Model the missingness; evaluate on new and lapsed users separately</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3>Negative sampling</h3>
+  <p>You observe positives (clicks). Negatives must be constructed, and the choice materially changes the model: <b>random</b> negatives are too easy and teach little; <b>in-batch</b> negatives are convenient and skewed toward popular items; <b>hard</b> negatives — items shown but not clicked — are the most informative and the most confounded by position bias. Most production systems mix all three.</p>
+
+  <h2>Re-ranking: diversity, freshness, rules</h2>
+  <p>A pure relevance ranking is often a bad feed: five near-identical items, all from one creator, all three weeks old. The final stage reshuffles the top candidates under constraints.</p>
+
+  <div class="panel">
+    <div class="panel-head"><div class="dots"><i></i><i></i><i></i></div><span class="p-title">Diversity re-ranking</span><span class="p-tag">Interactive</span></div>
+    <div class="panel-body">
+      <div class="range-row"><label for="divL">Diversity weight (λ)</label><input type="range" id="divL" min="0" max="1" step="0.05" value="0.35"><output id="divLV"></output></div>
+      <div class="feed" id="feedOut"></div>
+      <div class="stats" style="margin-top:10px">
+        <div class="stat acc"><div class="k">Mean relevance</div><div class="v" id="divRel" style="font-size:18px">–</div></div>
+        <div class="stat good"><div class="k">Distinct categories in top 8</div><div class="v" id="divCat" style="font-size:18px">–</div></div>
+        <div class="stat"><div class="k">Max from one creator</div><div class="v" id="divCre" style="font-size:18px">–</div></div>
+      </div>
+      <div class="callout" id="divInfo" style="margin-top:10px"><div class="ico">🎨</div><div class="body"><p style="margin:0"></p></div></div>
+    </div>
+  </div>
+
+  <h2>Cold start and exploration</h2>
+  <div class="grid c3">
+    <div class="card feature reveal"><div class="f-ico">🆕</div><h4>New item</h4><p>No interactions, so collaborative signals are empty. Use content embeddings, creator priors, and a deliberate exploration budget so it can earn data.</p></div>
+    <div class="card feature reveal"><div class="f-ico" style="background:var(--accent-2-soft)">👤</div><h4>New user</h4><p>Popularity by region and device, an onboarding preference step, and fast adaptation from the first session's signals — the first ten minutes decide retention.</p></div>
+    <div class="card feature reveal"><div class="f-ico" style="background:var(--green-soft)">🎲</div><h4>Exploration</h4><p>A small share of slots allocated by a bandit (Thompson sampling / UCB) rather than the ranker. Without it, the system can only ever learn about what it already shows.</p></div>
+  </div>
+
+  <div class="callout danger">
+    <div class="ico">🌀</div>
+    <div class="body"><div class="title">The feedback loop, stated precisely</div>
+      <p>The model chooses what is shown → users interact with what is shown → that interaction becomes tomorrow's training data → the model becomes more confident about its own choices. Left alone, this collapses diversity, entrenches popular items and makes the system blind to anything it stopped showing. The defences are structural: exploration traffic, logging impressions (not just clicks), off-policy evaluation, and diversity guardrails that are monitored as SLOs rather than tuned once.</p></div>
+  </div>
+
+  <h2>Measuring it</h2>
+  <div class="table-wrap">
+    <table class="t">
+      <thead><tr><th>Layer</th><th>Metrics</th><th>Caveat</th></tr></thead>
+      <tbody>
+        <tr><td>Retrieval</td><td>Candidate recall@k</td><td>The ceiling for everything downstream</td></tr>
+        <tr><td>Ranking (offline)</td><td>NDCG, MAP, AUC per task</td><td>Computed on logged, biased data — directional only</td></tr>
+        <tr><td>Online (short-term)</td><td>CTR, watch time, add-to-cart, sessions</td><td>Easy to move in harmful ways</td></tr>
+        <tr><td>Online (long-term)</td><td>Next-week retention, revenue per user, complaint rate</td><td>What you actually care about; slow and noisy to measure</td></tr>
+        <tr><td>Health guardrails</td><td>Catalogue coverage, creator concentration, diversity, new-item exposure</td><td>Should be alarms, not dashboards nobody reads</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="callout danger"><div class="ico">⚠️</div><div class="body"><div class="title">Common mistakes</div>
+    <ul class="mb0">
+      <li><b>Tuning the ranker while retrieval drops the answer.</b> Measure candidate recall first.</li>
+      <li><b>Training on clicks without position correction.</b> The model learns to reproduce yesterday's ranking.</li>
+      <li><b>Only logging clicks.</b> Without impressions you cannot compute propensities, negatives or off-policy estimates.</li>
+      <li><b>Optimising a single engagement metric.</b> It will be achieved, in the most literal and least desirable way.</li>
+      <li><b>No exploration.</b> The system becomes confidently blind to everything outside its current repertoire.</li>
+      <li><b>Ignoring cold start.</b> New items never accumulate data, so the catalogue silently shrinks to what was popular a year ago.</li>
+    </ul></div></div>
+
+  <div class="callout interview"><div class="ico">🎤</div><div class="body"><div class="title">Interview drill</div>
+    <p class="small" style="margin:10px 0 0"><b>Warm-up:</b> Why separate retrieval from ranking instead of using one model?</p>
+    <details class="ans"><summary>How a strong answer sounds</summary><div>Compute. A ranker with hundreds of features and full user–item interaction costs milliseconds per item; you cannot run it over 200 million items in a 100 ms budget. Retrieval uses a factorised model whose item side can be precomputed and indexed for approximate nearest-neighbour search, giving sub-10 ms candidate generation at the cost of not modelling user–item interactions. The funnel lets each stage use the most expensive model it can afford for the number of items it sees — and the key metric linking them is candidate recall, because the ranker can only order what retrieval returns.</div></details>
+    <p class="small" style="margin:10px 0 0"><b>Deeper:</b> Engagement is up 8% after a launch, but you're uneasy. What do you check?</p>
+    <details class="ans"><summary>How a strong answer sounds</summary><div>Whether the gain is the kind you want. I'd break the 8% down by surface and user segment — is it concentrated in a few heavy users, or broad? Check the negative signals that don't appear in engagement: hides, reports, unfollows, “not interested”, and session-level satisfaction. Check health guardrails: catalogue coverage, creator concentration, share of impressions going to new items, topic diversity. Then look at longer horizons — next-week and next-month retention — because short-term engagement gains from more sensational content frequently reverse. And I'd check whether the metric moved for a mechanical reason, like more items per screen or an autoplay change, rather than better recommendations. If the long-horizon metrics are flat and the guardrails moved the wrong way, that 8% is a cost, not a win.</div></details>
+  </div></div>
+
+  <div class="takeaways">
+    <h3>🧠 Key takeaways</h3>
+    <ul>
+      <li>Use a funnel: cheap approximate retrieval, expensive precise ranking, constrained re-ranking.</li>
+      <li>Two-tower models make personalised retrieval over hundreds of millions of items feasible.</li>
+      <li>Implicit feedback is biased by position and exposure — correct it or you learn your own ranking.</li>
+      <li>Multi-task objectives with explicit weights keep the system pointed at the outcome you want.</li>
+      <li>Exploration, diversity guardrails and cold-start handling are what stop the feedback loop closing.</li>
+    </ul>
+  </div>
+
+  <div class="quiz-wrap">
+    <h2>Check your understanding</h2>
+    <div class="quiz-score"></div>
+
+    <div class="quiz" data-answer="2">
+      <p class="q">Your ranker is excellent but engagement is flat. Candidate recall@1000 is 0.42. What do you fix?</p>
+      <div class="opts">
+        <button class="opt">Add more ranking features</button>
+        <button class="opt">Increase the diversity weight</button>
+        <button class="opt">Retrieval — over half the relevant items never reach the ranker</button>
+        <button class="opt">Retrain the ranker more often</button>
+      </div>
+      <div class="explain">Retrieval sets the ceiling. No ranking improvement can surface an item that wasn't retrieved.</div>
+    </div>
+
+    <div class="quiz" data-answer="1">
+      <p class="q">Why can the item tower of a two-tower model be computed offline?</p>
+      <div class="opts">
+        <button class="opt">Because items have fewer features</button>
+        <button class="opt">Because item embeddings don't depend on the user — only the final dot product does</button>
+        <button class="opt">Because ANN indexes require static data</button>
+        <button class="opt">Because items change rarely</button>
+      </div>
+      <div class="explain">The factorisation is the whole trick: precompute and index item vectors, embed the user once at request time, and let ANN search do the rest. The price is no user–item feature interaction before the dot product.</div>
+    </div>
+
+    <div class="quiz" data-answer="0">
+      <p class="q">Training a ranker on raw click logs without position correction leads to what?</p>
+      <div class="opts">
+        <button class="opt">The model learns to reproduce the existing ranking, since top positions get clicks regardless of quality</button>
+        <button class="opt">Overfitting to rare items</button>
+        <button class="opt">Calibration drift only</button>
+        <button class="opt">Nothing, if you have enough data</button>
+      </div>
+      <div class="explain">Position dominates the click signal. More data makes the model more confident in the same self-confirming pattern — which is exactly why propensity correction and randomised swaps exist.</div>
+    </div>
+
+    <div class="quiz" data-answer="3">
+      <p class="q">Which signal is most useful for escaping a recommender's feedback loop?</p>
+      <div class="opts">
+        <button class="opt">More ranking features</button>
+        <button class="opt">A larger model</button>
+        <button class="opt">More training epochs</button>
+        <button class="opt">Exploration traffic that shows items the model wouldn't have chosen</button>
+      </div>
+      <div class="explain">The loop is a data problem: you only learn about what you show. Only deliberate exploration generates information about the rest of the catalogue.</div>
+    </div>
+
+    <div class="quiz" data-answer="1">
+      <p class="q">You optimise purely for click probability. What's the predictable outcome?</p>
+      <div class="opts">
+        <button class="opt">Better long-term retention</button>
+        <button class="opt">Clickbait — items optimised to be clicked rather than to be good</button>
+        <button class="opt">Improved diversity</button>
+        <button class="opt">Lower serving cost</button>
+      </div>
+      <div class="explain">The system optimises exactly what you asked. Multi-task objectives with negative signals and long-horizon metrics are the standard defence.</div>
+    </div>
+  </div>
+</main>
+<script src="assets/app.js"></script>
+<script>
+(function(){
+  const { $, $$, clamp, fmt } = ML;
+
+  /* ================= funnel ================= */
+  function funnel() {
+    const corpus = +$('#fCorpus').value, cand = +$('#fCand').value, rank = Math.min(+$('#fRank').value, cand);
+    $('#fCorpusV').textContent = fmt(corpus, 0) + ' items';
+    $('#fCandV').textContent = fmt(cand, 0);
+    $('#fRankV').textContent = fmt(rank, 0);
+    const stages = [
+      ['Catalogue', corpus, 0, 'everything that exists'],
+      ['Candidate generation', cand, 8 + Math.log10(corpus) * 1.5, 'ANN + heuristics, several sources merged'],
+      ['Filtering', Math.round(cand * 0.85), 3, 'seen, blocked, out of stock, policy'],
+      ['Heavy ranking', rank, rank * 0.06, 'hundreds of features, multi-task heads'],
+      ['Re-ranking', Math.min(50, rank), 4, 'diversity, freshness, business rules'],
+      ['Shown to the user', 20, 0, 'the slots that exist on screen'],
+    ];
+    const mx = Math.log10(corpus);
+    $('#funnel2').innerHTML = stages.map(([n, v, ms, note]) =>
+      `<div class="st"><span>${n}</span><div class="bar"><i style="width:${clamp(Math.log10(Math.max(v, 1)) / mx * 100, 2, 100)}%"></i></div><span class="n">${fmt(v, 0)} items</span><span class="ms">${ms ? ms.toFixed(0) + ' ms' : '—'}</span></div>`).join('');
+    const lat = stages.reduce((s, x) => s + x[2], 0);
+    $('#fLat').textContent = lat.toFixed(0) + ' ms';
+    $('#fCost').textContent = '$' + (rank * 0.0000004 * 1000).toFixed(3);
+    const recall = clamp(0.35 + 0.42 * Math.log10(cand / 100) / Math.log10(50), 0, 0.97);
+    $('#fRecall').textContent = (recall * 100).toFixed(0) + '%';
+    $('#fInfo p').innerHTML = lat > 120
+      ? `⚠️ <b>${lat.toFixed(0)} ms</b> is over a typical 100 ms feed budget — ranking ${fmt(rank, 0)} items dominates. Options: score fewer items with the heavy model, use a cheaper pre-ranker between retrieval and ranking, or batch the ranker across items on a GPU.`
+      : `✅ <b>${lat.toFixed(0)} ms</b> total. Candidate recall is about <b>${(recall * 100).toFixed(0)}%</b> — retrieving more candidates raises the ceiling for the ranker but costs latency in both retrieval and ranking. Most systems settle around 500–2,000 candidates with a light pre-ranker in front of the heavy one.`;
+  }
+  ['#fCorpus', '#fCand', '#fRank'].forEach(id => $(id).addEventListener('input', funnel));
+  funnel();
+
+  /* ================= position bias ================= */
+  function posbias() {
+    const mode = $('#posSeg').dataset.value || 'raw';
+    const examine = [1, .68, .5, .39, .32, .27, .23, .2, .17, .15];
+    const trueRel = [.30, .26, .31, .24, .28, .22, .27, .21, .25, .23];
+    const vals = mode === 'raw' ? examine.map((e, i) => e * trueRel[i]) : trueRel;
+    const mx = Math.max(...vals);
+    let g = '';
+    vals.forEach((v, i) => {
+      const h = v / mx * 120;
+      g += `<rect class="${mode === 'raw' ? 'bar' : 'corr'}" x="${40 + i * 58}" y="${145 - h}" width="42" height="${h}" rx="3"/>`;
+      g += `<text x="${40 + i * 58 + 12}" y="160">p${i + 1}</text>`;
+      g += `<text x="${40 + i * 58 + 6}" y="${140 - h}">${(v * 100).toFixed(1)}%</text>`;
+    });
+    g += `<line stroke="var(--border-strong)" x1="40" y1="145" x2="620" y2="145"/><text x="40" y="26">${mode === 'raw' ? 'observed CTR' : 'estimated true relevance'} by rank position</text>`;
+    $('#posSvg').innerHTML = g;
+    $('#posInfo p').innerHTML = mode === 'raw'
+      ? `Observed CTR falls steeply with position — but these ten items have almost <b>identical true relevance</b>. Nearly all of the difference is whether the user ever looked. Train on this signal directly and the model concludes that position 1 items are three times better, which simply re-learns the ranking that produced the log.`
+      : `After dividing each label by the estimated examination probability for its position, the items look like what they are: roughly equally relevant. This is inverse propensity weighting. The examination curve itself is estimated from randomised position swaps on a small slice of traffic — which is why that slice is worth its cost.`;
+  }
+  $('#posSeg').addEventListener('segchange', posbias);
+  posbias();
+
+  /* ================= diversity re-ranking ================= */
+  const ITEMS = [
+    { t: 'Sourdough starter guide', rel: .92, cat: 0, creator: 'A' },
+    { t: 'No-knead bread in 5 steps', rel: .90, cat: 0, creator: 'A' },
+    { t: 'Why your loaf collapsed', rel: .88, cat: 0, creator: 'A' },
+    { t: 'Best stand mixers 2026', rel: .85, cat: 0, creator: 'B' },
+    { t: '20-minute weeknight curry', rel: .81, cat: 1, creator: 'C' },
+    { t: 'Knife skills: the basics', rel: .78, cat: 2, creator: 'D' },
+    { t: 'Rye flour explained', rel: .76, cat: 0, creator: 'A' },
+    { t: 'Fermentation for beginners', rel: .74, cat: 3, creator: 'E' },
+    { t: 'One-pan roast vegetables', rel: .71, cat: 1, creator: 'C' },
+    { t: 'Sharpening stones compared', rel: .68, cat: 2, creator: 'D' },
+    { t: 'Kimchi at home', rel: .66, cat: 3, creator: 'F' },
+    { t: 'Pizza dough hydration', rel: .64, cat: 0, creator: 'B' },
+  ];
+  function divers() {
+    const lam = +$('#divL').value;
+    $('#divLV').textContent = lam.toFixed(2);
+    const picked = [];
+    const pool = ITEMS.slice();
+    while (picked.length < 8 && pool.length) {
+      let best = null, bestScore = -Infinity;
+      pool.forEach(it => {
+        const sameCat = picked.filter(p => p.cat === it.cat).length;
+        const sameCre = picked.filter(p => p.creator === it.creator).length;
+        const penalty = lam * (sameCat * 0.18 + sameCre * 0.22);
+        const s = it.rel - penalty;
+        if (s > bestScore) { bestScore = s; best = it; }
+      });
+      picked.push(best);
+      pool.splice(pool.indexOf(best), 1);
+    }
+    $('#feedOut').innerHTML = picked.map((it, i) =>
+      `<div class="item cat${it.cat}"><span class="pos">${i + 1}</span><span>${it.t}</span><span class="sc">${it.creator}</span><span class="sc">${it.rel.toFixed(2)}</span></div>`).join('');
+    const meanRel = picked.reduce((s, i) => s + i.rel, 0) / picked.length;
+    const cats = new Set(picked.map(i => i.cat)).size;
+    const maxCre = Math.max(...['A', 'B', 'C', 'D', 'E', 'F'].map(c => picked.filter(i => i.creator === c).length));
+    $('#divRel').textContent = meanRel.toFixed(3);
+    $('#divCat').textContent = cats + ' / 4';
+    $('#divCre').textContent = maxCre;
+    $('#divInfo p').innerHTML = lam < 0.1
+      ? `<b>Pure relevance.</b> The top slots are four bread posts from the same creator. Individually each is the best available item; collectively the feed is repetitive, and the marginal value of the fourth near-identical item is close to zero.`
+      : lam > 0.7
+        ? `<b>Diversity dominating.</b> Mean relevance has dropped to ${meanRel.toFixed(3)} — you are now showing items the user is less likely to want in order to satisfy a constraint. Diversity is a means, not an end; tune it against measured engagement and satisfaction, not aesthetics.`
+        : `<b>Balanced.</b> Mean relevance ${meanRel.toFixed(3)} with ${cats} categories and at most ${maxCre} items from one creator. This is roughly what MMR-style re-ranking does: subtract a penalty for similarity to what is already selected. Production systems add hard caps (“no more than 2 per creator in the top 10”) on top of the soft penalty.`;
+  }
+  $('#divL').addEventListener('input', divers);
+  divers();
+})();
+</script>
+</body>
+</html>

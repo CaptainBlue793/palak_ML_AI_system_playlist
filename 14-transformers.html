@@ -1,0 +1,409 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Transformers End to End</title>
+<link rel="stylesheet" href="assets/style.css">
+<script>try{var t=JSON.parse(localStorage.getItem('ml-theme'));if(t)document.documentElement.setAttribute('data-theme',t)}catch(e){}</script>
+<style>
+  .tokbar { display:flex; gap:4px; flex-wrap:wrap; margin-top:10px }
+  .tokbar .tk { display:grid; gap:3px; justify-items:center }
+  .tokbar .bar { width:54px; background:var(--surface-3); border-radius:5px; display:flex; align-items:flex-end; height:90px; overflow:hidden }
+  .tokbar .bar i { width:100%; background:var(--accent); border-radius:5px 5px 0 0; transition:height .3s }
+  .tokbar .bar i.cut { background:var(--surface-3); opacity:.5 }
+  .tokbar small { font-family:var(--mono); font-size:10.5px; color:var(--muted) }
+  .tokbar .w { font-size:12.5px; font-weight:600 }
+  .tokbar .tk.picked .w { color:var(--accent) }
+  .paramtbl td.n { font-family:var(--mono); text-align:right }
+  .blockviz text { font-size:11px; fill:var(--text-2); font-family:var(--font); font-weight:600 }
+  .blockviz .sub { font-size:9.5px; fill:var(--muted); font-family:var(--mono); font-weight:400 }
+  .blockviz rect.b { fill:var(--surface-2); stroke:var(--border-strong); stroke-width:1.5 }
+  .blockviz .on rect.b, .blockviz rect.b.on { fill:var(--accent-soft); stroke:var(--accent); stroke-width:2.5 }
+  .kvbars { display:grid; gap:6px; margin-top:10px }
+  .kvbars .r { display:grid; grid-template-columns:150px 1fr 90px; gap:10px; align-items:center; font-size:13px }
+  .kvbars .tk { height:14px; border-radius:99px; background:var(--surface-3); overflow:hidden }
+  .kvbars .tk i { display:block; height:100% }
+  .kvbars .v { font-family:var(--mono); text-align:right; color:var(--muted) }
+</style>
+</head>
+<body data-chapter="14">
+<main class="content">
+
+  <section class="hero">
+    <div class="eyebrow"><span class="pill accent">Chapter 14</span><span class="pill cyan">Intermediate</span><span class="pill">⏱ 50 min</span></div>
+    <h1>Transformers, <span class="grad">End to End</span></h1>
+    <p class="lead">One architecture now runs text, code, images, audio and protein folding. It is a stack of identical blocks, each doing exactly two things: mix information across positions (attention), then think about each position independently (an MLP). Everything else is detail — but the details are where the systems work lives.</p>
+    <ul class="objectives">
+      <li>Draw a transformer block and say what each piece is for</li>
+      <li>Explain multi-head attention and where the parameters actually are</li>
+      <li>Compare positional encoding schemes, including RoPE</li>
+      <li>Trace prefill vs decode and size a KV cache</li>
+      <li>Choose sampling parameters and estimate parameters and FLOPs</li>
+    </ul>
+  </section>
+
+  <h2>The block</h2>
+  <p>A modern decoder block, in the order data flows through it:</p>
+
+  <div class="panel">
+    <div class="panel-head"><div class="dots"><i></i><i></i><i></i></div><span class="p-title">Inside one transformer block</span><span class="p-tag">Step-through</span></div>
+    <div class="panel-body svg-scroll">
+      <svg id="blockSvg" class="diagram blockviz" viewBox="0 0 700 420">
+        <defs><marker id="bh" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" class="arrow-head"/></marker></defs>
+        <path id="b-e1" class="edge dimmable" d="M350,48 L350,72" marker-end="url(#bh)"/>
+        <path id="b-e2" class="edge dimmable" d="M350,112 L350,136" marker-end="url(#bh)"/>
+        <path id="b-e3" class="edge dimmable" d="M350,186 L350,212" marker-end="url(#bh)"/>
+        <path id="b-skip1" class="edge dimmable dash" d="M300,40 L170,40 L170,225 L322,225" marker-end="url(#bh)"/>
+        <path id="b-e4" class="edge dimmable" d="M350,248 L350,272" marker-end="url(#bh)"/>
+        <path id="b-e5" class="edge dimmable" d="M350,312 L350,336" marker-end="url(#bh)"/>
+        <path id="b-skip2" class="edge dimmable dash" d="M400,232 L540,232 L540,360 L382,360" marker-end="url(#bh)"/>
+        <path id="b-e6" class="edge dimmable" d="M350,384 L350,404" marker-end="url(#bh)"/>
+        <g id="b-in"><rect class="b" x="250" y="16" width="200" height="32" rx="10"/><text x="350" y="36" text-anchor="middle">hidden states (T × d)</text></g>
+        <g id="b-n1"><rect class="b" x="250" y="72" width="200" height="40" rx="10"/><text x="350" y="90" text-anchor="middle">RMSNorm</text><text x="350" y="104" text-anchor="middle" class="sub">pre-norm: normalize the input</text></g>
+        <g id="b-attn"><rect class="b" x="220" y="136" width="260" height="50" rx="10"/><text x="350" y="157" text-anchor="middle">Multi-head self-attention</text><text x="350" y="173" text-anchor="middle" class="sub">Q,K,V projections · softmax(QKᵀ/√d)V · output proj</text></g>
+        <g id="b-add1"><rect class="b" x="322" y="212" width="56" height="36" rx="10"/><text x="350" y="235" text-anchor="middle">+</text></g>
+        <g id="b-n2"><rect class="b" x="250" y="272" width="200" height="40" rx="10"/><text x="350" y="297" text-anchor="middle">RMSNorm</text></g>
+        <g id="b-mlp"><rect class="b" x="220" y="336" width="260" height="48" rx="10"/><text x="350" y="356" text-anchor="middle">Feed-forward (MLP)</text><text x="350" y="372" text-anchor="middle" class="sub">d → 4d → d, with GELU/SwiGLU</text></g>
+        <g id="b-add2"><rect class="b" x="322" y="356" width="0" height="0" rx="10"/></g>
+        <text x="170" y="250" class="sub" text-anchor="middle">residual</text>
+        <text x="540" y="250" class="sub" text-anchor="middle">residual</text>
+        <text x="350" y="416" text-anchor="middle" class="sub">→ next block (×N)</text>
+      </svg>
+    </div>
+    <div class="stepper" data-diagram="blockSvg">
+      <ol class="steps">
+        <li data-title="Input" data-on="b-in">A matrix of T token representations, each of width d (the “model dimension” or residual stream). For a 7B model, d is typically 4096 and there are 32 blocks.</li>
+        <li data-title="Normalize first" data-on="b-in b-n1 b-e1">Pre-norm: normalize before the sub-layer, not after. This keeps the residual path clean and makes deep stacks trainable without an elaborate warmup (Chapter 9).</li>
+        <li data-title="Project to Q, K, V" data-on="b-n1 b-attn b-e2">Three linear maps produce queries, keys and values — each d×d, so this is 3d² parameters. They are then split into <b>heads</b>, each working in a d/h-dimensional subspace.</li>
+        <li data-title="Attention mixes across positions" data-on="b-attn">Per head: <code>softmax(QKᵀ/√dₕ + mask)V</code>. This is the <b>only</b> operation in the whole block where positions talk to each other. Everything else is per-token.</li>
+        <li data-title="Concatenate heads and project" data-on="b-attn">Head outputs are concatenated and passed through a final d×d output projection, which lets the model mix what different heads found.</li>
+        <li data-title="Residual add" data-on="b-attn b-add1 b-skip1 b-e3" data-packet="b-attn>b-add1">Add the sub-layer output back to its input. The residual stream is a running “working memory” that every block reads from and writes to — and the identity path is what lets gradients reach block 1.</li>
+        <li data-title="Normalize again" data-on="b-add1 b-n2 b-e4">Second pre-norm before the feed-forward sub-layer.</li>
+        <li data-title="Feed-forward: per-token thinking" data-on="b-n2 b-mlp b-e5">Expand d → 4d, apply a nonlinearity, project back. No mixing across positions at all. This is where <b>roughly two-thirds of the parameters</b> live, and where much of the model's factual knowledge appears to be stored.</li>
+        <li data-title="Second residual, then repeat" data-on="b-mlp b-skip2 b-e6">Add again, and hand the result to the next identical block. Thirty-two repetitions later, a final norm and a projection to vocabulary logits produce next-token probabilities.</li>
+      </ol>
+    </div>
+  </div>
+
+  <div class="callout tip">
+    <div class="ico">🧵</div>
+    <div class="body"><div class="title">The residual stream mental model</div>
+      <p>Think of the residual as a shared bus of width d running the height of the model. Each attention sub-layer <i>reads</i> from the bus, gathers information from other positions, and <i>writes</i> a correction back. Each MLP reads, computes something local, and writes back. Nothing is ever replaced — only added. That framing explains why techniques like LoRA (low-rank additions) and activation steering work at all.</p></div>
+  </div>
+
+  <h2>Multi-head attention</h2>
+  <p>Instead of one attention with dimension d, run h attentions of dimension d/h in parallel. Same total compute, but each head can specialise: one tracks syntax, another matches previous mentions, another attends to the delimiter at the start.</p>
+
+  <div class="split">
+    <div class="card"><h4 class="mt0">Why several heads</h4><p class="small mb0">A single softmax produces one distribution — it must choose <i>one</i> thing to look at. Eight heads can look at eight different things at once and combine the results. Empirically many heads are redundant and prunable, but the capacity to attend to multiple relations per layer clearly matters.</p></div>
+    <div class="card"><h4 class="mt0">MQA and GQA</h4><p class="small mb0">The KV cache dominates inference memory, so modern models share keys and values across heads: <b>multi-query</b> (one K/V for all heads) or <b>grouped-query</b> (one per group of 8). This shrinks the cache by 8–64× with minimal quality loss — a pure systems-driven architecture change.</p></div>
+  </div>
+
+  <h2>Where does position come from?</h2>
+  <p>Attention is permutation-invariant: shuffle the tokens and the same set of values comes back. Order has to be injected explicitly.</p>
+
+  <div class="table-wrap">
+    <table class="t">
+      <thead><tr><th>Scheme</th><th>How</th><th>Trade-off</th></tr></thead>
+      <tbody>
+        <tr><td><b>Sinusoidal</b></td><td>Fixed sin/cos patterns added to embeddings</td><td>No parameters, extrapolates poorly in practice</td></tr>
+        <tr><td><b>Learned absolute</b></td><td>A trainable vector per position</td><td>Simple; hard stop at the trained context length</td></tr>
+        <tr><td><b>RoPE</b> (rotary)</td><td>Rotate Q and K by an angle proportional to position</td><td><b>The modern default.</b> Encodes <i>relative</i> position naturally; extendable by interpolating the frequencies</td></tr>
+        <tr><td><b>ALiBi</b></td><td>Subtract a distance-proportional penalty from scores</td><td>Cheap, extrapolates to longer contexts, slight quality cost</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="callout tip">
+    <div class="ico">🔄</div>
+    <div class="body"><div class="title">RoPE in one sentence</div>
+      <p>Rotating query and key vectors by position-dependent angles makes their dot product depend only on the <b>difference</b> of their positions — so relative distance falls out of the geometry instead of being learned per absolute slot. That's also why you can stretch context by scaling the rotation frequencies (“RoPE scaling”), which is how 4k-trained models get extended to 32k+.</p></div>
+  </div>
+
+  <h2>Three family shapes</h2>
+  <div class="grid c3">
+    <div class="card feature reveal"><div class="f-ico">📖</div><h4>Encoder-only</h4><p>Bidirectional attention, trained by masked-token prediction. BERT-style. Best for classification, extraction and <b>embeddings</b> — every retrieval system in Chapter 20 uses one.</p></div>
+    <div class="card feature reveal"><div class="f-ico" style="background:var(--accent-2-soft)">✍️</div><h4>Decoder-only</h4><p>Causal attention, next-token prediction. GPT/Llama-style. Generates text, and is what “an LLM” means today. Scales best and is the simplest to train.</p></div>
+    <div class="card feature reveal"><div class="f-ico" style="background:var(--green-soft)">🔁</div><h4>Encoder–decoder</h4><p>Encode input bidirectionally, decode output causally with cross-attention. T5/Whisper-style. Natural for translation and speech, where input and output are distinct sequences.</p></div>
+  </div>
+
+  <h2>Inference: prefill, decode, and the KV cache</h2>
+  <p>Generation has two very different phases, and conflating them is the most common cause of bad inference design.</p>
+
+  <div class="split">
+    <div class="card"><h4 class="mt0">1️⃣ Prefill</h4><p class="small mb0">Process the whole prompt in one parallel pass. Compute-bound, high arithmetic intensity, efficient. Cost scales with prompt length (and quadratically for attention).</p></div>
+    <div class="card"><h4 class="mt0">2️⃣ Decode</h4><p class="small mb0">Generate one token at a time, each depending on the last. Memory-bound and sequential: every step re-reads all the weights to produce a single token (Chapter 10).</p></div>
+  </div>
+
+  <p>Recomputing attention over the entire prefix for every new token would be quadratic <i>per token</i>. Instead, keys and values for past tokens are cached — the <strong>KV cache</strong> — and only the new token's Q, K, V are computed. That turns decode into a linear-cost step, at the price of a lot of memory.</p>
+
+  <div class="panel">
+    <div class="panel-head"><div class="dots"><i></i><i></i><i></i></div><span class="p-title">KV cache calculator</span><span class="p-tag">Interactive</span></div>
+    <div class="panel-body">
+      <div class="range-row"><label for="kvLayers">Layers</label><input type="range" id="kvLayers" min="12" max="96" step="4" value="32"><output id="kvLayersV"></output></div>
+      <div class="range-row"><label for="kvD">Model width d</label><input type="range" id="kvD" min="768" max="8192" step="256" value="4096"><output id="kvDV"></output></div>
+      <div class="range-row"><label for="kvCtx">Context length per request</label><input type="range" id="kvCtx" min="512" max="131072" step="512" value="8192"><output id="kvCtxV"></output></div>
+      <div class="range-row"><label for="kvConc">Concurrent requests</label><input type="range" id="kvConc" min="1" max="256" step="1" value="32"><output id="kvConcV"></output></div>
+      <div class="seg" id="kvSeg"><button data-v="mha" class="active">Multi-head (MHA)</button><button data-v="gqa8">Grouped-query (8×)</button><button data-v="mqa">Multi-query (MQA)</button></div>
+      <div class="kvbars" id="kvBars"></div>
+      <div class="callout" id="kvInfo" style="margin-top:12px"><div class="ico">💾</div><div class="body"><p style="margin:0"></p></div></div>
+      <p class="small muted">KV bytes ≈ 2 (K and V) × layers × kv_heads × head_dim × context × 2 bytes (fp16) × concurrent requests. This number, not the weights, is usually what limits how many users one GPU can serve.</p>
+    </div>
+  </div>
+
+  <h2>Sampling: turning logits into text</h2>
+  <p>The model outputs a probability for every token in the vocabulary. How you pick from that distribution changes the character of the output completely.</p>
+
+  <div class="panel">
+    <div class="panel-head"><div class="dots"><i></i><i></i><i></i></div><span class="p-title">Sampling explorer</span><span class="p-tag">Interactive</span></div>
+    <div class="panel-body">
+      <p class="small muted" style="margin:0">Prompt: <code>The capital of France is</code> — raw model logits shown as probabilities.</p>
+      <div class="tokbar" id="tokBar"></div>
+      <div class="range-row" style="margin-top:14px"><label for="sTemp">Temperature</label><input type="range" id="sTemp" min="0.05" max="2" step="0.05" value="1"><output id="sTempV"></output></div>
+      <div class="range-row"><label for="sTopK">top-k (0 = off)</label><input type="range" id="sTopK" min="0" max="8" step="1" value="0"><output id="sTopKV"></output></div>
+      <div class="range-row"><label for="sTopP">top-p (nucleus)</label><input type="range" id="sTopP" min="0.1" max="1" step="0.05" value="1"><output id="sTopPV"></output></div>
+      <div class="callout" id="sampInfo"><div class="ico">🎲</div><div class="body"><p style="margin:0"></p></div></div>
+      <div class="controls"><button class="btn sm primary" id="sampDraw">🎲 Sample 20 draws</button></div>
+      <div class="log" id="sampLog" style="margin-top:10px;max-height:120px"></div>
+    </div>
+  </div>
+
+  <div class="table-wrap">
+    <table class="t">
+      <thead><tr><th>Setting</th><th>Effect</th><th>Use for</th></tr></thead>
+      <tbody>
+        <tr><td><b>Temperature 0 / greedy</b></td><td>Always the top token; deterministic</td><td>Extraction, classification, code, anything evaluated exactly</td></tr>
+        <tr><td><b>Temperature ~0.7 + top-p 0.9</b></td><td>Varied but coherent</td><td>Chat, writing, brainstorming — the common default</td></tr>
+        <tr><td><b>Temperature &gt; 1.2</b></td><td>Flattens the distribution; creative and incoherent</td><td>Rarely useful alone; pair with top-k to bound the damage</td></tr>
+        <tr><td><b>Repetition / frequency penalty</b></td><td>Down-weights tokens already used</td><td>Stopping loops in smaller models</td></tr>
+        <tr><td><b>Constrained decoding</b></td><td>Mask out tokens that would break a grammar/JSON schema</td><td><b>Guaranteed</b> structured output (Chapter 19)</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h2>Counting parameters and FLOPs</h2>
+  <p>Two formulas cover most back-of-envelope work in interviews and capacity planning.</p>
+
+  <pre class="code"><span class="c"># parameters per block (ignoring norms and biases)</span>
+attention = 4·d²                <span class="c"># Q, K, V, output projections</span>
+mlp       = 8·d²                <span class="c"># d→4d and 4d→d  (12·d² with SwiGLU’s third matrix)</span>
+per_block ≈ 12·d²
+total     ≈ 12·d²·n_layers + vocab·d
+
+<span class="c"># training compute</span>
+FLOPs ≈ 6 · N · D              <span class="c"># N parameters, D training tokens</span>
+<span class="c">#   forward ≈ 2ND, backward ≈ 4ND</span>
+
+<span class="c"># inference compute</span>
+FLOPs ≈ 2 · N per generated token</pre>
+
+  <div class="panel">
+    <div class="panel-head"><div class="dots"><i></i><i></i><i></i></div><span class="p-title">Model sizing calculator</span><span class="p-tag">Interactive</span></div>
+    <div class="panel-body">
+      <div class="range-row"><label for="pD">Model width d</label><input type="range" id="pD" min="768" max="12288" step="256" value="4096"><output id="pDV"></output></div>
+      <div class="range-row"><label for="pL">Layers</label><input type="range" id="pL" min="12" max="96" step="2" value="32"><output id="pLV"></output></div>
+      <div class="range-row"><label for="pTok">Training tokens (trillions)</label><input type="range" id="pTok" min="0.1" max="20" step="0.1" value="2"><output id="pTokV"></output></div>
+      <div class="stats">
+        <div class="stat acc"><div class="k">Parameters</div><div class="v" id="pTotal">–</div></div>
+        <div class="stat"><div class="k">Training FLOPs</div><div class="v" id="pFlops" style="font-size:17px">–</div></div>
+        <div class="stat good"><div class="k">H100-days at 40% MFU</div><div class="v" id="pDays" style="font-size:17px">–</div></div>
+        <div class="stat warn"><div class="k">bf16 weights</div><div class="v" id="pBytes" style="font-size:17px">–</div></div>
+      </div>
+      <p class="small muted" style="margin-top:8px">Sanity check: d=4096, 32 layers ≈ 6.7B — the classic “7B”. Multiply H100-days by a cloud rate (~$2–4/hour) for a first cost estimate, then add 20–40% for restarts and failures (Chapter 25).</p>
+    </div>
+  </div>
+
+  <div class="callout danger"><div class="ico">⚠️</div><div class="body"><div class="title">Common mistakes</div>
+    <ul class="mb0">
+      <li><b>Thinking the MLP is a minor part.</b> It is roughly two-thirds of the parameters and most of the FLOPs — attention gets the attention, the MLP gets the compute.</li>
+      <li><b>Sizing a GPU by weights only.</b> The KV cache at high concurrency often exceeds the model itself.</li>
+      <li><b>Using temperature > 0 for structured output</b> and then parsing failures as “model errors”.</li>
+      <li><b>Assuming longer context is a free upgrade.</b> Quadratic attention, linear KV growth, and measurable quality decay in the middle of long inputs.</li>
+      <li><b>Forgetting that decode is sequential.</b> Latency scales with tokens generated; the only real levers are fewer tokens, smaller models, or speculative decoding (Chapter 27).</li>
+    </ul></div></div>
+
+  <div class="callout interview"><div class="ico">🎤</div><div class="body"><div class="title">Interview drill</div>
+    <p class="small" style="margin:10px 0 0"><b>Warm-up:</b> Why does a transformer need positional encodings when a CNN and an RNN don't?</p>
+    <details class="ans"><summary>How a strong answer sounds</summary><div>Attention computes a weighted sum over a <i>set</i> — permuting the inputs permutes the outputs identically, so order carries no information. An RNN gets order from the sequential recurrence; a CNN gets locality from the kernel's spatial layout. A transformer has neither, so position must be injected: added to embeddings (absolute) or built into the attention score (RoPE, ALiBi). RoPE is the modern choice because it makes the score depend on relative distance, which generalises better and can be stretched for longer contexts.</div></details>
+    <p class="small" style="margin:10px 0 0"><b>Deeper:</b> Estimate how many concurrent 8k-context users a single 80 GB GPU can serve with a 7B model, and say what you'd change to double it.</p>
+    <details class="ans"><summary>How a strong answer sounds</summary><div>Weights in bf16 are ~14 GB, leaving ~60 GB after workspace. With 32 layers, d=4096, MHA and fp16 cache, KV is roughly 2×32×4096×2 bytes ≈ 0.5 MB per token, so 8k tokens ≈ 4 GB per request — about 15 concurrent users. To double it: switch to grouped-query attention (8× smaller cache — the single biggest win), quantize the KV cache to fp8, use paged attention so memory isn't wasted on partially-filled blocks, and quantize weights to int8/int4 to free several more gigabytes. Beyond that, shorten prompts with retrieval instead of stuffing context, and enable prefix caching for shared system prompts.</div></details>
+  </div></div>
+
+  <div class="takeaways">
+    <h3>🧠 Key takeaways</h3>
+    <ul>
+      <li>A block = pre-norm → attention (mixes positions) → residual → pre-norm → MLP (per-token) → residual.</li>
+      <li>Attention holds ~4d² parameters per block, the MLP ~8d² — most of the model is the MLP.</li>
+      <li>Position is injected explicitly; RoPE encodes relative distance and is the modern default.</li>
+      <li>Inference splits into compute-bound prefill and memory-bound decode; the KV cache makes decode linear but dominates memory.</li>
+      <li>Params ≈ 12·d²·layers; training ≈ 6ND FLOPs; inference ≈ 2N FLOPs per token.</li>
+    </ul>
+  </div>
+
+  <div class="quiz-wrap">
+    <h2>Check your understanding</h2>
+    <div class="quiz-score"></div>
+
+    <div class="quiz" data-answer="1">
+      <p class="q">Which part of a transformer block mixes information <i>between</i> token positions?</p>
+      <div class="opts">
+        <button class="opt">The feed-forward MLP</button>
+        <button class="opt">Self-attention</button>
+        <button class="opt">LayerNorm</button>
+        <button class="opt">The residual connection</button>
+      </div>
+      <div class="explain">Everything except attention operates on each position independently. That's why attention is the only place masking is needed — and the only place context length shows up in the cost.</div>
+    </div>
+
+    <div class="quiz" data-answer="2">
+      <p class="q">What is the KV cache for?</p>
+      <div class="opts">
+        <button class="opt">Storing model weights closer to the compute units</button>
+        <button class="opt">Caching identical prompts across users</button>
+        <button class="opt">Avoiding recomputation of past tokens' keys and values during decoding</button>
+        <button class="opt">Storing gradients during training</button>
+      </div>
+      <div class="explain">Without it, each new token would recompute attention over the whole prefix. With it, decode is linear per token — but the cache grows with context × concurrency and usually limits how many users a GPU can serve.</div>
+    </div>
+
+    <div class="quiz" data-answer="0">
+      <p class="q">Why do modern models use grouped-query or multi-query attention?</p>
+      <div class="opts">
+        <button class="opt">To shrink the KV cache dramatically at inference</button>
+        <button class="opt">To speed up training</button>
+        <button class="opt">To allow bidirectional attention</button>
+        <button class="opt">To remove the need for positional encodings</button>
+      </div>
+      <div class="explain">Sharing keys and values across heads cuts cache size by the sharing factor — an architecture decision driven almost entirely by serving economics.</div>
+    </div>
+
+    <div class="quiz" data-answer="3">
+      <p class="q">You need strict JSON output from a model. Which setting is most appropriate?</p>
+      <div class="opts">
+        <button class="opt">Temperature 1.2 with top-k 50</button>
+        <button class="opt">Temperature 0.9 with a repetition penalty</button>
+        <button class="opt">Temperature 0.7 with top-p 0.95</button>
+        <button class="opt">Greedy (temperature 0), ideally with constrained decoding</button>
+      </div>
+      <div class="explain">Determinism removes a whole class of parse failures, and constrained decoding masks tokens that would violate the grammar — turning “usually valid” into “always valid”.</div>
+    </div>
+
+    <div class="quiz" data-answer="1">
+      <p class="q">Roughly how many FLOPs does training a 7B model on 2T tokens require?</p>
+      <div class="opts">
+        <button class="opt">~8.4 × 10¹⁸</button>
+        <button class="opt">~8.4 × 10²²</button>
+        <button class="opt">~1.4 × 10¹⁰</button>
+        <button class="opt">~6 × 10⁹</button>
+      </div>
+      <div class="explain">6 × N × D = 6 × 7e9 × 2e12 ≈ 8.4e22. At ~1e15 useful FLOP/s per GPU that's roughly 1,000 GPU-days — the arithmetic behind every frontier training budget.</div>
+    </div>
+  </div>
+</main>
+<script src="assets/app.js"></script>
+<script>
+(function(){
+  const { $, $$, clamp, fmt } = ML;
+
+  /* ================= KV cache ================= */
+  function kv() {
+    const L = +$('#kvLayers').value, d = +$('#kvD').value, ctx = +$('#kvCtx').value, conc = +$('#kvConc').value;
+    const mode = $('#kvSeg').dataset.value || 'mha';
+    const share = mode === 'mha' ? 1 : mode === 'gqa8' ? 8 : 32;
+    $('#kvLayersV').textContent = L;
+    $('#kvDV').textContent = d;
+    $('#kvCtxV').textContent = ctx.toLocaleString() + ' tokens';
+    $('#kvConcV').textContent = conc;
+    const perTok = 2 * L * (d / share) * 2;          // bytes per token (K+V, fp16)
+    const perReq = perTok * ctx / 1e9;
+    const total = perReq * conc;
+    const weights = 12 * d * d * L * 2 / 1e9;
+    const rows = [
+      ['Model weights (bf16)', weights, 'var(--accent)'],
+      ['KV cache (all requests)', total, 'var(--pink)'],
+      ['Workspace / activations', 3, 'var(--green)'],
+    ];
+    const sum = rows.reduce((s, r) => s + r[1], 0);
+    $('#kvBars').innerHTML = rows.map(([n, v, c]) =>
+      `<div class="r"><span>${n}</span><div class="tk"><i style="width:${clamp(v / Math.max(sum, 80) * 100, 0, 100)}%;background:${c}"></i></div><span class="v">${v.toFixed(1)} GB</span></div>`).join('') +
+      `<div class="r"><span><b>Total vs 80 GB GPU</b></span><div class="tk"><i style="width:${clamp(sum / 80 * 100, 0, 100)}%;background:${sum > 80 ? 'var(--red)' : 'var(--green)'}"></i></div><span class="v"><b>${sum.toFixed(1)} GB</b></span></div>`;
+    const maxConc = Math.max(0, Math.floor((80 - weights - 3) / perReq));
+    $('#kvInfo p').innerHTML = sum <= 80
+      ? `✅ Fits. Per request the cache is <b>${(perReq * 1000).toFixed(0)} MB</b> (${(perTok / 1024).toFixed(0)} KB per token), so this GPU could hold about <b>${maxConc} concurrent requests</b> at this context length. ${share > 1 ? `Grouped/multi-query has already cut the cache <b>${share}×</b>.` : 'Switching to grouped-query attention would cut the cache 8×.'}`
+      : `❌ Over budget by <b>${(sum - 80).toFixed(0)} GB</b>. Options: grouped-query attention, fp8 KV quantization, shorter contexts, paged attention to stop wasting partial blocks, or more GPUs. Max concurrency here is about <b>${maxConc}</b>.`;
+  }
+  ['#kvLayers', '#kvD', '#kvCtx', '#kvConc'].forEach(id => $(id).addEventListener('input', kv));
+  $('#kvSeg').addEventListener('segchange', kv);
+  kv();
+
+  /* ================= sampling ================= */
+  const TOKENS = ['Paris', 'the', 'a', 'located', 'Lyon', 'París', 'famous', 'Marseille'];
+  const LOGITS = [6.2, 3.1, 2.6, 2.2, 1.9, 1.6, 1.1, 0.4];
+  function probs() {
+    const T = +$('#sTemp').value, K = +$('#sTopK').value, P = +$('#sTopP').value;
+    $('#sTempV').textContent = T.toFixed(2);
+    $('#sTopKV').textContent = K === 0 ? 'off' : K;
+    $('#sTopPV').textContent = P.toFixed(2);
+    const scaled = LOGITS.map(l => Math.exp(l / T));
+    const z = scaled.reduce((a, b) => a + b, 0);
+    let p = scaled.map(v => v / z);
+    const order = p.map((v, i) => [v, i]).sort((a, b) => b[0] - a[0]);
+    const keep = new Set();
+    let cum = 0;
+    order.forEach(([v, i], rank) => {
+      if (K > 0 && rank >= K) return;
+      if (cum >= P) return;
+      keep.add(i); cum += v;
+    });
+    const kept = p.map((v, i) => (keep.has(i) ? v : 0));
+    const kz = kept.reduce((a, b) => a + b, 0);
+    const final = kept.map(v => v / kz);
+    return { p, final, keep };
+  }
+  function drawSamp() {
+    const { p, final, keep } = probs();
+    $('#tokBar').innerHTML = TOKENS.map((t, i) =>
+      `<div class="tk ${keep.has(i) ? 'picked' : ''}"><div class="bar"><i class="${keep.has(i) ? '' : 'cut'}" style="height:${(p[i] * 100).toFixed(1)}%"></i></div><span class="w">${t}</span><small>${(final[i] * 100).toFixed(1)}%</small></div>`).join('');
+    const T = +$('#sTemp').value, K = +$('#sTopK').value, P = +$('#sTopP').value;
+    const top = final.reduce((a, b) => Math.max(a, b), 0);
+    let msg;
+    if (T <= 0.2) msg = '<b>Near-greedy.</b> The top token takes essentially all the probability — deterministic and repetitive, which is what you want for extraction, classification and code.';
+    else if (T >= 1.5) msg = '<b>Very high temperature.</b> The distribution is flattened, so implausible tokens become likely. Without top-k/top-p this is where models start producing fluent nonsense.';
+    else if (K > 0 || P < 1) msg = `<b>Truncated sampling.</b> Only ${keep.size} of ${TOKENS.length} tokens survive the filter, and their probabilities are renormalised. This keeps variety while cutting off the long tail of bad tokens — which is why top-p 0.9 with temperature ~0.7 is the common default.`;
+    else msg = `<b>Pure temperature sampling.</b> Every token stays eligible, including the worst ones (${(final[final.length - 1] * 100).toFixed(2)}% for “${TOKENS[TOKENS.length - 1]}”). Over a 500-token generation, rare bad draws accumulate — hence nucleus sampling.`;
+    $('#sampInfo p').innerHTML = msg + ` Top token probability after filtering: <b>${(top * 100).toFixed(1)}%</b>.`;
+  }
+  ['#sTemp', '#sTopK', '#sTopP'].forEach(id => $(id).addEventListener('input', drawSamp));
+  $('#sampDraw').onclick = () => {
+    const { final } = probs();
+    const log = $('#sampLog'); log.innerHTML = '';
+    const counts = {};
+    for (let n = 0; n < 20; n++) {
+      let r = Math.random(), i = 0;
+      while (r > final[i] && i < final.length - 1) { r -= final[i]; i++; }
+      counts[TOKENS[i]] = (counts[TOKENS[i]] || 0) + 1;
+    }
+    Object.entries(counts).sort((a, b) => b[1] - a[1]).forEach(([t, c]) =>
+      ML.log(log, `<span class="ok">${c}×</span> ${t}`));
+  };
+  drawSamp();
+
+  /* ================= sizing ================= */
+  function sizing() {
+    const d = +$('#pD').value, L = +$('#pL').value, tok = +$('#pTok').value * 1e12;
+    $('#pDV').textContent = d; $('#pLV').textContent = L; $('#pTokV').textContent = tok / 1e12 + ' T';
+    const N = 12 * d * d * L + 50000 * d;
+    const F = 6 * N * tok;
+    const days = F / (1e15 * 0.4 * 86400) * 1;   // ~1 PFLOP/s peak bf16 * MFU
+    $('#pTotal').textContent = N >= 1e9 ? (N / 1e9).toFixed(1) + ' B' : (N / 1e6).toFixed(0) + ' M';
+    $('#pFlops').textContent = F.toExponential(1).replace('e+', ' × 10^');
+    $('#pDays').textContent = days < 1 ? (days * 24).toFixed(1) + ' hours' : fmt(days, 0) + ' GPU-days';
+    $('#pBytes').textContent = (N * 2 / 1e9).toFixed(1) + ' GB';
+  }
+  ['#pD', '#pL', '#pTok'].forEach(id => $(id).addEventListener('input', sizing));
+  sizing();
+})();
+</script>
+</body>
+</html>

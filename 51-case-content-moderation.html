@@ -1,0 +1,303 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Case Study: Content Moderation at Scale</title>
+<link rel="stylesheet" href="assets/style.css">
+<script>try{var t=JSON.parse(localStorage.getItem('ml-theme'));if(t)document.documentElement.setAttribute('data-theme',t)}catch(e){}</script>
+<style>
+  .req { display:grid; grid-template-columns:repeat(auto-fit,minmax(160px,1fr)); gap:8px }
+  .req > div { padding:10px 12px; border-radius:12px; background:var(--surface-2); border:1px solid var(--border) }
+  .req b { display:block; font-size:11px; color:var(--muted); text-transform:uppercase; letter-spacing:.05em }
+  .req span { font-family:var(--mono); font-size:17px; font-weight:800 }
+  .modviz text { font-size:10px; fill:var(--text-2); font-family:var(--font); font-weight:600 }
+  .modviz .sub { font-size:8.5px; fill:var(--muted); font-family:var(--mono); font-weight:400 }
+  .opsvg { width:100%; height:225px }
+  .opsvg text { font-size:10px; fill:var(--muted); font-family:var(--mono) }
+  .grid2 { display:grid; grid-template-columns:repeat(auto-fit,minmax(240px,1fr)); gap:10px }
+  .sev { display:grid; gap:8px }
+  .sev .r { display:grid; grid-template-columns:165px 1fr; gap:12px; padding:11px 13px; border-radius:12px; background:var(--surface-2); border:1px solid var(--border); font-size:13.5px }
+  .sev .r b { font-family:var(--mono); color:var(--accent) }
+</style>
+</head>
+<body data-chapter="51">
+<main class="content">
+
+  <section class="hero">
+    <div class="eyebrow"><span class="pill accent">Chapter 51</span><span class="pill pink">Case Study</span><span class="pill">⏱ 50 min</span></div>
+    <h1>Case Study: <span class="grad">Content Moderation at Scale</span></h1>
+    <p class="lead">Two billion pieces of content a day across text, images, video and audio, in a hundred languages, with adversaries who adapt within hours of any change you ship. Both kinds of error hurt real people: leaving harm up, and taking down something legitimate. There is no threshold that avoids both, so the engineering problem is choosing where to be wrong — deliberately, measurably, and differently per category.</p>
+    <ul class="objectives">
+      <li>Design a tiered pipeline from hash matching to multimodal classifiers to human review</li>
+      <li>Set operating points by severity and reach rather than by a single accuracy number</li>
+      <li>Build a review system that produces reliable labels and protects reviewers</li>
+      <li>Handle adversarial drift, which behaves nothing like ordinary distribution shift</li>
+      <li>Measure prevalence — what users actually see — rather than enforcement volume</li>
+    </ul>
+  </section>
+
+  <h2>1 · Requirements</h2>
+  <div class="req">
+    <div><b>Items/day</b><span>2B</span></div>
+    <div><b>Peak QPS</b><span>~40k</span></div>
+    <div><b>Pre-publish budget</b><span>&lt; 200 ms</span></div>
+    <div><b>Languages</b><span>~100</span></div>
+    <div><b>Reviewers</b><span>~15k</span></div>
+    <div><b>Appeal turnaround</b><span>&lt; 24 h</span></div>
+  </div>
+  <p class="small muted" style="margin-top:10px"><b>In scope:</b> detection, policy enforcement, review routing, appeals, measurement, adversarial response. <b>Out of scope:</b> writing the policies themselves, legal compliance regimes per jurisdiction, and the ranking system that decides distribution — though the two are deeply coupled.</p>
+
+  <div class="callout tip">
+    <div class="ico">🎯</div>
+    <div class="body"><div class="title">Metrics</div>
+      <p><b>Primary: prevalence</b> — the fraction of <em>views</em> of violating content, estimated by sampling and human-labelling a random slice of traffic. Not takedown counts, which go up both when enforcement improves and when abuse does. <b>Error metrics:</b> false-negative rate per policy category, and false-positive rate measured through appeal-overturn rates and audits. <b>Speed:</b> time-to-action for high-severity categories, since harm scales with the views accumulated before removal. <b>Operational:</b> reviewer queue depth, decision consistency against gold sets, appeal backlog.</p></div>
+  </div>
+
+  <div class="callout warn">
+    <div class="ico">⚖️</div>
+    <div class="body"><div class="title">Enforcement counts are not a quality metric</div>
+      <p>"We removed 40% more violating posts this quarter" is compatible with a system that got better, a system facing 40% more abuse, and a system that started removing legitimate content. It is unfalsifiable as stated. The only sound measurement is prevalence: sample traffic randomly, have trained reviewers label it against the policy, and report the share of views that violate. It is expensive, it is the only number that cannot be gamed by shipping a more aggressive classifier, and every serious moderation programme is built around it.</p></div>
+  </div>
+
+  <h2>2 · The moderation path</h2>
+  <div class="panel">
+    <div class="panel-head"><div class="dots"><i></i><i></i><i></i></div><span class="p-title">One upload, from publish to appeal</span><span class="p-tag">Step-through</span></div>
+    <div class="panel-body svg-scroll">
+      <svg id="modSvg" class="diagram modviz" viewBox="0 0 900 320">
+        <defs><marker id="md51" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" class="arrow-head"/></marker></defs>
+        <path id="m-e1" class="edge dimmable" d="M110,55 L160,55" marker-end="url(#md51)"/>
+        <path id="m-e2" class="edge dimmable" d="M280,55 L330,55" marker-end="url(#md51)"/>
+        <path id="m-e3" class="edge dimmable" d="M450,55 L500,55" marker-end="url(#md51)"/>
+        <path id="m-e4" class="edge dimmable" d="M620,55 L670,55" marker-end="url(#md51)"/>
+        <path id="m-rev" class="edge dimmable dash" d="M560,80 L560,160" marker-end="url(#md51)"/>
+        <path id="m-back" class="edge dimmable dash" d="M480,185 L200,185 L200,80" marker-end="url(#md51)"/>
+        <path id="m-eapp" class="edge dimmable dash" d="M745,80 L745,245 L560,245" marker-end="url(#md51)"/>
+        <path id="m-train" class="edge dimmable dash" d="M390,210 L390,258 L300,258" marker-end="url(#md51)"/>
+        <g id="m-up" class="node dimmable" transform="translate(20,30)"><rect width="90" height="50" rx="11"/><text x="45" y="22" text-anchor="middle">Upload</text><text x="45" y="38" text-anchor="middle" class="sub">text · image · video</text></g>
+        <g id="m-hash" class="node dimmable" transform="translate(160,30)"><rect width="120" height="50" rx="11"/><text x="60" y="22" text-anchor="middle">Hash match</text><text x="60" y="38" text-anchor="middle" class="sub">known violations</text></g>
+        <g id="m-fast" class="node dimmable" transform="translate(330,30)"><rect width="120" height="50" rx="11"/><text x="60" y="22" text-anchor="middle">Fast classifiers</text><text x="60" y="38" text-anchor="middle" class="sub">per policy · multimodal</text></g>
+        <g id="m-pol" class="node dimmable" transform="translate(500,30)"><rect width="120" height="50" rx="11"/><text x="60" y="22" text-anchor="middle">Policy engine</text><text x="60" y="38" text-anchor="middle" class="sub">severity × reach</text></g>
+        <g id="m-act" class="node dimmable" transform="translate(670,30)"><rect width="150" height="50" rx="11"/><text x="75" y="22" text-anchor="middle">Action</text><text x="75" y="38" text-anchor="middle" class="sub">allow · limit · remove</text></g>
+        <g id="m-hum" class="node dimmable" transform="translate(480,160)"><rect width="170" height="50" rx="11"/><text x="85" y="22" text-anchor="middle">Human review</text><text x="85" y="38" text-anchor="middle" class="sub">priority queues</text></g>
+        <g id="m-app" class="node dimmable" transform="translate(480,245)"><rect width="170" height="46" rx="11"/><text x="85" y="20" text-anchor="middle">Appeals</text><text x="85" y="36" text-anchor="middle" class="sub">independent reviewers</text></g>
+        <g id="m-tr" class="node dimmable" transform="translate(140,235)"><rect width="160" height="46" rx="11"/><text x="80" y="20" text-anchor="middle">Training loop</text><text x="80" y="36" text-anchor="middle" class="sub">labels · gold sets</text></g>
+      </svg>
+    </div>
+    <div class="stepper" data-diagram="modSvg">
+      <ol class="steps">
+        <li data-title="Hash matching first" data-on="m-up m-hash m-e1" data-packet="m-up>m-hash">Perceptual hashes against databases of known violating media — including shared industry hash sets for the most serious categories. Microseconds per item, near-perfect precision, and it catches the enormous volume of re-uploads of the same content. Always run this before any model: it is the cheapest and most certain stage you have.</li>
+        <li data-title="Fast classifiers, in parallel" data-on="m-hash m-fast m-e2" data-packet="m-hash>m-fast">One small model per policy category, plus a shared multimodal encoder across text, image, audio transcript and video frames. They run in parallel within the pre-publish budget and emit calibrated scores — not decisions. Calibration matters more than raw accuracy here, because everything downstream is threshold logic.</li>
+        <li data-title="The policy engine decides" data-on="m-fast m-pol m-e3" data-packet="m-fast>m-pol" data-color="var(--accent-2)">Scores plus context become an action: the poster's history, the audience size, whether the content is being amplified, the jurisdiction, the category's severity. Deliberately separate from the models, because policy changes weekly and models retrain monthly — coupling them means every policy tweak becomes a machine-learning project.</li>
+        <li data-title="Graduated actions, not a binary" data-on="m-pol m-act m-e4" data-packet="m-pol>m-act" data-color="var(--amber)">Allow, add context, demote in ranking, restrict to followers, age-gate, remove, remove and strike the account. Most of the value lives in the middle: demotion at moderate confidence prevents most harm — which scales with views — while reserving removal, whose false positives are most damaging, for high confidence.</li>
+        <li data-title="Route the uncertain to humans" data-on="m-pol m-hum m-rev" data-packet="m-pol>m-hum" data-color="var(--pink)">Queue by expected harm — projected views × severity × uncertainty — not by upload order. A borderline item on a dormant account can wait; the same item going viral cannot. Human capacity is the scarcest resource in the system and must be spent where a decision changes the most outcomes.</li>
+        <li data-title="Decisions feed back" data-on="m-hum m-fast m-back m-tr m-train" data-packet="m-hum>m-fast" data-color="var(--green)">Reviewer decisions become labels. This is also a trap: they are heavily biased toward what the models already flagged, so a model trained only on review outcomes learns to agree with itself. Randomly sampled labelled traffic is what keeps the loop honest.</li>
+        <li data-title="Appeals are part of the system" data-on="m-act m-app m-eapp" data-packet="m-act>m-app">Independent reviewers, a turnaround users can rely on, and — most usefully — overturn rates as a live false-positive estimate per category and per model version. A category whose overturn rate jumps after a release has just told you something no offline evaluation did.</li>
+      </ol>
+    </div>
+  </div>
+
+  <h2>3 · Deep dive: choosing where to be wrong</h2>
+  <p>Every classifier has one curve and you get to pick one point on it. With 2 billion items a day, a tenth of a percent in either direction is two million decisions.</p>
+
+  <div class="panel">
+    <div class="panel-head"><div class="dots"><i></i><i></i><i></i></div><span class="p-title">Operating point, at 2B items/day</span><span class="p-tag">Interactive</span></div>
+    <div class="panel-body">
+      <div class="seg" id="opSeg"><button data-v="recall" class="active">Maximise recall</button><button data-v="bal">Balanced</button><button data-v="prec">Precision first</button><button data-v="tier">Tiered by severity × reach</button></div>
+      <div class="svg-scroll"><svg id="opSvg" class="diagram opsvg" viewBox="0 0 640 225"></svg></div>
+      <div class="stats">
+        <div class="stat bad"><div class="k">Wrongly removed/day</div><div class="v" id="oFp" style="font-size:18px">–</div></div>
+        <div class="stat warn"><div class="k">Missed violations/day</div><div class="v" id="oFn" style="font-size:18px">–</div></div>
+        <div class="stat acc"><div class="k">Reviewers needed</div><div class="v" id="oRev" style="font-size:18px">–</div></div>
+        <div class="stat good"><div class="k">Violating views (prevalence)</div><div class="v" id="oPrev" style="font-size:18px">–</div></div>
+      </div>
+      <div class="callout" id="opInfo" style="margin-top:12px"><div class="ico">🎚️</div><div class="body"><p style="margin:0"></p></div></div>
+    </div>
+  </div>
+
+  <div class="callout tip">
+    <div class="ico">🧭</div>
+    <div class="body"><div class="title">Severity and reach, not one threshold</div>
+      <p>The right operating point differs by two orders of magnitude across categories, and a single number cannot express that. Two multipliers do most of the work:</p>
+      <p><b>Severity</b> — for content where the harm is catastrophic and irreversible, act at low confidence and accept the false positives, because the asymmetry is overwhelming. For contested categories such as misinformation or borderline harassment, demand high confidence and prefer demotion and context over removal, because false positives there are themselves a serious harm and a legitimacy problem.</p>
+      <p><b>Reach</b> — harm scales with views, not with posts. A borderline item seen eleven times and the same item seen four million times deserve entirely different treatment, so projected reach belongs in the decision. This is also what makes moderation tractable: the head of the distribution is a tiny fraction of items and nearly all of the exposure, so spending human review there buys far more than uniform coverage.</p></div>
+  </div>
+
+  <h2>4 · Deep dive: the human review system</h2>
+  <div class="sev">
+    <div class="r"><b>Queue design</b><span>Priority by expected harm — projected views × severity × model uncertainty — with a hard SLA per category. Order of arrival is the wrong ordering, and it is what almost every first version does.</span></div>
+    <div class="r"><b>Label quality</b><span>Reviewers disagree on genuinely hard cases, so measure agreement continuously, seed every queue with gold-standard items, and treat a fall in gold accuracy as an operational incident. Policy that cannot be applied consistently by trained people cannot be learned by a model either — and that is a finding worth escalating to the policy team, not an ML problem to solve.</span></div>
+    <div class="r"><b>Reviewer wellbeing</b><span>The worst categories cause real psychological harm. Rotation limits, blurring and greyscale by default, audio muted, synthetic previews, and genuine clinical support are requirements rather than perks. They also improve decision quality, because exhausted reviewers are inconsistent reviewers.</span></div>
+    <div class="r"><b>Context</b><span>A decision needs the surrounding thread, the account history, the language and the region. Half the moderation errors that reach the press are context failures: satire, reclaimed slurs, counter-speech quoting the abuse it condemns, or documentation of an atrocity that looks exactly like promotion of it.</span></div>
+    <div class="r"><b>Sampling for measurement</b><span>A separate, randomly sampled queue that exists only to estimate prevalence. It must never be prioritised or influenced by the models, because the moment it is, your only unbiased measurement becomes as biased as the system it is measuring.</span></div>
+    <div class="r"><b>Escalation</b><span>Novel attacks, coordinated campaigns and genuine policy ambiguity route to specialists within hours. The first reviewers to see a new evasion pattern are the earliest warning the system has — capture that signal rather than losing it in a per-item verdict.</span></div>
+  </div>
+
+  <h2>5 · Deep dive: adversaries</h2>
+  <div class="grid2">
+    <div class="callout warn" style="margin:0"><div class="ico">🎭</div><div class="body"><div class="title">This is not ordinary drift</div>
+      <p>Natural drift is slow, unintentional and roughly stationary — you retrain monthly and stay ahead of it (Chapter 34). Adversarial drift is a response to your decisions: ship a classifier on Monday, and by Wednesday the evasions are testing its exact boundary. The distribution is not shifting, it is being <em>optimised against</em> you.</p></div></div>
+    <div class="callout tip" style="margin:0"><div class="ico">🛡️</div><div class="body"><div class="title">What actually helps</div>
+      <p>Behaviour signals adversaries cannot easily fake — account age, posting velocity, coordination patterns, sharing graphs — degrade far more slowly than content signals. Ensembles with staggered retraining prevent a single boundary from being probed. Deliberately withholding some signals from any fast feedback denies attackers a cheap oracle. And randomised enforcement at the margin makes the boundary expensive to map.</p></div></div>
+  </div>
+  <p class="small muted" style="margin-top:10px">Assume the boundary will be found. The goal is not an unevadable classifier — there isn't one — but raising the cost of evasion above what the abuse is worth, and detecting the <em>attempt</em> to find the boundary, which is itself a strong signal: legitimate users do not submit forty near-identical variants of a post.</p>
+
+  <h2>6 · Capacity and cost</h2>
+  <div class="table-wrap">
+    <table class="t">
+      <thead><tr><th>Quantity</th><th>Estimate</th><th>Notes</th></tr></thead>
+      <tbody>
+        <tr><td>Items screened/day</td><td>2B</td><td>Hash matching resolves a large share for near-zero cost</td></tr>
+        <tr><td>Classifier inferences/day</td><td>~5B</td><td>Several categories per item, plus video sampled by frame</td></tr>
+        <tr><td>Inference fleet</td><td>~2,800 GPUs</td><td>Small distilled models; video decoding is a comparable CPU cost</td></tr>
+        <tr><td>Items to human review</td><td>~4M/day</td><td>0.2% of volume, and the dominant operating cost</td></tr>
+        <tr><td>Review cost</td><td>~£1.8M/day</td><td>Roughly 30× the inference bill — which is why routing quality matters more than model accuracy</td></tr>
+        <tr><td>Prevalence sampling</td><td>~60k items/day</td><td>Small, expensive, non-negotiable</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="small muted" style="margin-top:8px">The cost structure inverts the usual instinct: a model change that improves accuracy by a point but sends 20% more items to review is a large net loss, while a routing change that sends the same volume to the right reviewers is nearly free. Optimise the whole system, not the classifier.</p>
+
+  <h2>7 · What breaks</h2>
+  <div class="table-wrap">
+    <table class="t">
+      <thead><tr><th>Failure</th><th>Symptom</th><th>Response</th></tr></thead>
+      <tbody>
+        <tr><td>Training only on reviewed items</td><td>Metrics improve, prevalence does not</td><td>Randomly sampled labelled traffic, kept outside the enforcement loop</td></tr>
+        <tr><td>A new evasion pattern</td><td>Recall falls in one category, quietly</td><td>Per-category prevalence monitoring; escalation path from reviewers within hours</td></tr>
+        <tr><td>Review queue backs up</td><td>High-reach content sits unactioned</td><td>Priority by expected harm; shed low-reach items to a slower queue first</td></tr>
+        <tr><td>A policy change without model retraining</td><td>Enforcement diverges from written policy</td><td>Policy engine separate from models; gold sets regenerated on every policy change</td></tr>
+        <tr><td>False positives cluster on one community</td><td>Group-level over-enforcement, often invisible in aggregate</td><td>Slice error rates by language, region and community; treat it as a fairness gate (Chapter 37)</td></tr>
+        <tr><td>Appeal backlog grows</td><td>Users lose trust faster than from the original error</td><td>Staff appeals as a first-class queue; overturn rate is a live quality signal</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="callout interview"><div class="ico">🎤</div><div class="body"><div class="title">Interview drill</div>
+    <p class="small" style="margin:10px 0 0"><b>Follow-up:</b> “Your model's offline F1 improved from 0.82 to 0.88, but prevalence is unchanged. What happened?”</p>
+    <details class="ans"><summary>How a strong answer sounds</summary><div>Most likely the evaluation set no longer represents what users see. The classic cause is training and evaluating on reviewed items, which are the ones the previous model already flagged — so the model gets better at agreeing with itself while the content it never surfaced stays invisible. I would check whether the eval set is randomly sampled from live traffic or sampled from enforcement, and I would expect the answer to be the latter. Second possibility: the gain is real but concentrated where it does not matter — prevalence is weighted by views, so improving on the long tail of near-zero-reach posts moves F1 and not prevalence at all. Third: the policy engine is not acting on the improvement, because thresholds were tuned for the old score distribution and a recalibrated model is now scoring differently against the same cutoffs. Fourth: adversarial response, where the categories that improved are the ones attackers moved away from. I would resolve it by measuring per-category prevalence on view-weighted random samples, and I would stop treating offline F1 as a release signal, because in this system it has repeatedly been able to move without anything real changing.</div></details>
+    <p class="small" style="margin:10px 0 0"><b>Follow-up:</b> “Should the threshold be the same for every policy category?”</p>
+    <details class="ans"><summary>How a strong answer sounds</summary><div>No, and it is not close. The two errors have completely different costs per category. Where harm is catastrophic and irreversible, I would act at low confidence and accept a much higher false-positive rate, backed by fast appeals — the asymmetry is overwhelming and nobody seriously argues otherwise. For contested categories like misinformation or borderline harassment, false positives are themselves a significant harm and a legitimacy problem for the platform, so I would demand high confidence for removal and use demotion, context labels and reach limits in the wide middle band, which prevents most of the harm since harm scales with views. I would also make reach an explicit input rather than a single threshold: the same score on a post with a projected eleven views and one with four million should not produce the same action. Practically that means per-category operating points, chosen with the policy and legal teams, reviewed on a schedule, and documented — so that when a decision is challenged, the answer is a stated position on a trade-off rather than an accident of where someone set a constant.</div></details>
+  </div></div>
+
+  <div class="takeaways">
+    <h3>🧠 Key takeaways</h3>
+    <ul>
+      <li>Measure prevalence on randomly sampled, view-weighted traffic; enforcement counts and offline F1 can both move without anything improving.</li>
+      <li>Tier the pipeline: hash matching, then calibrated classifiers, then a policy engine kept separate from the models, then humans.</li>
+      <li>Actions are graduated — demotion and context at moderate confidence prevent most harm, since harm scales with views.</li>
+      <li>Set operating points per category by severity and reach; one global threshold is wrong everywhere at once.</li>
+      <li>Adversarial drift responds to your decisions, so lean on behavioural signals and make the boundary expensive to map.</li>
+      <li>Human review is the dominant cost and the scarcest resource: route by expected harm, and protect the people doing it.</li>
+    </ul>
+  </div>
+
+  <div class="quiz-wrap">
+    <h2>Check your understanding</h2>
+    <div class="quiz-score"></div>
+
+    <div class="quiz" data-answer="1">
+      <p class="q">Why is "violating posts removed" a poor primary metric?</p>
+      <div class="opts">
+        <button class="opt">It is hard to compute at scale</button>
+        <button class="opt">It rises both when enforcement improves and when abuse increases, so it cannot distinguish the two</button>
+        <button class="opt">It ignores appeals</button>
+        <button class="opt">It cannot be broken down by category</button>
+      </div>
+      <div class="explain">Prevalence — the share of views that are violating, estimated from randomly sampled labelled traffic — is the number that cannot be improved by simply removing more things.</div>
+    </div>
+
+    <div class="quiz" data-answer="2">
+      <p class="q">Why should the policy engine be separate from the classifiers?</p>
+      <div class="opts">
+        <button class="opt">It makes inference faster</button>
+        <button class="opt">It improves calibration</button>
+        <button class="opt">Policy changes weekly while models retrain monthly — coupling them turns every policy tweak into a machine-learning project</button>
+        <button class="opt">It is required for appeals</button>
+      </div>
+      <div class="explain">Models emit calibrated scores; the policy engine turns scores plus context, severity and reach into actions. Different owners, different cadences.</div>
+    </div>
+
+    <div class="quiz" data-answer="0">
+      <p class="q">Why does training only on human-reviewed items degrade the system over time?</p>
+      <div class="opts">
+        <button class="opt">Reviewed items are the ones the previous model flagged, so the model learns to agree with itself and never sees what it missed</button>
+        <button class="opt">Reviewers label inconsistently</button>
+        <button class="opt">Review labels arrive too slowly</button>
+        <button class="opt">It overfits to high-reach content</button>
+      </div>
+      <div class="explain">A closed feedback loop. Randomly sampled labelled traffic, kept outside the enforcement loop, is the only way to see the false negatives.</div>
+    </div>
+
+    <div class="quiz" data-answer="3">
+      <p class="q">Why does projected reach belong in the enforcement decision?</p>
+      <div class="opts">
+        <button class="opt">Because high-reach accounts are more likely to violate</button>
+        <button class="opt">Because it reduces classifier cost</button>
+        <button class="opt">Because it simplifies appeals</button>
+        <button class="opt">Because harm scales with views, so the same score on an item seen 11 times and one seen 4 million times warrants different action</button>
+      </div>
+      <div class="explain">It also makes the problem tractable: a tiny fraction of items carries nearly all exposure, so that is where scarce human review buys the most.</div>
+    </div>
+
+    <div class="quiz" data-answer="1">
+      <p class="q">Why do behavioural signals hold up better than content signals against adversaries?</p>
+      <div class="opts">
+        <button class="opt">They are cheaper to compute</button>
+        <button class="opt">Account age, posting velocity and coordination patterns are costly to fake, while content can be rephrased in minutes</button>
+        <button class="opt">They are unaffected by policy changes</button>
+        <button class="opt">They require no labels</button>
+      </div>
+      <div class="explain">Evading a text classifier costs a rewrite; faking a two-year-old account with organic engagement costs two years. Raise the cost of evasion above the value of the abuse.</div>
+    </div>
+  </div>
+</main>
+<script src="assets/app.js"></script>
+<script>
+(function(){
+  const { $, fmt } = ML;
+
+  const MODES = {
+    recall: { fp: 2400000, fn: 260000, rev: 41000, prev: 0.021, tp: 0.96, fpr: 0.0012,
+      note: `🚩 <b>Maximise recall.</b> Catch almost everything, and wrongly remove 2.4 million legitimate posts a day. At this scale a 0.12% false-positive rate is a daily crisis: every one of those is a real person whose content vanished, and the appeal queue needs more staff than the review queue. Defensible for the most severe categories, where the asymmetry genuinely justifies it. Ruinous applied across the board.` },
+    bal: { fp: 420000, fn: 890000, rev: 19000, prev: 0.038, tp: 0.84, fpr: 0.00021,
+      note: `⚠️ <b>Balanced.</b> The point that maximises F1, and the point nobody should ship, because F1 assumes the two errors cost the same and they never do. It is a reasonable default only for the mildest categories; for anything with real-world consequence it is simultaneously too aggressive and not aggressive enough — arrived at by optimising a metric rather than by making a decision.` },
+    prec: { fp: 48000, fn: 2100000, rev: 9000, prev: 0.091, tp: 0.62, fpr: 0.000024,
+      note: `⚠️ <b>Precision first.</b> Almost everything removed deserved it, appeals are quiet, reviewers are cheap — and prevalence more than doubles. Two million violations a day stay up, concentrated in exactly the categories where recall matters most. Popular with teams measured on false positives, and it is how a platform ends up with a moderation system that looks healthy on every dashboard it owns.` },
+    tier: { fp: 95000, fn: 340000, rev: 15000, prev: 0.014, tp: 0.91, fpr: 0.000048,
+      note: `✅ <b>Tiered by severity and reach.</b> Low thresholds with fast appeals for catastrophic categories; high thresholds plus demotion and context for contested ones; reach as an explicit input so the same score acts differently on a post seen eleven times and one seen four million. Best prevalence <em>and</em> a twenty-fifth of the wrongful removals of the recall-maximising point, with fewer reviewers than balanced — because review is spent where a decision changes the most outcomes. Not a cleverer model: a better-shaped decision.` },
+  };
+
+  function draw() {
+    const m = MODES[$('#opSeg').dataset.value || 'recall'];
+    // ROC-ish curve with the chosen operating point marked, on a log-ish FPR axis
+    const x0 = 46, x1 = 600, yb = 168, yt = 22;
+    const LX = (fpr) => x0 + (Math.log10(Math.max(fpr, 1e-5)) + 5) / 5 * (x1 - x0);
+    const Y = (tp) => yb - tp * (yb - yt);
+    let p = '';
+    for (let i = 0; i <= 60; i++) {
+      const fpr = Math.pow(10, -5 + (i / 60) * 5);
+      const tp = Math.pow(fpr, 0.19);          // concave, saturating
+      p += (p ? 'L' : 'M') + LX(fpr).toFixed(1) + ',' + Y(Math.min(tp, 0.985)).toFixed(1) + ' ';
+    }
+    let out = `<line stroke="var(--border-strong)" x1="${x0}" y1="${yb}" x2="${x1}" y2="${yb}"/><line stroke="var(--border-strong)" x1="${x0}" y1="${yt}" x2="${x0}" y2="${yb}"/>`;
+    out += `<path d="${p}" fill="none" stroke="var(--accent)" stroke-width="2.6"/>`;
+    const px = LX(m.fpr), py = Y(m.tp);
+    out += `<circle cx="${px.toFixed(1)}" cy="${py.toFixed(1)}" r="7" fill="var(--pink)"/>`;
+    out += `<text x="${Math.min(px + 12, 470).toFixed(1)}" y="${(py - 8).toFixed(1)}" style="fill:var(--pink);font-weight:700">operating point</text>`;
+    out += `<text x="${x0}" y="188" style="fill:var(--muted)">false-positive rate →</text>`;
+    out += `<text x="2" y="16" style="fill:var(--muted)">recall</text>`;
+    out += `<text x="${x0}" y="208" style="fill:var(--muted);font-size:9px">one curve, one choice — at 2B items/day every 0.01% is 200,000 decisions</text>`;
+    $('#opSvg').innerHTML = out;
+    $('#oFp').textContent = fmt(m.fp, 1);
+    $('#oFn').textContent = fmt(m.fn, 1);
+    $('#oRev').textContent = fmt(m.rev, 0);
+    $('#oPrev').textContent = m.prev.toFixed(3) + '%';
+    $('#opInfo p').innerHTML = m.note;
+  }
+  $('#opSeg').addEventListener('segchange', draw);
+  draw();
+})();
+</script>
+</body>
+</html>

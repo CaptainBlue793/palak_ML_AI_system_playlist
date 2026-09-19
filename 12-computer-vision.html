@@ -1,0 +1,375 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Computer Vision Systems</title>
+<link rel="stylesheet" href="assets/style.css">
+<script>try{var t=JSON.parse(localStorage.getItem('ml-theme'));if(t)document.documentElement.setAttribute('data-theme',t)}catch(e){}</script>
+<style>
+  .imggrid { display:grid; gap:1px; width:100%; max-width:230px; aspect-ratio:1 }
+  .imggrid i { border-radius:2px }
+  .kernbox { display:grid; grid-template-columns:repeat(3,36px); gap:4px; margin-top:8px }
+  .kernbox i { height:32px; border-radius:6px; display:grid; place-items:center; font-style:normal; font-family:var(--mono); font-size:11.5px; background:var(--surface-2); border:1px solid var(--border) }
+  .kernbox i.pos { background:var(--green-soft); color:var(--green); border-color:var(--green) }
+  .kernbox i.neg { background:var(--red-soft); color:var(--red); border-color:var(--red) }
+  .conv-wrap { display:grid; grid-template-columns:repeat(auto-fit,minmax(200px,1fr)); gap:18px; align-items:start }
+  .iou-svg { width:100%; max-width:330px }
+  .iou-svg .a { fill:var(--accent); opacity:.35; stroke:var(--accent); stroke-width:2 }
+  .iou-svg .b { fill:var(--amber); opacity:.35; stroke:var(--amber); stroke-width:2 }
+  .iou-svg .i { fill:var(--green); opacity:.55 }
+  .task-card { border:1px solid var(--border); border-radius:14px; padding:14px; background:var(--surface-2) }
+  .task-card svg { width:100%; height:110px; background:var(--surface); border-radius:10px }
+  .task-card h4 { margin:8px 0 4px; font-size:15px }
+  .task-card p { margin:0; font-size:13px; color:var(--muted) }
+</style>
+</head>
+<body data-chapter="12">
+<main class="content">
+
+  <section class="hero">
+    <div class="eyebrow"><span class="pill accent">Chapter 12</span><span class="pill cyan">Intermediate</span><span class="pill">⏱ 40 min</span></div>
+    <h1>Computer Vision <span class="grad">Systems</span></h1>
+    <p class="lead">Vision was the first domain deep learning conquered, and it's still where the clearest intuitions live. Convolutions, receptive fields, augmentation and the detection stack — plus the systems reality that decoding the images is often more expensive than running the model.</p>
+    <ul class="objectives">
+      <li>See what a convolution kernel actually computes</li>
+      <li>Compute output sizes and receptive fields from stride, padding and kernel size</li>
+      <li>Trace the architecture lineage from LeNet to ViT and know what each step fixed</li>
+      <li>Distinguish classification, detection, segmentation and their metrics</li>
+      <li>Design an augmentation and data pipeline that keeps the GPU fed</li>
+    </ul>
+  </section>
+
+  <h2>An image is a tensor</h2>
+  <p>A 224×224 RGB photo is a tensor of shape (3, 224, 224) — three channel planes of 8-bit intensities, normalised to roughly zero mean and unit variance per channel before it reaches the network. A batch adds a dimension: (B, 3, 224, 224). Everything else is arithmetic on that block.</p>
+
+  <div class="callout tip">
+    <div class="ico">🎨</div>
+    <div class="body"><div class="title">Match the preprocessing to the pretrained model</div>
+      <p>If you fine-tune a model trained with ImageNet normalization, use <b>those</b> channel means and standard deviations, that resize strategy and that channel order (RGB vs BGR). A silent mismatch here costs several accuracy points and produces no error message — it's one of the most common transfer-learning bugs.</p></div>
+  </div>
+
+  <h2>Convolution, concretely</h2>
+  <p>Slide a small grid of weights (the <b>kernel</b>) across the image; at each position compute a dot product between the kernel and the patch underneath. One kernel detects one kind of local pattern. A conv layer has hundreds of them, and the network <i>learns</i> what they should be.</p>
+
+  <div class="panel">
+    <div class="panel-head"><div class="dots"><i></i><i></i><i></i></div><span class="p-title">Convolution playground</span><span class="p-tag">Interactive</span></div>
+    <div class="panel-body">
+      <div class="seg" id="kSeg"><button data-v="edgeV" class="active">Vertical edges</button><button data-v="edgeH">Horizontal edges</button><button data-v="blur">Blur</button><button data-v="sharpen">Sharpen</button><button data-v="emboss">Emboss</button></div>
+      <div class="conv-wrap" style="margin-top:14px">
+        <div><div class="small muted" style="font-weight:700;margin-bottom:6px">Input (a shape on a background)</div><div class="imggrid" id="imgIn"></div></div>
+        <div><div class="small muted" style="font-weight:700;margin-bottom:6px">Kernel (3×3 learned weights)</div><div class="kernbox" id="kernBox"></div>
+          <p class="small muted" id="kNote" style="margin-top:10px"></p></div>
+        <div><div class="small muted" style="font-weight:700;margin-bottom:6px">Feature map (output)</div><div class="imggrid" id="imgOut"></div></div>
+      </div>
+      <div class="legend" style="margin-top:12px"><span><i style="background:var(--green-soft)"></i>positive weight</span><span><i style="background:var(--red-soft)"></i>negative weight</span><span><i style="background:var(--accent)"></i>strong response in the output</span></div>
+    </div>
+  </div>
+
+  <div class="callout analogy">
+    <div class="ico">🔦</div>
+    <div class="body"><div class="title">Why convolution instead of a dense layer?</div>
+      <p>A dense layer connecting 224×224×3 inputs to 1,000 units has 150 million weights, and it learns “an eye in the top-left” separately from “an eye in the middle”. A convolution applies the <i>same</i> small kernel everywhere: <b>translation equivariance</b> for free, thousands of times fewer parameters, and a strong prior that nearby pixels matter together. That inductive bias is why CNNs worked when data was scarce.</p></div>
+  </div>
+
+  <h2>Stride, padding, pooling and the receptive field</h2>
+  <p>Three knobs control how the spatial dimensions shrink, and together they determine how much of the original image each deep feature can “see”.</p>
+
+  <div class="panel">
+    <div class="panel-head"><div class="dots"><i></i><i></i><i></i></div><span class="p-title">Shape &amp; receptive field calculator</span><span class="p-tag">Interactive</span></div>
+    <div class="panel-body">
+      <div class="range-row"><label for="cIn">Input size</label><input type="range" id="cIn" min="32" max="512" step="16" value="224"><output id="cInV"></output></div>
+      <div class="range-row"><label for="cK">Kernel size</label><input type="range" id="cK" min="1" max="11" step="2" value="3"><output id="cKV"></output></div>
+      <div class="range-row"><label for="cS">Stride</label><input type="range" id="cS" min="1" max="4" step="1" value="1"><output id="cSV"></output></div>
+      <div class="range-row"><label for="cP">Padding</label><input type="range" id="cP" min="0" max="5" step="1" value="1"><output id="cPV"></output></div>
+      <div class="range-row"><label for="cL">Stacked layers</label><input type="range" id="cL" min="1" max="30" step="1" value="8"><output id="cLV"></output></div>
+      <div class="stats">
+        <div class="stat"><div class="k">Output per layer</div><div class="v" id="cOut" style="font-size:18px">–</div></div>
+        <div class="stat acc"><div class="k">Final spatial size</div><div class="v" id="cFinal" style="font-size:18px">–</div></div>
+        <div class="stat good"><div class="k">Receptive field</div><div class="v" id="cRF" style="font-size:18px">–</div></div>
+        <div class="stat warn"><div class="k">Params per layer (256 ch)</div><div class="v" id="cParams" style="font-size:18px">–</div></div>
+      </div>
+      <div class="callout" id="cInfo" style="margin-top:12px"><div class="ico">📘</div><div class="body"><p style="margin:0"></p></div></div>
+      <p class="small muted">Output size = ⌊(in + 2·pad − kernel)/stride⌋ + 1. “Same” padding means pad = (kernel−1)/2 with stride 1, which keeps the size unchanged.</p>
+    </div>
+  </div>
+
+  <h2>The architecture lineage</h2>
+  <p>Each generation fixed a specific problem. Knowing which is far more useful than memorising layer counts.</p>
+
+  <div class="timeline">
+    <div class="ti reveal"><h4>LeNet (1998) · AlexNet (2012)</h4><p>Convolution + pooling + ReLU on GPUs, with dropout and augmentation. AlexNet's ImageNet win is the moment deep learning became the default.</p></div>
+    <div class="ti reveal"><h4>VGG (2014)</h4><p>Showed that stacks of small 3×3 kernels beat a few large ones: same receptive field, fewer parameters, more nonlinearity. Very deep, very heavy.</p></div>
+    <div class="ti reveal"><h4>ResNet (2015)</h4><p><b>Residual connections.</b> Suddenly 50–150 layers trained reliably, because gradients have an identity path home. Still the default backbone in production a decade later.</p></div>
+    <div class="ti reveal"><h4>MobileNet / EfficientNet (2017–19)</h4><p>Depthwise-separable convolutions and compound scaling: accuracy per FLOP became the objective, making on-device vision practical.</p></div>
+    <div class="ti reveal"><h4>Vision Transformer (2020)</h4><p>Cut the image into 16×16 patches and treat them as tokens (Chapter 14). Weak spatial prior, so it needs more data or strong augmentation — but it scales better and unifies vision with language modelling.</p></div>
+    <div class="ti reveal"><h4>ConvNeXt, hybrids, SAM, CLIP (2022–)</h4><p>Modernised CNNs match ViTs; contrastive image–text training (CLIP) gives open-vocabulary recognition; promptable segmentation and vision-language models turn perception into a general interface.</p></div>
+  </div>
+
+  <div class="callout tip">
+    <div class="ico">🎁</div>
+    <div class="body"><div class="title">Start from pretrained weights. Always.</div>
+      <p>For nearly every applied vision task, fine-tuning a pretrained backbone on a few thousand labelled images beats training from scratch on a hundred thousand. Freeze early layers if data is very small, fine-tune everything with a low learning rate if you have more, and use a discriminative learning rate (lower for early layers) if you want the last 1%.</p></div>
+  </div>
+
+  <h2>The four task shapes</h2>
+
+  <div class="grid c4">
+    <div class="task-card reveal">
+      <svg viewBox="0 0 120 80"><rect x="5" y="5" width="110" height="70" rx="8" fill="var(--surface-2)"/><circle cx="60" cy="40" r="20" fill="var(--accent)" opacity=".6"/><text x="60" y="72" text-anchor="middle" font-size="9" fill="var(--muted)" font-family="monospace">"cat" 0.94</text></svg>
+      <h4>Classification</h4><p>One label per image. Metric: accuracy, top-5, macro-F1.</p>
+    </div>
+    <div class="task-card reveal">
+      <svg viewBox="0 0 120 80"><rect x="5" y="5" width="110" height="70" rx="8" fill="var(--surface-2)"/><circle cx="45" cy="40" r="15" fill="var(--accent)" opacity=".5"/><circle cx="85" cy="45" r="11" fill="var(--amber)" opacity=".5"/><rect x="28" y="23" width="34" height="34" fill="none" stroke="var(--accent)" stroke-width="2"/><rect x="72" y="32" width="26" height="26" fill="none" stroke="var(--amber)" stroke-width="2"/></svg>
+      <h4>Detection</h4><p>Boxes + labels. Metric: mAP over IoU thresholds. Needs NMS.</p>
+    </div>
+    <div class="task-card reveal">
+      <svg viewBox="0 0 120 80"><rect x="5" y="5" width="110" height="70" rx="8" fill="var(--surface-2)"/><path d="M20,60 Q40,20 60,40 T105,35 L105,70 L20,70 Z" fill="var(--green)" opacity=".55"/><path d="M20,15 h85 v18 q-25,10 -45,0 t-40,5 Z" fill="var(--accent-2)" opacity=".45"/></svg>
+      <h4>Segmentation</h4><p>A label per pixel. Metric: mIoU, Dice. Semantic vs instance vs panoptic.</p>
+    </div>
+    <div class="task-card reveal">
+      <svg viewBox="0 0 120 80"><rect x="5" y="5" width="110" height="70" rx="8" fill="var(--surface-2)"/><g stroke="var(--pink)" stroke-width="2" fill="var(--pink)"><circle cx="60" cy="20" r="4"/><circle cx="60" cy="40" r="3"/><circle cx="45" cy="55" r="3"/><circle cx="75" cy="55" r="3"/><line x1="60" y1="24" x2="60" y2="37"/><line x1="60" y1="43" x2="45" y2="52"/><line x1="60" y1="43" x2="75" y2="52"/></g></svg>
+      <h4>Keypoints / pose</h4><p>Coordinates per joint. Metric: PCK, OKS. Feeds tracking and AR.</p>
+    </div>
+  </div>
+
+  <h3>Detection mechanics: IoU and NMS</h3>
+  <p>Detectors propose far more boxes than there are objects. <strong>IoU</strong> (intersection over union) measures box overlap; <strong>non-maximum suppression</strong> keeps the highest-scoring box and deletes others that overlap it beyond a threshold.</p>
+
+  <div class="panel">
+    <div class="panel-head"><div class="dots"><i></i><i></i><i></i></div><span class="p-title">Intersection over Union</span><span class="p-tag">Interactive</span></div>
+    <div class="panel-body">
+      <div class="split" style="align-items:center">
+        <div class="center"><svg id="iouSvg" class="diagram iou-svg" viewBox="0 0 330 220"></svg></div>
+        <div>
+          <div class="range-row"><label for="iouX">Horizontal offset</label><input type="range" id="iouX" min="-60" max="120" step="2" value="40"><output id="iouXV"></output></div>
+          <div class="range-row"><label for="iouY">Vertical offset</label><input type="range" id="iouY" min="-50" max="90" step="2" value="25"><output id="iouYV"></output></div>
+          <div class="stats" style="grid-template-columns:1fr">
+            <div class="stat acc"><div class="k">IoU</div><div class="v" id="iouV">–</div></div>
+            <div class="stat good"><div class="k">At threshold 0.5 this is…</div><div class="v" id="iouVerdict" style="font-size:16px">–</div></div>
+          </div>
+          <p class="small muted">mAP@[.5:.95] averages precision across IoU thresholds from 0.5 to 0.95 — a stricter measure that rewards tight boxes, and the standard COCO metric.</p>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <h2>Augmentation: the cheapest accuracy you'll ever buy</h2>
+  <div class="table-wrap">
+    <table class="t">
+      <thead><tr><th>Augmentation</th><th>Teaches invariance to</th><th>Careful with</th></tr></thead>
+      <tbody>
+        <tr><td>Random resized crop</td><td>Scale and framing</td><td>Cropping the object out entirely on small datasets</td></tr>
+        <tr><td>Horizontal flip</td><td>Left/right orientation</td><td>Text, digits, medical laterality, road signs</td></tr>
+        <tr><td>Colour jitter, grayscale</td><td>Lighting and camera differences</td><td>Tasks where colour <i>is</i> the label (ripeness, defects)</td></tr>
+        <tr><td>Rotation, affine, perspective</td><td>Viewpoint</td><td>Introducing black borders the model learns to key on</td></tr>
+        <tr><td>Mixup / CutMix</td><td>Overconfidence; acts as a strong regularizer</td><td>Interacts with label smoothing; hurts on small models</td></tr>
+        <tr><td>RandAugment / TrivialAugment</td><td>Everything, with one knob</td><td>Test-time mismatch if you augment at inference by accident</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="callout warn">
+    <div class="ico">⚙️</div>
+    <div class="body"><div class="title">The systems half of vision</div>
+      <p>At 224×224 a ResNet-50 forward pass is a few milliseconds on a modern GPU. Decoding a 4 MB JPEG and running five augmentations takes <b>tens of milliseconds of CPU</b>. Without enough workers, GPU-side decoding, pre-resized shards or a sequential file format, your expensive accelerator waits on <code>libjpeg</code>. Always profile the loader before profiling the model (Chapter 11).</p></div>
+  </div>
+
+  <h2>Deploying vision models</h2>
+  <div class="grid c3">
+    <div class="card"><h4 class="mt0">☁️ Server-side</h4><p class="small mb0">Batch requests, use fp16/int8, export to a runtime like TensorRT or ONNX Runtime. Resolution is your biggest cost lever: cost scales with pixels, and 320² is often within a point of 640².</p></div>
+    <div class="card"><h4 class="mt0">📱 On-device</h4><p class="small mb0">Quantized MobileNet/EfficientNet-class models, NPU delegates, and a strict memory budget. Privacy and latency wins; update cadence becomes an app-release problem.</p></div>
+    <div class="card"><h4 class="mt0">🎥 Streaming video</h4><p class="small mb0">Don't run the model on every frame: detect every k frames and track in between, or use motion gating. This is a 10× cost reduction that no model change can match (Chapter 50).</p></div>
+  </div>
+
+  <div class="callout danger"><div class="ico">⚠️</div><div class="body"><div class="title">Common mistakes</div>
+    <ul class="mb0">
+      <li><b>Augmenting the validation set.</b> Evaluation must be deterministic — resize and centre-crop only.</li>
+      <li><b>Different preprocessing in training and serving.</b> A different resize interpolation or normalization constant quietly costs accuracy points.</li>
+      <li><b>Flipping images where orientation matters.</b> Left/right matters in medical imaging, driving and any task involving text.</li>
+      <li><b>Ignoring class imbalance in detection.</b> Background boxes outnumber objects thousands to one; that's why focal loss and hard-negative mining exist.</li>
+      <li><b>Training at a resolution you can't afford to serve.</b> Decide the inference resolution first, then train for it.</li>
+      <li><b>Leaking near-duplicate frames across splits.</b> Consecutive video frames are almost identical — split by clip or by scene, never by frame.</li>
+    </ul></div></div>
+
+  <div class="callout interview"><div class="ico">🎤</div><div class="body"><div class="title">Interview drill</div>
+    <p class="small" style="margin:10px 0 0"><b>Warm-up:</b> Why do two stacked 3×3 convolutions often beat one 5×5?</p>
+    <details class="ans"><summary>How a strong answer sounds</summary><div>They have the same 5×5 receptive field but fewer parameters (2·9·C² vs 25·C²) and include an extra nonlinearity, so the composite function is more expressive per parameter. They're also better supported by hardware kernels. That observation — from VGG — is why nearly every CNN since uses small kernels stacked deep rather than large kernels stacked shallow.</div></details>
+    <p class="small" style="margin:10px 0 0"><b>Deeper:</b> Your defect detector gets 0.91 mAP offline but misses obvious defects in the factory. What do you check?</p>
+    <details class="ans"><summary>How a strong answer sounds</summary><div>First, distribution shift: the test set is probably from the same capture session as training — different line, lighting, camera or lens in production. I'd collect a few hundred production images, label them, and evaluate on that. Second, preprocessing parity: resize, normalization and colour space must match exactly between the training pipeline and the edge runtime; quantization can also shift behaviour. Third, the operating point: mAP averages over thresholds, but the line runs at one confidence threshold, so I'd measure recall at the deployed threshold on the specific defect classes that matter. The fix is usually a data engine — collect production failures continuously, label them, retrain — rather than a better architecture.</div></details>
+  </div></div>
+
+  <div class="takeaways">
+    <h3>🧠 Key takeaways</h3>
+    <ul>
+      <li>Convolution shares one small kernel across the image: translation equivariance and far fewer parameters.</li>
+      <li>Stride, padding and depth determine output size and receptive field — compute them, don't guess.</li>
+      <li>ResNet's skip connections made depth trainable; ViTs trade spatial priors for scale.</li>
+      <li>Detection needs IoU, NMS and mAP; segmentation needs per-pixel metrics like mIoU.</li>
+      <li>Augmentation is the cheapest regularizer, and the data pipeline is usually the real bottleneck.</li>
+    </ul>
+  </div>
+
+  <div class="quiz-wrap">
+    <h2>Check your understanding</h2>
+    <div class="quiz-score"></div>
+
+    <div class="quiz" data-answer="1">
+      <p class="q">Input 64×64, kernel 3, stride 2, padding 1. What is the output size?</p>
+      <div class="opts">
+        <button class="opt">64×64</button>
+        <button class="opt">32×32</button>
+        <button class="opt">31×31</button>
+        <button class="opt">16×16</button>
+      </div>
+      <div class="explain">⌊(64 + 2 − 3)/2⌋ + 1 = ⌊31.5⌋ + 1 = 32. Stride-2 with “same” padding halves each spatial dimension — the standard downsampling step.</div>
+    </div>
+
+    <div class="quiz" data-answer="2">
+      <p class="q">What problem do residual connections solve?</p>
+      <div class="opts">
+        <button class="opt">Class imbalance</button>
+        <button class="opt">Overfitting to the training set</button>
+        <button class="opt">Gradient degradation in very deep networks</button>
+        <button class="opt">Slow data loading</button>
+      </div>
+      <div class="explain">The identity path has derivative 1, so gradients reach early layers undiminished. That's what made 50–1,000-layer networks trainable.</div>
+    </div>
+
+    <div class="quiz" data-answer="0">
+      <p class="q">You have 4,000 labelled images of a specialised industrial part. Best approach?</p>
+      <div class="opts">
+        <button class="opt">Fine-tune a pretrained backbone with strong augmentation</button>
+        <button class="opt">Train a large ViT from scratch</button>
+        <button class="opt">Use a linear model on raw pixels</button>
+        <button class="opt">Collect 10M images before doing anything</button>
+      </div>
+      <div class="explain">Pretrained features transfer remarkably well. Training a data-hungry architecture from scratch on 4,000 images will badly underperform a fine-tuned ResNet or ConvNeXt.</div>
+    </div>
+
+    <div class="quiz" data-answer="3">
+      <p class="q">Why does a detector need non-maximum suppression?</p>
+      <div class="opts">
+        <button class="opt">To balance the classes during training</button>
+        <button class="opt">To normalize the image</button>
+        <button class="opt">To increase recall</button>
+        <button class="opt">Because many overlapping boxes are predicted for the same object</button>
+      </div>
+      <div class="explain">Dense predictions produce clusters of similar boxes. NMS keeps the highest-scoring one per cluster using an IoU threshold — too high and you get duplicates, too low and you delete genuinely adjacent objects.</div>
+    </div>
+
+    <div class="quiz" data-answer="1">
+      <p class="q">Your GPU sits at 35% utilization while training an image classifier. Most likely fix?</p>
+      <div class="opts">
+        <button class="opt">Use a larger model</button>
+        <button class="opt">Speed up the input pipeline: more workers, prefetch, pre-resized shards</button>
+        <button class="opt">Lower the learning rate</button>
+        <button class="opt">Add more augmentation</button>
+      </div>
+      <div class="explain">JPEG decode plus CPU-side augmentation usually can't keep up. More augmentation would make it worse; the answer is a faster pipeline or GPU-side decoding.</div>
+    </div>
+  </div>
+</main>
+<script src="assets/app.js"></script>
+<script>
+(function(){
+  const { $, $$, clamp } = ML;
+
+  /* ================= convolution playground ================= */
+  const N = 18;
+  const img = [];
+  for (let y = 0; y < N; y++) { img.push([]); for (let x = 0; x < N; x++) {
+    const inDisk = Math.hypot(x - 8.5, y - 8.5) < 5.2;
+    const inBar = x > 11 && x < 15 && y > 2 && y < 15;
+    img[y].push(inDisk ? 0.85 : inBar ? 0.55 : 0.12 + ((x + y) % 5) * 0.012);
+  } }
+  const KERNELS = {
+    edgeV: { k: [[-1, 0, 1], [-2, 0, 2], [-1, 0, 1]], n: 'A Sobel filter. Positive weights on the right, negative on the left, so the response is large wherever brightness changes horizontally — vertical edges light up, flat regions cancel to zero. Real CNNs learn filters like this in their first layer without being told to.' },
+    edgeH: { k: [[-1, -2, -1], [0, 0, 0], [1, 2, 1]], n: 'The same filter rotated: it responds to horizontal edges and ignores vertical ones. A conv layer holds dozens of orientations at once; the next layer combines them into corners and textures.' },
+    blur: { k: [[1, 2, 1], [2, 4, 2], [1, 2, 1]], n: 'All-positive weights that average the neighbourhood — a low-pass filter. Note it destroys fine detail: pooling layers do something similar, deliberately, to build invariance to small shifts.' },
+    sharpen: { k: [[0, -1, 0], [-1, 5, -1], [0, -1, 0]], n: 'Boost the centre, subtract the neighbours: the opposite of blur, amplifying local contrast. Negative surround weights are the classic “centre-surround” pattern also found in biological vision.' },
+    emboss: { k: [[-2, -1, 0], [-1, 1, 1], [0, 1, 2]], n: 'An asymmetric kernel producing a directional, lit-from-one-side effect. It illustrates that a kernel is just 9 numbers — the network chooses them to minimise loss, not to look nice.' },
+  };
+  function conv() {
+    const key = $('#kSeg').dataset.value || 'edgeV', K = KERNELS[key];
+    const sum = K.k.flat().reduce((a, b) => a + b, 0);
+    const norm = sum !== 0 ? sum : 1;
+    const out = [];
+    let mx = 0;
+    for (let y = 1; y < N - 1; y++) { const row = []; for (let x = 1; x < N - 1; x++) {
+      let v = 0;
+      for (let j = -1; j <= 1; j++) for (let i = -1; i <= 1; i++) v += img[y + j][x + i] * K.k[j + 1][i + 1];
+      v = v / norm;
+      row.push(v); mx = Math.max(mx, Math.abs(v));
+    } out.push(row); }
+    const gi = $('#imgIn'), go = $('#imgOut');
+    gi.style.gridTemplateColumns = `repeat(${N},1fr)`;
+    go.style.gridTemplateColumns = `repeat(${N - 2},1fr)`;
+    gi.innerHTML = img.flat().map(v => `<i style="background:rgba(120,130,150,${(v).toFixed(2)})"></i>`).join('');
+    go.innerHTML = out.flat().map(v => {
+      const a = clamp(Math.abs(v) / (mx || 1), 0, 1);
+      const col = v >= 0 ? '13,148,136' : '219,39,119';
+      return `<i style="background:rgba(${col},${a.toFixed(2)})"></i>`;
+    }).join('');
+    $('#kernBox').innerHTML = K.k.flat().map(v => `<i class="${v > 0 ? 'pos' : v < 0 ? 'neg' : ''}">${v}</i>`).join('');
+    $('#kNote').innerHTML = K.n;
+  }
+  $('#kSeg').addEventListener('segchange', conv);
+  conv();
+
+  /* ================= shape calculator ================= */
+  function shapes() {
+    const inp = +$('#cIn').value, k = +$('#cK').value, s = +$('#cS').value, p = +$('#cP').value, L = +$('#cL').value;
+    $('#cInV').textContent = inp + '×' + inp;
+    $('#cKV').textContent = k + '×' + k;
+    $('#cSV').textContent = s;
+    $('#cPV').textContent = p;
+    $('#cLV').textContent = L;
+    let size = inp, rf = 1, jump = 1, died = 0;
+    for (let i = 0; i < L; i++) {
+      const next = Math.floor((size + 2 * p - k) / s) + 1;
+      if (next < 1) { died = i; break; }
+      size = next;
+      rf = rf + (k - 1) * jump;
+      jump = jump * s;
+    }
+    $('#cOut').textContent = Math.floor((inp + 2 * p - k) / s) + 1;
+    $('#cFinal').textContent = died ? 'collapsed at layer ' + died : size + '×' + size;
+    $('#cRF').textContent = rf + ' px';
+    const params = k * k * 256 * 256;
+    $('#cParams').textContent = (params / 1e6).toFixed(2) + ' M';
+    const info = $('#cInfo p');
+    if (died) info.innerHTML = '❌ <b>The feature map collapsed.</b> With this stride and padding the spatial size hits zero before the last layer. Real networks downsample only every few layers, and use padding to keep sizes tidy.';
+    else if (rf < inp * 0.4) info.innerHTML = `⚠️ <b>Receptive field is only ${rf}px on a ${inp}px image (${(rf / inp * 100).toFixed(0)}%).</b> Deep features cannot see enough context to recognise large objects. Add depth, increase stride/pooling, or use dilated convolutions.`;
+    else if (rf > inp * 1.6) info.innerHTML = `✅ <b>Receptive field (${rf}px) comfortably covers the image.</b> Every output unit can in principle use global context — which is roughly the point at which a CNN behaves like it "sees the whole scene".`;
+    else info.innerHTML = `✅ <b>Balanced.</b> Receptive field ${rf}px vs input ${inp}px, ending at ${size}×${size}. This is the shape of a typical classification backbone before global pooling.`;
+  }
+  ['#cIn', '#cK', '#cS', '#cP', '#cL'].forEach(id => $(id).addEventListener('input', shapes));
+  shapes();
+
+  /* ================= IoU ================= */
+  function iou() {
+    const dx = +$('#iouX').value, dy = +$('#iouY').value;
+    $('#iouXV').textContent = dx + ' px'; $('#iouYV').textContent = dy + ' px';
+    const A = { x: 40, y: 40, w: 130, h: 110 };
+    const B = { x: 40 + dx, y: 40 + dy, w: 130, h: 110 };
+    const ix = Math.max(0, Math.min(A.x + A.w, B.x + B.w) - Math.max(A.x, B.x));
+    const iy = Math.max(0, Math.min(A.y + A.h, B.y + B.h) - Math.max(A.y, B.y));
+    const inter = ix * iy, uni = A.w * A.h + B.w * B.h - inter;
+    const v = inter / uni;
+    $('#iouSvg').innerHTML =
+      `<rect class="a" x="${A.x}" y="${A.y}" width="${A.w}" height="${A.h}" rx="6"/>` +
+      `<rect class="b" x="${B.x}" y="${B.y}" width="${B.w}" height="${B.h}" rx="6"/>` +
+      (inter > 0 ? `<rect class="i" x="${Math.max(A.x, B.x)}" y="${Math.max(A.y, B.y)}" width="${ix}" height="${iy}"/>` : '') +
+      `<text x="8" y="16" font-size="11" fill="var(--accent)" font-family="monospace">ground truth</text>` +
+      `<text x="8" y="212" font-size="11" fill="var(--amber)" font-family="monospace">prediction</text>`;
+    $('#iouV').textContent = v.toFixed(3);
+    $('#iouVerdict').innerHTML = v >= 0.5 ? '✅ counted as a detection' : v > 0 ? '❌ counted as a false positive' : '❌ no overlap at all';
+  }
+  $('#iouX').addEventListener('input', iou);
+  $('#iouY').addEventListener('input', iou);
+  iou();
+})();
+</script>
+</body>
+</html>

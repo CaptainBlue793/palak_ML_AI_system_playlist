@@ -1,0 +1,340 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>GPU Capacity &amp; Cost Engineering</title>
+<link rel="stylesheet" href="assets/style.css">
+<script>try{var t=JSON.parse(localStorage.getItem('ml-theme'));if(t)document.documentElement.setAttribute('data-theme',t)}catch(e){}</script>
+<style>
+  .levers { display:grid; gap:6px }
+  .levers .r { display:grid; grid-template-columns:230px 1fr 92px; gap:10px; align-items:center; font-size:13px }
+  .levers .tk { height:18px; border-radius:6px; background:var(--surface-3); overflow:hidden }
+  .levers .tk i { display:block; height:100%; transition:width .35s }
+  .levers .v { font-family:var(--mono); text-align:right; color:var(--muted); font-size:12px }
+  .levers .r.off { opacity:.45 }
+  .cost-svg { width:100%; height:210px }
+  .cost-svg text { font-size:10.5px; fill:var(--muted); font-family:var(--mono) }
+  .cost-svg .dem { fill:none; stroke:var(--accent); stroke-width:2.4 }
+  .cost-svg .cap { fill:none; stroke:var(--amber); stroke-width:2.4; stroke-dasharray:5 4 }
+  .cost-svg .idle { fill:var(--amber); opacity:.12 }
+  .cost-svg .short { fill:var(--red); opacity:.18 }
+  .buytbl td.n { font-family:var(--mono); text-align:right }
+</style>
+</head>
+<body data-chapter="38">
+<main class="content">
+
+  <section class="hero">
+    <div class="eyebrow"><span class="pill accent">Chapter 38</span><span class="pill amber">Expert</span><span class="pill">⏱ 45 min</span></div>
+    <h1>GPU Capacity &amp; <span class="grad">Cost Engineering</span></h1>
+    <p class="lead">GPUs are the most expensive infrastructure most companies have ever rented, and the majority of that money buys idle time. Cost engineering for ML is not penny-pinching — it's the difference between a product with viable unit economics and a demo that can't be launched.</p>
+    <ul class="objectives">
+      <li>Build a unit-economics model: cost per token, request and successful outcome</li>
+      <li>Find where utilization is actually lost</li>
+      <li>Choose between on-demand, reserved, spot and owned hardware</li>
+      <li>Plan capacity with headroom, queueing and cold starts in mind</li>
+      <li>Attribute cost per tenant and stop runaway spend</li>
+    </ul>
+  </section>
+
+  <h2>Know your unit</h2>
+  <p>“We spend £180k a month on GPUs” is not a number you can act on. These are:</p>
+
+  <div class="table-wrap">
+    <table class="t">
+      <thead><tr><th>Unit</th><th>Why it's useful</th></tr></thead>
+      <tbody>
+        <tr><td><b>Cost per 1M tokens (in / out separately)</b></td><td>Comparable to vendor pricing; shows whether self-hosting is worth it</td></tr>
+        <tr><td><b>Cost per request</b></td><td>Maps onto product pricing and per-feature budgets</td></tr>
+        <tr><td><b>Cost per active user per month</b></td><td>The number that decides whether the business model works</td></tr>
+        <tr><td><b>Cost per <i>successful</i> outcome</b></td><td>The honest one — retries, escalations and abandoned sessions are all cost with no value</td></tr>
+        <tr><td><b>Cost per experiment</b></td><td>Makes research spend visible and comparable to its yield</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="callout tip">
+    <div class="ico">🎯</div>
+    <div class="body"><div class="title">Cost per successful outcome changes decisions</div>
+      <p>A cheap model that answers 70% of tickets correctly may cost <i>more</i> per resolved ticket than an expensive one that answers 92%, once you count escalations to humans. Optimising cost per token while the escalation rate climbs is how teams save £20k of GPU and spend £80k of support salary.</p></div>
+  </div>
+
+  <h2>The cost model</h2>
+  <div class="panel">
+    <div class="panel-head"><div class="dots"><i></i><i></i><i></i></div><span class="p-title">Where the money goes</span><span class="p-tag">Interactive</span></div>
+    <div class="panel-body">
+      <div class="range-row"><label for="cReq">Requests per day</label><input type="range" id="cReq" min="1000" max="20000000" step="1000" value="2000000"><output id="cReqV"></output></div>
+      <div class="range-row"><label for="cIn2">Input tokens / request</label><input type="range" id="cIn2" min="100" max="20000" step="100" value="3000"><output id="cIn2V"></output></div>
+      <div class="range-row"><label for="cOut2">Output tokens / request</label><input type="range" id="cOut2" min="20" max="3000" step="20" value="350"><output id="cOut2V"></output></div>
+      <div class="range-row"><label for="cUtil">Fleet utilization</label><input type="range" id="cUtil" min="10" max="95" step="5" value="45"><output id="cUtilV"></output></div>
+      <div class="levers" id="leverList" style="margin-top:14px"></div>
+      <div class="stats" style="margin-top:12px">
+        <div class="stat bad"><div class="k">Baseline / month</div><div class="v" id="cBase" style="font-size:18px">–</div></div>
+        <div class="stat good"><div class="k">With levers applied</div><div class="v" id="cAfter" style="font-size:18px">–</div></div>
+        <div class="stat acc"><div class="k">Cost per request</div><div class="v" id="cPer" style="font-size:18px">–</div></div>
+        <div class="stat"><div class="k">Saving</div><div class="v" id="cSave" style="font-size:18px">–</div></div>
+      </div>
+      <div class="callout" id="cInfo" style="margin-top:12px"><div class="ico">💰</div><div class="body"><p style="margin:0"></p></div></div>
+      <p class="small muted">Click a lever to toggle it. The order is deliberate: the biggest wins are architectural (don't call the big model) rather than numerical (make the big model faster).</p>
+    </div>
+  </div>
+
+  <h2>Where utilization goes</h2>
+  <div class="table-wrap">
+    <table class="t">
+      <thead><tr><th>Loss</th><th>Typical size</th><th>Fix</th></tr></thead>
+      <tbody>
+        <tr><td><b>Provisioned for peak, running at trough</b></td><td>30–60%</td><td>Autoscaling with warm pools; move batch work into the troughs</td></tr>
+        <tr><td><b>Small batches at low traffic</b></td><td>20–50% of theoretical throughput</td><td>Continuous batching; consolidate replicas at night (Chapter 26)</td></tr>
+        <tr><td><b>Dev/experiment GPUs left idle</b></td><td>often &gt;70% of those GPUs</td><td>Idle-timeout reaping, shared pools, notebook TTLs</td></tr>
+        <tr><td><b>Fragmentation</b></td><td>10–30%</td><td>Right-size models to GPUs; MIG partitioning; bin-pack smaller models together</td></tr>
+        <tr><td><b>Failed and abandoned runs</b></td><td>5–20%</td><td>Early-stopping bad runs (ASHA), preflight checks, cheap smoke tests first</td></tr>
+        <tr><td><b>Retries and duplicate work</b></td><td>2–10%</td><td>Idempotency, response caching, cancel on client disconnect</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="callout warn">
+    <div class="ico">📉</div>
+    <div class="body"><div class="title">Utilization is a cost metric, not a performance metric</div>
+      <p>A fleet at 40% utilization is one where 60% of the bill buys nothing. But chasing 95% is also wrong: you need headroom for spikes, failover and deploys. Aim for a target band (say 55–75% at peak) and treat sustained excursions in either direction as an action: scale down, or scale up before the SLO breaks.</p></div>
+  </div>
+
+  <h2>Buy, rent, reserve or scavenge</h2>
+  <div class="table-wrap">
+    <table class="t buytbl">
+      <thead><tr><th>Option</th><th>Relative price</th><th>Use for</th><th>Risk</th></tr></thead>
+      <tbody>
+        <tr><td><b>On-demand cloud</b></td><td class="n">1.0×</td><td>Bursty and unpredictable work</td><td>Highest unit price; capacity not guaranteed for scarce GPUs</td></tr>
+        <tr><td><b>Reserved / committed</b></td><td class="n">0.4–0.6×</td><td>Your predictable baseline</td><td>You pay whether you use it — size it to the floor, not the peak</td></tr>
+        <tr><td><b>Spot / preemptible</b></td><td class="n">0.2–0.4×</td><td>Checkpointable training, batch inference, evaluation</td><td>Interruption at any time — needs the Chapter 25 machinery</td></tr>
+        <tr><td><b>Owned hardware</b></td><td class="n">0.2–0.35× (amortised)</td><td>Large, steady, long-term demand</td><td>Capex, depreciation, datacentre ops, and a 3-year bet on a fast-moving market</td></tr>
+        <tr><td><b>Serverless / per-token APIs</b></td><td class="n">varies</td><td>Low or spiky volume, fast time to market</td><td>Cheapest until volume grows, then usually the most expensive</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="callout tip">
+    <div class="ico">🧮</div>
+    <div class="body"><div class="title">The layered capacity strategy</div>
+      <p>Reserve your <b>floor</b> (the demand that exists every hour), use on-demand for the <b>daily peak</b>, and put interruptible work — training, evals, batch scoring — on <b>spot</b> so it soaks up whatever is cheap. Most teams get 30–50% off simply by matching the commitment shape to the demand shape, before touching a single model.</p></div>
+  </div>
+
+  <h2>Capacity planning</h2>
+  <div class="panel">
+    <div class="panel-head"><div class="dots"><i></i><i></i><i></i></div><span class="p-title">Demand vs provisioned capacity</span><span class="p-tag">Interactive</span></div>
+    <div class="panel-body">
+      <div class="seg" id="capSeg"><button data-v="peak" class="active">Provision for peak</button><button data-v="auto">Autoscale (10 min lag)</button><button data-v="layered">Reserved floor + burst</button></div>
+      <div class="svg-scroll"><svg id="capSvg" class="diagram cost-svg" viewBox="0 0 640 210"></svg></div>
+      <div class="stats">
+        <div class="stat bad"><div class="k">Idle capacity paid for</div><div class="v" id="capIdle" style="font-size:18px">–</div></div>
+        <div class="stat"><div class="k">Time under-provisioned</div><div class="v" id="capShort" style="font-size:18px">–</div></div>
+        <div class="stat good"><div class="k">Relative cost</div><div class="v" id="capCost" style="font-size:18px">–</div></div>
+      </div>
+      <div class="callout" id="capInfo" style="margin-top:12px"><div class="ico">📈</div><div class="body"><p style="margin:0"></p></div></div>
+    </div>
+  </div>
+
+  <div class="callout warn">
+    <div class="ico">❄️</div>
+    <div class="body"><div class="title">Cold start is what makes GPU autoscaling hard</div>
+      <p>Pulling a container and loading 140 GB of weights takes minutes. Autoscaling that reacts in ten minutes cannot serve a spike that arrives in two. Mitigations: keep a warm pool sized to your typical spike, pre-pull images onto nodes, cache weights on local NVMe, load lazily and stream, and scale on a <i>leading</i> signal (queue depth trend, scheduled traffic patterns) rather than a lagging one.</p></div>
+  </div>
+
+  <h2>Attribution and control</h2>
+  <div class="grid c3">
+    <div class="card feature reveal"><div class="f-ico">🏷️</div><h4>Tag everything</h4><p>Team, model, environment, tenant. Untagged spend becomes “platform overhead”, which is where accountability goes to die.</p></div>
+    <div class="card feature reveal"><div class="f-ico" style="background:var(--accent-2-soft)">📊</div><h4>Showback then chargeback</h4><p>Show teams their cost per model and per feature first. Behaviour usually changes before any money moves.</p></div>
+    <div class="card feature reveal"><div class="f-ico" style="background:var(--red-soft)">🚨</div><h4>Quotas and anomaly alerts</h4><p>Per-tenant token quotas and spend caps. Alert on a 3× day-over-day jump — a loop, a leaked key or an abusive tenant all look the same on the invoice.</p></div>
+  </div>
+
+  <div class="callout danger">
+    <div class="ico">💸</div>
+    <div class="body"><div class="title">Denial of wallet</div>
+      <p>An attacker (or a buggy client) who can trigger long generations can multiply your bill without breaking anything. Defences: per-tenant rate and token quotas, a hard max-output-tokens, request timeouts, a spend cap per API key with automatic suspension, and cost anomaly alerts. Treat cost as an availability property — running out of budget takes you down just as effectively as running out of GPUs (Chapter 36).</p></div>
+  </div>
+
+  <div class="callout danger"><div class="ico">⚠️</div><div class="body"><div class="title">Common mistakes</div>
+    <ul class="mb0">
+      <li><b>Optimising cost per token while the escalation rate rises.</b> Measure cost per successful outcome.</li>
+      <li><b>Reserving capacity for the peak.</b> Commit to the floor; burst on demand; put interruptible work on spot.</li>
+      <li><b>Autoscaling on GPU utilization.</b> It saturates instantly and carries no headroom signal — use queue depth.</li>
+      <li><b>Ignoring development and experiment GPUs.</b> Often the largest single pool of waste, and the least monitored.</li>
+      <li><b>No per-tenant attribution.</b> You cannot price a product whose cost you cannot attribute.</li>
+      <li><b>Buying hardware for a workload you haven't measured for six months.</b> A three-year commitment on a three-week trend.</li>
+    </ul></div></div>
+
+  <div class="callout interview"><div class="ico">🎤</div><div class="body"><div class="title">Interview drill</div>
+    <p class="small" style="margin:10px 0 0"><b>Warm-up:</b> Your GPU bill doubled with flat traffic. Where do you look?</p>
+    <details class="ans"><summary>How a strong answer sounds</summary><div>Something changed in cost per request. I'd check: prompt or context length — a retrieval change that returns more chunks, or a system-prompt edit that broke prefix caching, are the two most common causes and both double input tokens overnight. Then output length, which a prompt or model change can inflate. Then routing: are requests that used to hit the small model now going to the large one, or is a fallback firing constantly? Then infrastructure: replicas scaled up and never scaled down, an idle training cluster, a stuck batch job, or dev instances nobody reaped. Finally abuse: a per-tenant breakdown will show a single account that grew 50×. The fix for the recurrence is per-tenant attribution, a cost-per-request dashboard and an anomaly alert — so the next doubling is a page, not a month-end surprise.</div></details>
+    <p class="small" style="margin:10px 0 0"><b>Deeper:</b> Self-host or use a per-token API?</p>
+    <details class="ans"><summary>How a strong answer sounds</summary><div>It's a volume and control question. Below a few hundred million tokens a month, APIs almost always win: no idle capacity, no ops burden, immediate access to newer models. Above that, self-hosting can be several times cheaper per token — <i>if</i> you can keep utilization high, which means steady traffic, good batching and someone to own it. The break-even calculation must include engineering time, spare capacity for failover, and the cost of falling behind on model quality. Non-cost factors often decide it anyway: data residency, latency floors, custom fine-tunes, or a contractual requirement that data never leaves your infrastructure. A common middle path is hosting a small distilled model for the high-volume easy traffic and calling an API for the hard tail — which is the routing argument from Chapter 27 applied to procurement.</div></details>
+  </div></div>
+
+  <div class="takeaways">
+    <h3>🧠 Key takeaways</h3>
+    <ul>
+      <li>Pick a unit — cost per successful outcome is the one that prevents false economies.</li>
+      <li>Most GPU spend buys idle time; utilization is a cost metric with a target band, not a maximum.</li>
+      <li>Match commitment shape to demand shape: reserve the floor, burst on demand, spot the interruptible.</li>
+      <li>Cold starts make GPU autoscaling a leading-indicator problem; keep warm pools.</li>
+      <li>Tag, attribute, quota and alert — cost is an availability property.</li>
+    </ul>
+  </div>
+
+  <div class="quiz-wrap">
+    <h2>Check your understanding</h2>
+    <div class="quiz-score"></div>
+
+    <div class="quiz" data-answer="2">
+      <p class="q">Which single change usually gives the largest cost reduction for an LLM product?</p>
+      <div class="opts">
+        <button class="opt">Switching to a faster GPU</button>
+        <button class="opt">Increasing the batch size</button>
+        <button class="opt">Routing easy traffic to a small model so the big one runs rarely</button>
+        <button class="opt">Reducing logging</button>
+      </div>
+      <div class="explain">Not invoking the expensive model is worth more than making it cheaper. Quantization and batching then multiply the savings on what remains.</div>
+    </div>
+
+    <div class="quiz" data-answer="1">
+      <p class="q">You reserve capacity equal to your peak demand. What's the problem?</p>
+      <div class="opts">
+        <button class="opt">Reserved capacity is more expensive per hour</button>
+        <button class="opt">You pay for the peak 24 hours a day, while demand is often a fraction of it</button>
+        <button class="opt">Reservations can't be used for training</button>
+        <button class="opt">It breaks autoscaling</button>
+      </div>
+      <div class="explain">Commit to the floor — the demand present every hour — and serve the peak with on-demand capacity, with interruptible work on spot.</div>
+    </div>
+
+    <div class="quiz" data-answer="0">
+      <p class="q">Why is GPU utilization a poor autoscaling signal?</p>
+      <div class="opts">
+        <button class="opt">It saturates near 100% whenever anything runs, so it carries no headroom information</button>
+        <button class="opt">It's expensive to measure</button>
+        <button class="opt">It's only available on some clouds</button>
+        <button class="opt">It changes too slowly</button>
+      </div>
+      <div class="explain">Queue depth or queue wait time maps to the latency SLO and gives you warning before users feel anything.</div>
+    </div>
+
+    <div class="quiz" data-answer="3">
+      <p class="q">Your cheaper model cut cost per token by 60% but support costs rose. What metric would have caught this?</p>
+      <div class="opts">
+        <button class="opt">Cost per GPU-hour</button>
+        <button class="opt">Tokens per second</button>
+        <button class="opt">Fleet utilization</button>
+        <button class="opt">Cost per successfully resolved request</button>
+      </div>
+      <div class="explain">Escalations, retries and abandoned sessions are cost without value. Only an outcome-denominated metric prices them in.</div>
+    </div>
+
+    <div class="quiz" data-answer="1">
+      <p class="q">What is “denial of wallet”?</p>
+      <div class="opts">
+        <button class="opt">A billing system outage</button>
+        <button class="opt">An attacker driving up your inference spend by triggering expensive generations</button>
+        <button class="opt">A quota that blocks legitimate users</button>
+        <button class="opt">Spot instances being reclaimed</button>
+      </div>
+      <div class="explain">Nothing breaks, the bill just grows. Per-tenant quotas, output caps, spend limits with automatic suspension and anomaly alerts are the defences.</div>
+    </div>
+  </div>
+</main>
+<script src="assets/app.js"></script>
+<script>
+(function(){
+  const { $, $$, clamp, fmt } = ML;
+
+  /* ================= cost model ================= */
+  const LEVERS = [
+    { id: 'route', label: 'Route 65% of traffic to a small model', on: false, mult: 0.45, note: 'the largest single lever' },
+    { id: 'cache', label: 'Prompt/prefix caching (60% hit rate)', on: false, mult: 0.72, note: 'input tokens only' },
+    { id: 'trim', label: 'Trim retrieved context 40%', on: false, mult: 0.80, note: 'fewer, better chunks' },
+    { id: 'quant', label: 'int8 weights + fp8 KV cache', on: false, mult: 0.68, note: 'more concurrency per GPU' },
+    { id: 'batch', label: 'Continuous batching tuned', on: false, mult: 0.78, note: 'utilization, not model change' },
+    { id: 'spec', label: 'Speculative decoding (1.8×)', on: false, mult: 0.82, note: 'latency win too' },
+    { id: 'commit', label: 'Reserved floor + spot for batch', on: false, mult: 0.70, note: 'procurement, not engineering' },
+  ];
+  function cost() {
+    const req = +$('#cReq').value, inTok = +$('#cIn2').value, outTok = +$('#cOut2').value, util = +$('#cUtil').value / 100;
+    $('#cReqV').textContent = fmt(req, 0) + ' / day';
+    $('#cIn2V').textContent = fmt(inTok, 0);
+    $('#cOut2V').textContent = fmt(outTok, 0);
+    $('#cUtilV').textContent = (util * 100).toFixed(0) + '%';
+    // rough: 8B-class model self-hosted, $2.5/GPU-hour
+    const decodeTokPerGpuS = 2600 * util / 0.45, prefillTokPerGpuS = 42000 * util / 0.45;
+    const gpuHours = (req * outTok / decodeTokPerGpuS + req * inTok / prefillTokPerGpuS) / 3600;
+    const base = gpuHours * 2.5 * 30;
+    let mult = 1;
+    LEVERS.forEach(l => { if (l.on) mult *= l.mult; });
+    const after = base * mult;
+    $('#leverList').innerHTML = LEVERS.map(l =>
+      `<div class="r ${l.on ? '' : 'off'}" data-l="${l.id}" style="cursor:pointer"><span>${l.on ? '✅' : '⬜'} ${l.label}</span><div class="tk"><i style="width:${((1 - l.mult) * 260).toFixed(0)}%;background:${l.on ? 'var(--green)' : 'var(--surface-3)'}"></i></div><span class="v">−${((1 - l.mult) * 100).toFixed(0)}%</span></div>`).join('');
+    $$('#leverList .r').forEach(el => el.onclick = () => { const l = LEVERS.find(x => x.id === el.dataset.l); l.on = !l.on; cost(); });
+    $('#cBase').textContent = '$' + fmt(base, 0);
+    $('#cAfter').textContent = '$' + fmt(after, 0);
+    $('#cPer').textContent = '$' + (after / (req * 30)).toFixed(5);
+    $('#cSave').textContent = ((1 - mult) * 100).toFixed(0) + '%';
+    const anyOn = LEVERS.filter(l => l.on);
+    $('#cInfo p').innerHTML = anyOn.length
+      ? `Applying ${anyOn.length} lever(s) takes the monthly bill from <b>$${fmt(base, 0)}</b> to <b>$${fmt(after, 0)}</b> — a <b>${((1 - mult) * 100).toFixed(0)}%</b> reduction. Note the multiplicative stacking, and that the two largest levers (${LEVERS[0].label.toLowerCase()}, ${LEVERS[6].label.toLowerCase()}) are an <i>architecture</i> decision and a <i>procurement</i> decision, not model optimisations. Each lever is a quality or complexity trade that needs the evaluation gate from Chapter 35.`
+      : `Baseline: <b>$${fmt(base, 0)}/month</b>, or <b>$${(base / (req * 30)).toFixed(5)}</b> per request. At ${(util * 100).toFixed(0)}% utilization, roughly <b>$${fmt(base * (1 - util), 0)}</b> of that buys idle time. Toggle the levers to see the compounding effect.`;
+  }
+  ['#cReq', '#cIn2', '#cOut2', '#cUtil'].forEach(id => $(id).addEventListener('input', cost));
+  cost();
+
+  /* ================= capacity ================= */
+  function cap() {
+    const mode = $('#capSeg').dataset.value || 'peak';
+    const H = 168;   // one week, hourly
+    const demand = [];
+    for (let h = 0; h < H; h++) {
+      const hour = h % 24, day = Math.floor(h / 24);
+      const weekday = day < 5 ? 1 : 0.55;
+      const shape = 0.35 + 0.65 * Math.exp(-Math.pow((hour - 14) / 5.2, 2));
+      demand.push(clamp(shape * weekday * (0.92 + Math.random() * 0.16), 0.05, 1.2));
+    }
+    const peak = Math.max(...demand);
+    const capacity = demand.map((d, h) => {
+      if (mode === 'peak') return peak * 1.15;
+      if (mode === 'auto') { const lag = demand[Math.max(0, h - 1)]; return clamp(lag * 1.2, 0.3, peak * 1.2); }
+      const floor = 0.45;
+      return Math.max(floor, clamp(demand[Math.max(0, h - 1)] * 1.15, floor, peak * 1.2));
+    });
+    const X = (h) => 42 + h / H * 580, Y = (v) => 175 - v / (peak * 1.25) * 155;
+    let dpath = '', cpath = '', idleArea = '', shortArea = '';
+    demand.forEach((d, h) => { dpath += (dpath ? 'L' : 'M') + X(h).toFixed(1) + ',' + Y(d).toFixed(1) + ' '; });
+    capacity.forEach((c, h) => { cpath += (cpath ? 'L' : 'M') + X(h).toFixed(1) + ',' + Y(c).toFixed(1) + ' '; });
+    let idle = 0, short = 0;
+    demand.forEach((d, h) => {
+      const c = capacity[h];
+      if (c > d) { idle += c - d; idleArea += `<rect class="idle" x="${X(h)}" y="${Y(c)}" width="${580 / H + .8}" height="${Math.max(0, Y(d) - Y(c))}"/>`; }
+      else { short++; shortArea += `<rect class="short" x="${X(h)}" y="${Y(d)}" width="${580 / H + .8}" height="${Math.max(0, Y(c) - Y(d))}"/>`; }
+    });
+    $('#capSvg').innerHTML =
+      idleArea + shortArea +
+      `<line stroke="var(--border-strong)" x1="42" y1="175" x2="628" y2="175"/><line stroke="var(--border-strong)" x1="42" y1="10" x2="42" y2="175"/>` +
+      `<path class="dem" d="${dpath}"/><path class="cap" d="${cpath}"/>` +
+      `<text x="280" y="196">one week (hourly)</text><text x="2" y="14">load</text>` +
+      `<text x="470" y="28" style="fill:var(--accent)">demand</text><text x="470" y="44" style="fill:var(--amber)">provisioned</text>`;
+    const totalDemand = demand.reduce((a, b) => a + b, 0);
+    const totalCap = capacity.reduce((a, b) => a + b, 0);
+    $('#capIdle').textContent = ((idle / totalCap) * 100).toFixed(0) + '%';
+    $('#capShort').textContent = (short / H * 100).toFixed(1) + '% of hours';
+    $('#capCost').textContent = (totalCap / totalDemand).toFixed(2) + '× demand';
+    const notes = {
+      peak: `<b>Provisioning for peak.</b> Never under-provisioned, and you pay for the busiest hour around the clock — roughly <b>${(totalCap / totalDemand).toFixed(2)}×</b> what the work actually needs. Simple, safe, and the default reason GPU bills look the way they do.`,
+      auto: `<b>Autoscaling.</b> Capacity tracks demand with a lag, cutting idle time sharply — but the lag means <b>${(short / H * 100).toFixed(1)}%</b> of hours are under-provisioned, which is where your latency SLO breaks. With GPU cold starts of several minutes, that lag is hard to shrink; a warm pool is the usual remedy.`,
+      layered: `<b>Reserved floor plus burst.</b> The floor is committed at a discount, the peak is served on demand, and interruptible work fills the troughs. This is the shape most mature teams land on: total cost around <b>${(totalCap / totalDemand).toFixed(2)}×</b> demand, with the committed portion bought at 40–60% off.`,
+    };
+    $('#capInfo p').innerHTML = notes[mode];
+  }
+  $('#capSeg').addEventListener('segchange', cap);
+  cap();
+})();
+</script>
+</body>
+</html>

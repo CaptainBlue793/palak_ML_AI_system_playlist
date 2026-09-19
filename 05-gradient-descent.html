@@ -1,0 +1,471 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Learning by Gradient Descent</title>
+<link rel="stylesheet" href="assets/style.css">
+<script>try{var t=JSON.parse(localStorage.getItem('ml-theme'));if(t)document.documentElement.setAttribute('data-theme',t)}catch(e){}</script>
+<style>
+  .fit-svg, .clf-svg { width:100%; touch-action:none; cursor:crosshair; }
+  .fit-svg .pt { fill:var(--accent-2); }
+  .fit-svg .res { stroke:var(--red); stroke-width:1.5; opacity:.6; }
+  .fit-svg .line { stroke:var(--accent); stroke-width:3; }
+  .fit-svg .ax, .clf-svg .ax { stroke:var(--border-strong); }
+  .fit-svg text, .clf-svg text, .loss-svg text { font-size:10.5px; fill:var(--muted); font-family:var(--mono); }
+  .loss-svg { width:100%; height:120px; }
+  .loss-svg .ln { fill:none; stroke:var(--pink); stroke-width:2.2; }
+  .clf-svg .pa { fill:var(--accent); } .clf-svg .pb { fill:var(--amber); }
+  .clf-svg .bnd { stroke:var(--text); stroke-width:2.5; stroke-dasharray:6 4; }
+  .clf-svg .region { opacity:.13; }
+  .lr-card { padding:12px 14px; border-radius:12px; border:1px solid var(--border); background:var(--surface-2); font-size:13.5px; }
+  .lr-card.ok { border-color:var(--green); background:var(--green-soft); }
+  .lr-card.slow { border-color:var(--amber); background:var(--amber-soft); }
+  .lr-card.boom { border-color:var(--red); background:var(--red-soft); }
+  .batch-strip { display:flex; gap:3px; flex-wrap:wrap; margin-top:8px; }
+  .batch-strip i { width:12px; height:12px; border-radius:3px; background:var(--surface-3); }
+  .batch-strip i.on { background:var(--accent); }
+</style>
+</head>
+<body data-chapter="5">
+<main class="content">
+
+  <section class="hero">
+    <div class="eyebrow"><span class="pill accent">Chapter 5</span><span class="pill green">Beginner</span><span class="pill">⏱ 40 min</span></div>
+    <h1>Learning by <span class="grad">Gradient Descent</span></h1>
+    <p class="lead">One algorithm trains almost everything: predict, measure how wrong you were, nudge the parameters downhill, repeat. Build it once here on a straight line, and GPT-scale training is the same loop with more parameters and more plumbing.</p>
+    <ul class="objectives">
+      <li>Write down a model, a loss and an update rule</li>
+      <li>Train a real regression in the page and watch the loss fall</li>
+      <li>Feel what a learning rate that's too big or too small does</li>
+      <li>Choose between full-batch, mini-batch and stochastic updates</li>
+      <li>Extend the same machinery to classification with logistic regression</li>
+    </ul>
+  </section>
+
+  <h2>The smallest possible model</h2>
+  <p>Predict house price from size: <code>ŷ = w·x + b</code>. Two parameters. <code>w</code> is how much price moves per square metre; <code>b</code> is where the line crosses zero. Training means finding the <code>w, b</code> that make the predictions least wrong across all the data.</p>
+
+  <p>“Least wrong” needs a number. For regression the default is <strong>mean squared error</strong>:</p>
+  <pre class="code">MSE = (1/n) · Σ (ŷᵢ − yᵢ)²      <span class="c"># average squared residual</span></pre>
+  <p>Squaring does two useful things: it removes the sign (being 5 too high is as bad as 5 too low) and it punishes big misses far more than small ones. It also has a smooth derivative, which is what lets us do calculus on it.</p>
+
+  <div class="panel">
+    <div class="panel-head"><div class="dots"><i></i><i></i><i></i></div><span class="p-title">Train a regression — click the plot to add data</span><span class="p-tag">Live trainer</span></div>
+    <div class="panel-body">
+      <div class="split" style="grid-template-columns:minmax(0,1.35fr) minmax(0,1fr)">
+        <div class="svg-scroll"><svg id="fitSvg" class="diagram fit-svg" viewBox="0 0 480 300"></svg></div>
+        <div>
+          <div class="range-row"><label for="lr">Learning rate η</label><input type="range" id="lr" min="-3.3" max="0.35" step="0.05" value="-1.3"><output id="lrv"></output></div>
+          <div class="lr-card" id="lrCard" style="margin-bottom:10px"></div>
+          <div class="stats" style="grid-template-columns:1fr 1fr">
+            <div class="stat acc"><div class="k">Loss (MSE)</div><div class="v" id="mLoss">–</div></div>
+            <div class="stat"><div class="k">Epoch</div><div class="v" id="mEpoch">0</div></div>
+            <div class="stat good"><div class="k">w</div><div class="v" id="mW">0.00</div></div>
+            <div class="stat good"><div class="k">b</div><div class="v" id="mB">0.00</div></div>
+          </div>
+          <svg id="lossSvg" class="diagram loss-svg" viewBox="0 0 300 120"></svg>
+          <div class="controls">
+            <button class="btn sm primary" id="btnStep">Step ×1</button>
+            <button class="btn sm" id="btnRun">▶ Train</button>
+            <button class="btn sm" id="btnInit">↺ Reset weights</button>
+            <button class="btn sm ghost" id="btnData">🎲 New data</button>
+          </div>
+          <div class="seg" id="batchSeg" style="margin-top:10px"><button data-v="full" class="active">Full batch</button><button data-v="mini">Mini-batch 8</button><button data-v="sgd">SGD (1)</button></div>
+          <div class="batch-strip" id="batchStrip"></div>
+        </div>
+      </div>
+      <div class="legend"><span><i style="background:var(--accent-2)"></i>training examples</span><span><i style="background:var(--accent)"></i>current model</span><span><i style="background:var(--red)"></i>residuals — the loss is their mean square</span></div>
+    </div>
+  </div>
+
+  <h2>Where the update rule comes from</h2>
+  <p>You want the derivative of the loss with respect to each parameter. For MSE with one feature, it falls out in two lines:</p>
+
+  <pre class="code"><span class="c"># prediction and error for one example</span>
+ŷ = w·x + b
+e = ŷ − y
+
+<span class="c"># how the loss changes as w and b change</span>
+∂MSE/∂w = (2/n) · Σ e·x      <span class="c"># errors weighted by the input</span>
+∂MSE/∂b = (2/n) · Σ e        <span class="c"># just the mean error</span>
+
+<span class="c"># the step: move against the gradient</span>
+w ← w − η · ∂MSE/∂w
+b ← b − η · ∂MSE/∂b</pre>
+
+  <div class="callout tip">
+    <div class="ico">💡</div>
+    <div class="body"><div class="title">Read the gradient, don't memorise it</div>
+      <p><code>Σ e·x</code> says: <i>if the examples where we predict too high tend to have large x, then w is too big</i>. That's the whole intuition. Every gradient in deep learning has this flavour — “how much did this parameter contribute to the error, in the direction it was pushed?”</p></div>
+  </div>
+
+  <h2>The learning rate is the whole game</h2>
+  <p>η controls stride length. It is the hyperparameter you will tune more often than any other, and its failure modes are visually obvious once you've seen them.</p>
+
+  <div class="grid c3">
+    <div class="card feature reveal"><div class="f-ico" style="background:var(--amber-soft)">🐌</div><h4>Too small</h4><p>Loss falls, but glacially. You'll conclude the model can't learn when actually you didn't wait. Costs you GPU-weeks at scale.</p></div>
+    <div class="card feature reveal"><div class="f-ico" style="background:var(--green-soft)">✅</div><h4>Just right</h4><p>Fast drop, then a smooth flattening. Usually the largest rate that doesn't spike — found with a short LR-range test (Chapter 9).</p></div>
+    <div class="card feature reveal"><div class="f-ico" style="background:var(--red-soft)">💥</div><h4>Too large</h4><p>The step overshoots the valley and lands higher up the opposite slope. Loss oscillates, then becomes <code>NaN</code>. Classic first-day-of-training failure.</p></div>
+  </div>
+
+  <div class="callout warn">
+    <div class="ico">📐</div>
+    <div class="body"><div class="title">Unscaled features make η impossible to choose</div>
+      <p>If <code>rooms</code> ranges 1–6 and <code>square_metres</code> ranges 20–400, the loss surface is a long narrow canyon. The rate that's safe for the steep direction is far too small for the shallow one, so training zig-zags. Standardizing features (Chapter 4) turns the canyon into a bowl — the single highest-value preprocessing step for gradient-based models.</p></div>
+  </div>
+
+  <h2>Full batch, mini-batch, or one at a time?</h2>
+  <p>The gradient over the entire dataset is the “true” direction, but computing it for 400 million examples per step is absurd. In practice you estimate it from a <strong>mini-batch</strong>.</p>
+
+  <div class="table-wrap">
+    <table class="t">
+      <thead><tr><th>Mode</th><th>Gradient per step</th><th>Pros</th><th>Cons</th></tr></thead>
+      <tbody>
+        <tr><td><b>Full batch</b></td><td>All n examples</td><td>Exact direction, smooth curve</td><td>One step per pass — hopeless at scale; can't fit in memory</td></tr>
+        <tr><td><b>Mini-batch (32–4M tokens)</b></td><td>A random subset</td><td>Hardware-efficient, noise helps escape bad minima</td><td>Batch size interacts with learning rate and generalization</td></tr>
+        <tr><td><b>Stochastic (n=1)</b></td><td>One example</td><td>Updates immediately; useful for online learning</td><td>Very noisy, terrible GPU utilization</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="callout tip">
+    <div class="ico">⚖️</div>
+    <div class="body"><div class="title">Batch size in one sentence</div>
+      <p>Bigger batches give a less noisy gradient, so you can use a bigger learning rate (a common rule: scale η roughly with batch size, or with its square root) — but past a point extra batch size buys accuracy per step that costs more compute than it saves. Chapter 23 shows how this drives distributed training design.</p></div>
+  </div>
+
+  <h2>From regression to classification: logistic regression</h2>
+  <p>Now predict a <i>probability</i>, not a number. Keep the same linear core, squash it through a <strong>sigmoid</strong> so it lands in (0, 1), and change the loss to cross-entropy:</p>
+
+  <pre class="code">z = w₁x₁ + w₂x₂ + b
+p = σ(z) = 1 / (1 + e^(−z))          <span class="c"># probability of class 1</span>
+L = −[ y·log(p) + (1−y)·log(1−p) ]    <span class="c"># binary cross-entropy</span>
+
+∂L/∂w = (p − y) · x                   <span class="c"># astonishingly, the same shape as before</span></pre>
+
+  <p>That last line is not a coincidence: for the natural pairing of sigmoid with cross-entropy (and softmax with categorical cross-entropy), the gradient simplifies to <b>(prediction − truth) × input</b>. It's why these pairings are standard.</p>
+
+  <div class="panel">
+    <div class="panel-head"><div class="dots"><i></i><i></i><i></i></div><span class="p-title">Train a classifier — click to add points</span><span class="p-tag">Live trainer</span></div>
+    <div class="panel-body">
+      <div class="split" style="grid-template-columns:minmax(0,1.2fr) minmax(0,1fr)">
+        <div class="svg-scroll"><svg id="clfSvg" class="diagram clf-svg" viewBox="0 0 400 300"></svg></div>
+        <div>
+          <div class="seg" id="classSeg"><button data-v="a" class="active">🔵 Add class 0</button><button data-v="b">🟠 Add class 1</button></div>
+          <div class="stats" style="grid-template-columns:1fr 1fr;margin-top:10px">
+            <div class="stat acc"><div class="k">Cross-entropy</div><div class="v" id="cLoss">–</div></div>
+            <div class="stat good"><div class="k">Accuracy</div><div class="v" id="cAcc">–</div></div>
+          </div>
+          <div class="controls">
+            <button class="btn sm primary" id="cRun">▶ Train 200 steps</button>
+            <button class="btn sm" id="cStep">Step ×20</button>
+            <button class="btn sm ghost" id="cReset">↺ Clear</button>
+          </div>
+          <p class="small muted" style="margin-top:10px">The dashed line is where <code>p = 0.5</code>. Everything on one side is predicted class 1. Try adding a point deep in the wrong region and retraining — a single outlier moves a linear boundary a long way, which is exactly what regularization is for.</p>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <h2>Regularization: preferring simpler fits</h2>
+  <p>Nothing stops the optimizer driving weights to huge values to squeeze out the last bit of training loss — which is overfitting (Chapter 7). Regularization adds a penalty for complexity to the objective itself.</p>
+
+  <div class="split">
+    <div class="card"><h4 class="mt0">L2 (ridge / weight decay)</h4><p class="small mb0">Add <code>λ·Σw²</code>. Shrinks all weights smoothly toward zero; the default for neural networks, where it is usually implemented as <b>weight decay</b> in the optimizer.</p></div>
+    <div class="card"><h4 class="mt0">L1 (lasso)</h4><p class="small mb0">Add <code>λ·Σ|w|</code>. Drives some weights exactly to zero, so it performs feature selection. Useful when you want a sparse, explainable model.</p></div>
+  </div>
+
+  <div class="callout analogy">
+    <div class="ico">🎒</div>
+    <div class="body"><div class="title">Analogy: packing for a trip</div>
+      <p>The loss says “bring whatever makes the trip perfect”. Regularization says “every item costs weight”. L2 makes you pack lighter versions of everything; L1 makes you leave some items behind entirely. Both stop you from carrying a wardrobe to cover every hypothetical — which is exactly what an overfitted model does.</p></div>
+  </div>
+
+  <h2>What goes wrong, and what it looks like</h2>
+
+  <div class="table-wrap">
+    <table class="t">
+      <thead><tr><th>Symptom</th><th>Most likely cause</th><th>Fix</th></tr></thead>
+      <tbody>
+        <tr><td>Loss becomes <code>NaN</code> after a few steps</td><td>Learning rate too high; exploding values; log(0)</td><td>Lower η 10×, clip gradients, add epsilon inside logs</td></tr>
+        <tr><td>Loss oscillates and won't settle</td><td>η slightly too high, or batch too small</td><td>Decay η over time; raise batch size</td></tr>
+        <tr><td>Loss decreases painfully slowly</td><td>η too small, or features unscaled</td><td>Standardize inputs first, then raise η</td></tr>
+        <tr><td>Training loss falls, validation rises</td><td>Overfitting</td><td>Regularization, more data, early stopping (Ch 7, 9)</td></tr>
+        <tr><td>Loss flat from step one</td><td>Dead learning rate, wrong loss, or labels shuffled</td><td>Overfit 20 examples deliberately — if that fails, it's a bug, not tuning</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="callout tip">
+    <div class="ico">🔬</div>
+    <div class="body"><div class="title">The single best debugging trick in ML</div>
+      <p><b>Overfit a tiny subset first.</b> Take 16 examples and train until the loss is ~0. If a model cannot memorise 16 examples, no amount of data or tuning will save it — you have a bug in the data pipeline, the loss or the label alignment. This takes two minutes and saves days.</p></div>
+  </div>
+
+  <div class="callout danger"><div class="ico">⚠️</div><div class="body"><div class="title">Common mistakes</div>
+    <ul class="mb0">
+      <li><b>Tuning the learning rate before scaling the features.</b> You're tuning around a problem you could have removed.</li>
+      <li><b>Using MSE for classification.</b> It gives tiny gradients when the model is confidently wrong — precisely when you need a big correction. Use cross-entropy.</li>
+      <li><b>Forgetting to zero gradients</b> between steps in frameworks that accumulate them — the update ends up using a sum of every batch so far.</li>
+      <li><b>Judging a run by training loss alone.</b> The only number that matters is on data the model has not seen.</li>
+      <li><b>Assuming convergence means correctness.</b> Gradient descent happily converges to a great fit of a leaked feature.</li>
+    </ul></div></div>
+
+  <div class="callout interview"><div class="ico">🎤</div><div class="body"><div class="title">Interview drill</div>
+    <p class="small" style="margin:10px 0 0"><b>Warm-up:</b> Your loss goes to NaN in the first 100 steps. Walk me through the diagnosis.</p>
+    <details class="ans"><summary>How a strong answer sounds</summary><div>First reproduce with a fixed seed and log the loss every step to see whether it explodes or jumps instantly. Instant NaN usually means bad input data (NaNs or infinities in features, a divide-by-zero in normalization, log of zero); a gradual explosion means the learning rate is too high or gradients are unclipped. So: check the batch's input statistics, lower the learning rate by 10×, add gradient clipping, confirm the loss function is numerically stable (use logits-based cross-entropy rather than log of a softmax output), and add a warmup. If it survives at a tiny rate, it's a rate/stability problem; if it NaNs even then, it's data.</div></details>
+    <p class="small" style="margin:10px 0 0"><b>Deeper:</b> Why does mini-batch noise sometimes improve final quality rather than just being a compute compromise?</p>
+    <details class="ans"><summary>How a strong answer sounds</summary><div>The noisy gradient acts as an implicit regularizer: it discourages settling into sharp, narrow minima that fit the training batch precisely but generalize poorly, and it lets the trajectory escape flat saddle regions. Empirically, very large batches with an unchanged schedule often generalize slightly worse, which is why large-batch training pairs bigger batches with learning-rate scaling, warmup and sometimes extra regularization. It's a trade — noise helps generalization, but too much of it wastes steps.</div></details>
+  </div></div>
+
+  <div class="takeaways">
+    <h3>🧠 Key takeaways</h3>
+    <ul>
+      <li>Training = model + loss + optimizer; the loop is predict → measure → step downhill → repeat.</li>
+      <li>The gradient answers “how much did this parameter contribute to the error?”; the learning rate is the stride.</li>
+      <li>Standardize features before tuning the learning rate — it reshapes the loss surface.</li>
+      <li>Mini-batches trade gradient accuracy for hardware efficiency, and the noise mildly helps generalization.</li>
+      <li>Logistic regression is the same machinery with a sigmoid and cross-entropy; the gradient is still (prediction − truth) × input.</li>
+    </ul>
+  </div>
+
+  <div class="quiz-wrap">
+    <h2>Check your understanding</h2>
+    <div class="quiz-score"></div>
+
+    <div class="quiz" data-answer="2">
+      <p class="q">Your training loss oscillates wildly and occasionally jumps upward. What's the most likely single cause?</p>
+      <div class="opts">
+        <button class="opt">Too much training data</button>
+        <button class="opt">The model has too few parameters</button>
+        <button class="opt">The learning rate is too high</button>
+        <button class="opt">You forgot to shuffle the validation set</button>
+      </div>
+      <div class="explain">Steps overshoot the minimum and land on the far slope. Halve the rate (or add warmup and decay) and it usually settles immediately.</div>
+    </div>
+
+    <div class="quiz" data-answer="1">
+      <p class="q">Why is cross-entropy preferred over MSE for classification?</p>
+      <div class="opts">
+        <button class="opt">It's faster to compute</button>
+        <button class="opt">It gives large gradients exactly when the model is confidently wrong</button>
+        <button class="opt">It guarantees a convex loss for neural networks</button>
+        <button class="opt">It doesn't require probabilities</button>
+      </div>
+      <div class="explain">With MSE and a sigmoid, a confidently wrong prediction sits in the saturated region where the gradient nearly vanishes — so the model learns slowest when it is most wrong. Cross-entropy fixes that.</div>
+    </div>
+
+    <div class="quiz" data-answer="0">
+      <p class="q">Feature A ranges 0–1 and feature B ranges 0–100,000, and you train a linear model with a single learning rate. What happens?</p>
+      <div class="opts">
+        <button class="opt">Training zig-zags and converges very slowly</button>
+        <button class="opt">Feature A is ignored entirely</button>
+        <button class="opt">The loss becomes non-convex</button>
+        <button class="opt">Nothing — gradient descent is scale-invariant</button>
+      </div>
+      <div class="explain">The loss surface becomes a narrow canyon: any rate safe for the steep direction is far too small for the shallow one. Standardize first.</div>
+    </div>
+
+    <div class="quiz" data-answer="3">
+      <p class="q">You use L1 instead of L2 regularization. What is the most distinctive effect?</p>
+      <div class="opts">
+        <button class="opt">Training becomes faster</button>
+        <button class="opt">Weights become larger on average</button>
+        <button class="opt">The model can no longer overfit</button>
+        <button class="opt">Many weights become exactly zero</button>
+      </div>
+      <div class="explain">L1's constant-magnitude gradient pushes small weights all the way to zero, producing a sparse model — effectively automatic feature selection.</div>
+    </div>
+
+    <div class="quiz" data-answer="1">
+      <p class="q">A new model's loss is completely flat from step 1. What should you try first?</p>
+      <div class="opts">
+        <button class="opt">Train for 10× longer</button>
+        <button class="opt">Try to deliberately overfit 16 examples</button>
+        <button class="opt">Add more regularization</button>
+        <button class="opt">Collect more data</button>
+      </div>
+      <div class="explain">If the model can't drive the loss to near zero on 16 examples, the problem is a bug — labels misaligned, gradients not flowing, a frozen layer, a zero learning rate — not a lack of data or time.</div>
+    </div>
+  </div>
+</main>
+<script src="assets/app.js"></script>
+<script>
+(function(){
+  const { $, $$, clamp } = ML;
+
+  /* ================= linear regression trainer ================= */
+  const FW = 480, FH = 300, PAD = 40;
+  let pts = [], w = 0, b = 0, epoch = 0, hist = [], running = false, order = [];
+  const fx = (x) => PAD + x * (FW - PAD - 20);          // x in [0,1]
+  const fy = (y) => FH - PAD - y * (FH - PAD - 20);     // y in [0,1]
+  const ix = (px) => (px - PAD) / (FW - PAD - 20);
+  const iy = (py) => (FH - PAD - py) / (FH - PAD - 20);
+
+  function genData() {
+    pts = [];
+    const tw = 0.55 + Math.random() * 0.5, tb = 0.1 + Math.random() * 0.2;
+    for (let i = 0; i < 40; i++) {
+      const x = Math.random();
+      pts.push({ x, y: clamp(tw * x + tb + (Math.random() - 0.5) * 0.18, 0.02, 0.98) });
+    }
+    initW();
+  }
+  function initW() { w = Math.random() * 0.4 - 0.2; b = Math.random() * 0.3; epoch = 0; hist = []; order = []; draw(); }
+
+  const lossOf = () => pts.length ? pts.reduce((s, p) => s + (w * p.x + b - p.y) ** 2, 0) / pts.length : 0;
+
+  function step() {
+    if (!pts.length) return;
+    const lr = Math.pow(10, +$('#lr').value);
+    const mode = $('#batchSeg').dataset.value || 'full';
+    let batch;
+    if (mode === 'full') batch = pts;
+    else {
+      const k = mode === 'mini' ? 8 : 1;
+      if (order.length < k) order = pts.map((_, i) => i).sort(() => Math.random() - .5);
+      batch = order.splice(0, k).map(i => pts[i]);
+    }
+    let gw = 0, gb = 0;
+    batch.forEach(p => { const e = w * p.x + b - p.y; gw += 2 * e * p.x; gb += 2 * e; });
+    gw /= batch.length; gb /= batch.length;
+    w -= lr * gw; b -= lr * gb;
+    if (!isFinite(w)) { w = 9; } if (!isFinite(b)) { b = 9; }
+    epoch++;
+    hist.push(clamp(lossOf(), 0, 1e6));
+    if (hist.length > 160) hist.shift();
+    // batch indicator
+    const on = new Set(batch.map(p => pts.indexOf(p)));
+    $('#batchStrip').innerHTML = pts.map((_, i) => `<i class="${on.has(i) ? 'on' : ''}"></i>`).join('');
+    draw();
+  }
+
+  function draw() {
+    let g = `<line class="ax" x1="${PAD}" y1="${FH - PAD}" x2="${FW - 12}" y2="${FH - PAD}"/>` +
+            `<line class="ax" x1="${PAD}" y1="14" x2="${PAD}" y2="${FH - PAD}"/>` +
+            `<text x="${FW - 92}" y="${FH - PAD + 20}">size (scaled)</text>` +
+            `<text x="6" y="24">price</text>`;
+    // line
+    const y0 = b, y1 = w + b;
+    g += `<line class="line" x1="${fx(0)}" y1="${fy(clamp(y0, -0.6, 1.6))}" x2="${fx(1)}" y2="${fy(clamp(y1, -0.6, 1.6))}"/>`;
+    pts.forEach(p => {
+      const py = w * p.x + b;
+      g += `<line class="res" x1="${fx(p.x)}" y1="${fy(p.y)}" x2="${fx(p.x)}" y2="${fy(clamp(py, -0.6, 1.6))}"/>`;
+      g += `<circle class="pt" cx="${fx(p.x)}" cy="${fy(p.y)}" r="4.5"/>`;
+    });
+    $('#fitSvg').innerHTML = g;
+
+    const L = lossOf();
+    $('#mLoss').textContent = isFinite(L) ? (L > 99 ? L.toExponential(1) : L.toFixed(4)) : 'NaN 💥';
+    $('#mEpoch').textContent = epoch;
+    $('#mW').textContent = w.toFixed(3);
+    $('#mB').textContent = b.toFixed(3);
+
+    // loss curve
+    if (hist.length > 1) {
+      const mx = Math.max(...hist), lg = (v) => Math.log10(v + 1e-6) ;
+      const lo = lg(Math.min(...hist)), hi = lg(mx);
+      const path = hist.map((v, i) => `${(i / (hist.length - 1) * 290 + 5).toFixed(1)},${(110 - (lg(v) - lo) / ((hi - lo) || 1) * 95).toFixed(1)}`).join(' L');
+      $('#lossSvg').innerHTML = `<path class="ln" d="M${path}"/><text x="5" y="12">loss (log scale), last ${hist.length} steps</text>`;
+    } else $('#lossSvg').innerHTML = `<text x="5" y="60">press Train to see the loss curve</text>`;
+  }
+
+  function lrCard() {
+    const lr = Math.pow(10, +$('#lr').value);
+    $('#lrv').textContent = lr < 0.001 ? lr.toExponential(1) : lr.toFixed(3);
+    const c = $('#lrCard');
+    if (lr < 0.004) { c.className = 'lr-card slow'; c.innerHTML = '🐌 <b>Very small.</b> The line will creep toward the data. Correct, but you would burn a fortune in GPU time at this rate.'; }
+    else if (lr < 0.9) { c.className = 'lr-card ok'; c.innerHTML = '✅ <b>Healthy range.</b> Fast initial drop, then a smooth flattening — this is what a good run looks like.'; }
+    else if (lr < 2.1) { c.className = 'lr-card slow'; c.innerHTML = '⚠️ <b>On the edge.</b> Expect oscillation: the loss bounces instead of settling. Usable with decay, risky without.'; }
+    else { c.className = 'lr-card boom'; c.innerHTML = '💥 <b>Too large.</b> Each step overshoots onto the opposite slope, the error grows, and the parameters run away to infinity (then NaN). Press Train and watch.'; }
+  }
+  $('#lr').addEventListener('input', lrCard);
+  $('#btnStep').onclick = step;
+  $('#btnInit').onclick = initW;
+  $('#btnData').onclick = genData;
+  $('#batchSeg').addEventListener('segchange', () => { order = []; });
+  $('#btnRun').onclick = async () => {
+    if (running) { running = false; $('#btnRun').textContent = '▶ Train'; return; }
+    running = true; $('#btnRun').textContent = '⏸ Pause';
+    for (let i = 0; i < 400 && running; i++) { step(); await ML.sleep(16); }
+    running = false; $('#btnRun').textContent = '▶ Train';
+  };
+  $('#fitSvg').addEventListener('click', (ev) => {
+    const svg = $('#fitSvg'), pt = svg.createSVGPoint();
+    pt.x = ev.clientX; pt.y = ev.clientY;
+    const p = pt.matrixTransform(svg.getScreenCTM().inverse());
+    const x = ix(p.x), y = iy(p.y);
+    if (x >= 0 && x <= 1 && y >= 0 && y <= 1) { pts.push({ x, y }); draw(); }
+  });
+  lrCard(); genData();
+
+  /* ================= logistic regression ================= */
+  const CW = 400, CH = 300;
+  let A = [], B = [], cw = [0.4, -0.3], cb = 0;
+  const cx = (x) => 30 + x * 350, cy = (y) => CH - 30 - y * 250;
+  const cix = (px) => (px - 30) / 350, ciy = (py) => (CH - 30 - py) / 250;
+  const sig = (z) => 1 / (1 + Math.exp(-z));
+
+  function seedClf() {
+    A = []; B = [];
+    for (let i = 0; i < 18; i++) {
+      A.push({ x: 0.12 + Math.random() * 0.36, y: 0.15 + Math.random() * 0.45, l: 0 });
+      B.push({ x: 0.5 + Math.random() * 0.38, y: 0.42 + Math.random() * 0.45, l: 1 });
+    }
+    cw = [0.4, -0.3]; cb = 0; drawClf();
+  }
+  function clfStep() {
+    const all = A.concat(B);
+    if (!all.length) return;
+    let g0 = 0, g1 = 0, gb = 0;
+    all.forEach(p => { const e = sig(cw[0] * p.x + cw[1] * p.y + cb) - p.l; g0 += e * p.x; g1 += e * p.y; gb += e; });
+    const n = all.length, lr = 3.5;
+    cw[0] -= lr * g0 / n; cw[1] -= lr * g1 / n; cb -= lr * gb / n;
+  }
+  function drawClf() {
+    const all = A.concat(B);
+    let g = '';
+    // shaded regions via coarse grid
+    for (let i = 0; i < 20; i++) for (let j = 0; j < 15; j++) {
+      const x = i / 20 + 0.025, y = j / 15 + 0.033;
+      const p = sig(cw[0] * x + cw[1] * y + cb);
+      g += `<rect class="region" x="${cx(i / 20)}" y="${cy((j + 1) / 15)}" width="${350 / 20}" height="${250 / 15}" fill="${p > 0.5 ? 'var(--amber)' : 'var(--accent)'}" opacity="${(Math.abs(p - 0.5) * 0.5 + 0.04).toFixed(3)}"/>`;
+    }
+    g += `<line class="ax" x1="30" y1="${CH - 30}" x2="385" y2="${CH - 30}"/><line class="ax" x1="30" y1="15" x2="30" y2="${CH - 30}"/>`;
+    // boundary: w0 x + w1 y + b = 0
+    if (Math.abs(cw[1]) > 1e-6) {
+      const yAt = (x) => -(cw[0] * x + cb) / cw[1];
+      g += `<line class="bnd" x1="${cx(0)}" y1="${cy(clamp(yAt(0), -0.2, 1.2))}" x2="${cx(1)}" y2="${cy(clamp(yAt(1), -0.2, 1.2))}"/>`;
+    }
+    all.forEach(p => { g += `<circle class="${p.l ? 'pb' : 'pa'}" cx="${cx(p.x)}" cy="${cy(p.y)}" r="5.5"/>`; });
+    $('#clfSvg').innerHTML = g;
+    if (all.length) {
+      let L = 0, correct = 0;
+      all.forEach(p => {
+        const pr = clamp(sig(cw[0] * p.x + cw[1] * p.y + cb), 1e-9, 1 - 1e-9);
+        L += -(p.l * Math.log(pr) + (1 - p.l) * Math.log(1 - pr));
+        if ((pr > 0.5 ? 1 : 0) === p.l) correct++;
+      });
+      $('#cLoss').textContent = (L / all.length).toFixed(4);
+      $('#cAcc').textContent = Math.round(correct / all.length * 100) + '%';
+    }
+  }
+  $('#clfSvg').addEventListener('click', (ev) => {
+    const svg = $('#clfSvg'), pt = svg.createSVGPoint();
+    pt.x = ev.clientX; pt.y = ev.clientY;
+    const p = pt.matrixTransform(svg.getScreenCTM().inverse());
+    const x = cix(p.x), y = ciy(p.y);
+    if (x < 0 || x > 1 || y < 0 || y > 1) return;
+    const cls = $('#classSeg').dataset.value || 'a';
+    (cls === 'a' ? A : B).push({ x, y, l: cls === 'a' ? 0 : 1 });
+    drawClf();
+  });
+  $('#cStep').onclick = () => { for (let i = 0; i < 20; i++) clfStep(); drawClf(); };
+  $('#cRun').onclick = async () => { for (let i = 0; i < 200; i++) { clfStep(); if (i % 8 === 0) { drawClf(); await ML.sleep(16); } } drawClf(); ML.toast('Converged — the boundary sits where p = 0.5'); };
+  $('#cReset').onclick = seedClf;
+  seedClf();
+})();
+</script>
+</body>
+</html>

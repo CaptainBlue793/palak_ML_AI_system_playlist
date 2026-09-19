@@ -1,0 +1,444 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Neural Networks &amp; Backpropagation</title>
+<link rel="stylesheet" href="assets/style.css">
+<script>try{var t=JSON.parse(localStorage.getItem('ml-theme'));if(t)document.documentElement.setAttribute('data-theme',t)}catch(e){}</script>
+<style>
+  .mlp-svg { width:100%; touch-action:none; cursor:crosshair; }
+  .mlp-svg .pa { fill:var(--accent); } .mlp-svg .pb { fill:var(--amber); }
+  .mlp-svg .cell { opacity:.25; }
+  .mlp-svg .ax { stroke:var(--border-strong); }
+  .act-svg { width:100%; height:180px; }
+  .act-svg .ln { fill:none; stroke:var(--accent); stroke-width:2.6; }
+  .act-svg .dln { fill:none; stroke:var(--pink); stroke-width:2; stroke-dasharray:5 3; }
+  .act-svg .ax { stroke:var(--border-strong); }
+  .act-svg text, .mlp-svg text, .hist-svg text { font-size:10.5px; fill:var(--muted); font-family:var(--mono); }
+  .hist-svg { width:100%; height:110px; }
+  .hist-svg .ln { fill:none; stroke:var(--pink); stroke-width:2.2; }
+  .netviz .neuron { fill:var(--surface-2); stroke:var(--border-strong); stroke-width:1.5; }
+  .netviz .neuron.on { fill:var(--accent-soft); stroke:var(--accent); stroke-width:2.5; }
+  .netviz .wline { stroke:var(--border); stroke-width:1.2; }
+  .netviz .wline.on { stroke:var(--accent); stroke-width:2.4; }
+  .netviz .wline.back { stroke:var(--pink); stroke-width:2.4; }
+  .netviz text { font-size:10.5px; fill:var(--muted); font-family:var(--mono); }
+</style>
+</head>
+<body data-chapter="8">
+<main class="content">
+
+  <section class="hero">
+    <div class="eyebrow"><span class="pill accent">Chapter 8</span><span class="pill green">Beginner</span><span class="pill">⏱ 45 min</span></div>
+    <h1>Neural Networks &amp; <span class="grad">Backpropagation</span></h1>
+    <p class="lead">A neural network is logistic regression stacked, with a squiggle in between. That squiggle — the nonlinearity — is what lets it represent things a line never could, and backpropagation is the bookkeeping that makes training such a stack possible at all.</p>
+    <ul class="objectives">
+      <li>Explain why a network without nonlinearity is just a linear model</li>
+      <li>Trace a forward pass and a backward pass through a small network</li>
+      <li>Choose an activation function and know why ReLU won</li>
+      <li>Train an MLP in the page and watch it bend a decision boundary</li>
+      <li>Recognise vanishing and exploding gradients from the symptoms</li>
+    </ul>
+  </section>
+
+  <h2>Why stack at all?</h2>
+  <p>Logistic regression draws one straight boundary. Plenty of real problems aren't separable by a line — the classic being XOR, where the positives sit in opposite corners. No line splits them. Stack two linear layers <b>without</b> a nonlinearity and you still can't: <code>W₂(W₁x) = (W₂W₁)x</code> is one matrix, one line.</p>
+
+  <div class="callout tip">
+    <div class="ico">🔑</div>
+    <div class="body"><div class="title">The whole trick, in one line</div>
+      <p>Insert a nonlinear function between the layers — <code>a = f(W₁x)</code>, then <code>ŷ = W₂a</code> — and the composition is no longer linear. Each hidden unit carves one half-plane; the next layer combines them into arbitrary shapes. Depth stacks that ability exponentially.</p></div>
+  </div>
+
+  <h2>Anatomy of a network</h2>
+  <p>Three layers of vocabulary and you can read any architecture diagram:</p>
+
+  <div class="grid c4">
+    <div class="card feature reveal"><div class="f-ico">🔢</div><h4>Neuron</h4><p><code>a = f(w·x + b)</code>. A dot product, a bias, a squash. That's the atom.</p></div>
+    <div class="card feature reveal"><div class="f-ico" style="background:var(--accent-2-soft)">📚</div><h4>Layer</h4><p>Many neurons sharing an input — one matrix multiply: <code>A = f(XW + b)</code>.</p></div>
+    <div class="card feature reveal"><div class="f-ico" style="background:var(--green-soft)">🏗️</div><h4>Depth</h4><p>Layers stacked. Early layers learn simple features, later ones compose them.</p></div>
+    <div class="card feature reveal"><div class="f-ico" style="background:var(--pink-soft)">🎯</div><h4>Head</h4><p>The final layer shaped to the task: 1 output + sigmoid, K outputs + softmax, or a raw number.</p></div>
+  </div>
+
+  <div class="panel">
+    <div class="panel-head"><div class="dots"><i></i><i></i><i></i></div><span class="p-title">One forward pass, one backward pass</span><span class="p-tag">Step-through</span></div>
+    <div class="panel-body svg-scroll">
+      <svg id="netSvg" class="diagram netviz" viewBox="0 0 760 300">
+        <g id="nl-w1">
+          <line class="wline" id="w-i1h1" x1="120" y1="90" x2="300" y2="60"/>
+          <line class="wline" id="w-i1h2" x1="120" y1="90" x2="300" y2="150"/>
+          <line class="wline" id="w-i1h3" x1="120" y1="90" x2="300" y2="240"/>
+          <line class="wline" id="w-i2h1" x1="120" y1="210" x2="300" y2="60"/>
+          <line class="wline" id="w-i2h2" x1="120" y1="210" x2="300" y2="150"/>
+          <line class="wline" id="w-i2h3" x1="120" y1="210" x2="300" y2="240"/>
+        </g>
+        <g id="nl-w2">
+          <line class="wline" id="w-h1o" x1="300" y1="60" x2="520" y2="150"/>
+          <line class="wline" id="w-h2o" x1="300" y1="150" x2="520" y2="150"/>
+          <line class="wline" id="w-h3o" x1="300" y1="240" x2="520" y2="150"/>
+        </g>
+        <line class="wline" id="w-oL" x1="520" y1="150" x2="650" y2="150"/>
+        <circle class="neuron" id="n-i1" cx="120" cy="90" r="26"/><text x="120" y="94" text-anchor="middle">x₁</text>
+        <circle class="neuron" id="n-i2" cx="120" cy="210" r="26"/><text x="120" y="214" text-anchor="middle">x₂</text>
+        <circle class="neuron" id="n-h1" cx="300" cy="60" r="26"/><text x="300" y="64" text-anchor="middle">h₁</text>
+        <circle class="neuron" id="n-h2" cx="300" cy="150" r="26"/><text x="300" y="154" text-anchor="middle">h₂</text>
+        <circle class="neuron" id="n-h3" cx="300" cy="240" r="26"/><text x="300" y="244" text-anchor="middle">h₃</text>
+        <circle class="neuron" id="n-o" cx="520" cy="150" r="28"/><text x="520" y="154" text-anchor="middle">ŷ</text>
+        <rect class="neuron" id="n-loss" x="620" y="126" width="110" height="48" rx="12"/><text x="675" y="155" text-anchor="middle">loss</text>
+        <text x="100" y="278" text-anchor="middle">inputs</text><text x="300" y="285" text-anchor="middle">hidden (ReLU)</text><text x="520" y="200" text-anchor="middle">output (sigmoid)</text>
+      </svg>
+    </div>
+    <div class="stepper" data-diagram="netSvg" data-intro="Walk a single example forward to a loss, then push the error back to every weight.">
+      <ol class="steps">
+        <li data-title="Inputs arrive" data-on="n-i1 n-i2">One example enters as a vector, e.g. <code>x = [0.7, −0.3]</code>. In a real batch there are thousands of these stacked into a matrix and processed together — that's what makes GPUs worth using.</li>
+        <li data-title="First matrix multiply" data-on="nl-w1 n-i1 n-i2 n-h1 n-h2 n-h3">Each hidden unit computes <code>z = w·x + b</code> — three dot products, one matrix multiply. Every line in the diagram is one learnable weight.</li>
+        <li data-title="Activation" data-on="n-h1 n-h2 n-h3">Apply <code>ReLU(z) = max(0, z)</code> elementwise. Negative pre-activations become exactly zero — those units are “off” for this example, which is what makes the network piecewise-linear rather than linear.</li>
+        <li data-title="Output layer" data-on="nl-w2 n-h1 n-h2 n-h3 n-o">The hidden activations are combined into one number, then squashed by a sigmoid into a probability. For multi-class you'd have K outputs and a softmax instead.</li>
+        <li data-title="Loss" data-on="n-o n-loss w-oL">Compare with the label: <code>L = −[y·log(ŷ) + (1−y)·log(1−ŷ)]</code>. This single number is the only feedback the whole network receives.</li>
+        <li data-title="Backward: output gradient" data-on="n-loss n-o w-oL">Differentiate the loss w.r.t. the output. With sigmoid + cross-entropy this collapses to the beautifully simple <code>∂L/∂z = ŷ − y</code>.</li>
+        <li data-title="Backward: through layer 2" data-on="nl-w2 n-o n-h1 n-h2 n-h3">Each weight's gradient is <code>(ŷ − y) × hᵢ</code> — “how wrong we were, times how much this unit contributed”. The error also flows back to each hidden activation.</li>
+        <li data-title="Backward: through the ReLU" data-on="n-h1 n-h2 n-h3">ReLU's derivative is 1 where it was active and 0 where it wasn't, so gradient flows only through units that fired. Units that were off learn nothing from this example.</li>
+        <li data-title="Backward: through layer 1" data-on="nl-w1 n-i1 n-i2 n-h1 n-h2 n-h3">Multiply once more to get gradients for the first weight matrix. Every gradient in the network is now known after exactly one backward sweep — cost roughly 2× the forward pass, regardless of depth.</li>
+        <li data-title="Update and repeat" data-on="nl-w1 nl-w2">The optimizer applies <code>w ← w − η·g</code> to every parameter, gradients are zeroed, and the next batch starts. Millions of repetitions of this loop is all training is.</li>
+      </ol>
+    </div>
+  </div>
+
+  <div class="callout analogy">
+    <div class="ico">🏭</div>
+    <div class="body"><div class="title">Analogy: blame assignment on a production line</div>
+      <p>A defective product comes off the line. Backprop walks the line backwards, asking each station: “given how much you changed the product, how much of this defect is yours?” Each station adjusts slightly, in proportion to its contribution. Doing this for billions of stations is only feasible because each one's local answer is a simple derivative.</p></div>
+  </div>
+
+  <h2>Activation functions</h2>
+  <p>The nonlinearity determines how gradients flow. This is not a cosmetic choice — it's the difference between a network that trains and one that doesn't.</p>
+
+  <div class="panel">
+    <div class="panel-head"><div class="dots"><i></i><i></i><i></i></div><span class="p-title">Activation and its derivative</span><span class="p-tag">Interactive</span></div>
+    <div class="panel-body">
+      <div class="seg" id="actSeg"><button data-v="relu" class="active">ReLU</button><button data-v="sigmoid">Sigmoid</button><button data-v="tanh">Tanh</button><button data-v="gelu">GELU</button><button data-v="lrelu">Leaky ReLU</button></div>
+      <div class="svg-scroll"><svg id="actSvg" class="diagram act-svg" viewBox="0 0 620 180"></svg></div>
+      <div class="callout" id="actInfo" style="margin-top:10px"><div class="ico">📘</div><div class="body"><div class="title"></div><p style="margin:0"></p></div></div>
+      <div class="legend"><span><i style="background:var(--accent)"></i>f(z)</span><span><i style="background:var(--pink)"></i>f′(z) — the gradient multiplier</span></div>
+    </div>
+  </div>
+
+  <div class="table-wrap">
+    <table class="t">
+      <thead><tr><th>Activation</th><th>Range</th><th>Verdict</th></tr></thead>
+      <tbody>
+        <tr><td><b>Sigmoid</b></td><td>(0, 1)</td><td>Saturates at both ends → vanishing gradients. Keep it for output layers only.</td></tr>
+        <tr><td><b>Tanh</b></td><td>(−1, 1)</td><td>Zero-centred, still saturates. Lives on in some RNN and normalization-heavy designs.</td></tr>
+        <tr><td><b>ReLU</b></td><td>[0, ∞)</td><td>Gradient 1 when active — fast, simple, the default for a decade. Can “die” if a unit never activates.</td></tr>
+        <tr><td><b>Leaky ReLU</b></td><td>(−∞, ∞)</td><td>Small negative slope keeps dead units alive. Cheap insurance.</td></tr>
+        <tr><td><b>GELU / SiLU</b></td><td>≈(−0.17, ∞)</td><td>Smooth, slightly better in transformers — which is why every modern LLM uses one of them.</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h2>Train one yourself</h2>
+  <p>A two-layer network, trained in your browser with real forward and backward passes. Change the width, the activation and the learning rate, and click the plot to add points and break it.</p>
+
+  <div class="panel">
+    <div class="panel-head"><div class="dots"><i></i><i></i><i></i></div><span class="p-title">Live MLP trainer</span><span class="p-tag">Live trainer</span></div>
+    <div class="panel-body">
+      <div class="split" style="grid-template-columns:minmax(0,1.15fr) minmax(0,1fr)">
+        <div class="svg-scroll"><svg id="mlpSvg" class="diagram mlp-svg" viewBox="0 0 400 300"></svg></div>
+        <div>
+          <div class="seg" id="dataSeg"><button data-v="xor" class="active">XOR</button><button data-v="circle">Circle</button><button data-v="spiral">Spiral</button><button data-v="linear">Linear</button></div>
+          <div class="range-row" style="margin-top:8px"><label for="hid">Hidden units</label><input type="range" id="hid" min="1" max="24" step="1" value="8"><output id="hidV"></output></div>
+          <div class="range-row"><label for="mlr">Learning rate</label><input type="range" id="mlr" min="-2.5" max="0.4" step="0.1" value="-0.7"><output id="mlrV"></output></div>
+          <div class="seg" id="mActSeg"><button data-v="relu" class="active">ReLU</button><button data-v="tanh">Tanh</button><button data-v="none">None (linear!)</button></div>
+          <div class="stats" style="grid-template-columns:1fr 1fr;margin-top:10px">
+            <div class="stat acc"><div class="k">Loss</div><div class="v" id="nLoss">–</div></div>
+            <div class="stat good"><div class="k">Accuracy</div><div class="v" id="nAcc">–</div></div>
+          </div>
+          <svg id="nHist" class="diagram hist-svg" viewBox="0 0 300 110"></svg>
+          <div class="controls">
+            <button class="btn sm primary" id="nRun">▶ Train</button>
+            <button class="btn sm" id="nStep">Step ×50</button>
+            <button class="btn sm ghost" id="nReset">↺ Re-init</button>
+          </div>
+        </div>
+      </div>
+      <p class="small muted" style="margin-top:8px">Try <b>None</b> as the activation on XOR: no matter how many hidden units you add, the boundary stays a straight line and accuracy sticks near 50%. That single experiment is the entire argument for nonlinearity.</p>
+    </div>
+  </div>
+
+  <h2>Width, depth and what a network can represent</h2>
+  <p>The <b>universal approximation theorem</b> says one hidden layer, given enough units, can approximate any continuous function. It is also nearly useless as engineering advice: “enough” can mean exponentially many units. Depth is how you get the same expressiveness at a manageable size, because layers <i>compose</i> features instead of enumerating them.</p>
+
+  <div class="split">
+    <div class="card"><h4 class="mt0">Wider</h4><p class="small mb0">More features per level. Easy to parallelise, memory-hungry, quick gains at first, then diminishing. Modern scaling tends to grow width and depth together.</p></div>
+    <div class="card"><h4 class="mt0">Deeper</h4><p class="small mb0">More composition — edges → textures → objects. Exponentially more expressive per parameter, but harder to train: gradients have to survive more multiplications (the subject of Chapter 9).</p></div>
+  </div>
+
+  <h2>Vanishing and exploding gradients</h2>
+  <p>Backprop multiplies a chain of local derivatives. Multiply 30 numbers that average 0.6 and you get 2×10⁻⁷ — the early layers effectively stop learning. Multiply 30 numbers averaging 1.4 and you get 24,000 — the update blows the weights apart.</p>
+
+  <div class="table-wrap">
+    <table class="t">
+      <thead><tr><th>Symptom</th><th>Cause</th><th>Standard fix</th></tr></thead>
+      <tbody>
+        <tr><td>Early layers' weights barely change; loss plateaus high</td><td>Vanishing gradients (saturating activations, deep stack)</td><td>ReLU/GELU, residual connections, normalization layers</td></tr>
+        <tr><td>Loss spikes to NaN</td><td>Exploding gradients</td><td>Gradient clipping, lower learning rate, better initialization</td></tr>
+        <tr><td>Half the units output zero forever</td><td>Dying ReLU (large negative bias learned early)</td><td>Leaky ReLU/GELU, lower learning rate, better init</td></tr>
+        <tr><td>Training works at depth 4, breaks at depth 40</td><td>Signal degradation through depth</td><td><b>Residual connections</b> — the single most important trick in deep learning</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="callout tip">
+    <div class="ico">🛣️</div>
+    <div class="body"><div class="title">Residual connections, in one sentence</div>
+      <p>Compute <code>x + f(x)</code> instead of <code>f(x)</code>, so there's a path where the gradient passes through <b>unchanged</b> (derivative 1) no matter how deep the stack. That's why networks jumped from ~20 layers to 1,000+ almost overnight, and why every transformer block has two of them (Chapter 14).</p></div>
+  </div>
+
+  <div class="callout danger"><div class="ico">⚠️</div><div class="body"><div class="title">Common mistakes</div>
+    <ul class="mb0">
+      <li><b>Forgetting the nonlinearity</b> (or putting an activation after the final layer when the loss already applies one). Both silently cripple the model.</li>
+      <li><b>Applying softmax then cross-entropy</b> in frameworks whose loss expects logits — the double softmax flattens gradients.</li>
+      <li><b>Initializing all weights to zero.</b> Every unit computes the same thing and receives the same gradient forever; the network has one effective neuron.</li>
+      <li><b>Not scaling inputs.</b> A feature with range 0–100,000 saturates activations immediately and the first layer never recovers.</li>
+      <li><b>Reaching for a deeper network before checking the data.</b> Depth rarely fixes label noise, leakage or a missing feature.</li>
+    </ul></div></div>
+
+  <div class="callout interview"><div class="ico">🎤</div><div class="body"><div class="title">Interview drill</div>
+    <p class="small" style="margin:10px 0 0"><b>Warm-up:</b> Why can't a 10-layer network without activation functions learn XOR?</p>
+    <details class="ans"><summary>How a strong answer sounds</summary><div>Composing linear maps gives another linear map: the product of the weight matrices is a single matrix, so the model can only draw one hyperplane regardless of depth. XOR isn't linearly separable, so no such boundary exists. The nonlinearity is what makes composition add expressiveness rather than collapse.</div></details>
+    <p class="small" style="margin:10px 0 0"><b>Deeper:</b> Your 40-layer network trains far worse than the 8-layer version on the same data. What's happening and what do you do?</p>
+    <details class="ans"><summary>How a strong answer sounds</summary><div>Most likely an optimization problem rather than a capacity one — the deeper model can represent everything the shallow one can, so it should not be worse. I'd check gradient norms per layer: if early-layer gradients are orders of magnitude smaller, it's vanishing signal. Fixes in order of impact: residual connections, normalization (LayerNorm/BatchNorm), a sane initialization scheme scaled by fan-in, warmup on the learning rate, and gradient clipping if the tail of the distribution is spiking. If gradients look healthy and it's still worse, I'd suspect too-high a learning rate for the depth, or insufficient data for the parameter count.</div></details>
+  </div></div>
+
+  <div class="takeaways">
+    <h3>🧠 Key takeaways</h3>
+    <ul>
+      <li>Without a nonlinearity, any stack of linear layers collapses to one linear layer.</li>
+      <li>Backprop is the chain rule applied backwards through the graph — one sweep gives every gradient, at roughly 2× the forward cost.</li>
+      <li>ReLU-family activations keep gradients alive; saturating ones (sigmoid, tanh) throttle them.</li>
+      <li>Depth buys composition; residual connections are what make depth trainable.</li>
+      <li>Vanishing/exploding gradients have recognisable symptoms and standard fixes — diagnose before redesigning.</li>
+    </ul>
+  </div>
+
+  <div class="quiz-wrap">
+    <h2>Check your understanding</h2>
+    <div class="quiz-score"></div>
+
+    <div class="quiz" data-answer="2">
+      <p class="q">You remove all activation functions from a 5-layer network. What is the result equivalent to?</p>
+      <div class="opts">
+        <button class="opt">A 5-layer network with ReLU</button>
+        <button class="opt">A decision tree</button>
+        <button class="opt">A single linear layer</button>
+        <button class="opt">An untrainable model</button>
+      </div>
+      <div class="explain">The product of the weight matrices is one matrix. It trains fine — it just can't represent anything nonlinear.</div>
+    </div>
+
+    <div class="quiz" data-answer="0">
+      <p class="q">What is ReLU's derivative for a negative input?</p>
+      <div class="opts">
+        <button class="opt">0 — no gradient flows through that unit</button>
+        <button class="opt">1</button>
+        <button class="opt">The input value itself</button>
+        <button class="opt">Undefined, so training fails</button>
+      </div>
+      <div class="explain">That's both ReLU's strength (sparse activations, cheap) and its weakness: a unit stuck negative for every example receives no gradient and never recovers — the “dying ReLU”.</div>
+    </div>
+
+    <div class="quiz" data-answer="1">
+      <p class="q">You initialize every weight to 0. What goes wrong?</p>
+      <div class="opts">
+        <button class="opt">Gradients explode immediately</button>
+        <button class="opt">All units in a layer stay identical — the layer has one effective neuron</button>
+        <button class="opt">The loss is undefined</button>
+        <button class="opt">Nothing; it's the standard approach</button>
+      </div>
+      <div class="explain">Symmetric initialization means identical forward values and identical gradients, so the units never differentiate. Random initialization breaks that symmetry.</div>
+    </div>
+
+    <div class="quiz" data-answer="3">
+      <p class="q">A 50-layer network's early-layer gradients are ~1e-9 while the last layer's are ~1e-2. What helps most?</p>
+      <div class="opts">
+        <button class="opt">Increasing the batch size</button>
+        <button class="opt">Switching to MSE loss</button>
+        <button class="opt">Adding more layers</button>
+        <button class="opt">Residual connections and normalization</button>
+      </div>
+      <div class="explain">Classic vanishing gradients. A skip path with derivative 1 lets gradient reach early layers unattenuated; normalization keeps activation scales stable along the way.</div>
+    </div>
+
+    <div class="quiz" data-answer="1">
+      <p class="q">Roughly how expensive is a backward pass compared with a forward pass?</p>
+      <div class="opts">
+        <button class="opt">About the same</button>
+        <button class="opt">Roughly twice as expensive</button>
+        <button class="opt">Proportional to the square of the depth</button>
+        <button class="opt">Negligible</button>
+      </div>
+      <div class="explain">Each layer's backward step computes gradients w.r.t. both its inputs and its weights — two matrix multiplies instead of one. The usual rule of thumb: a training step costs about 3× a forward pass, which is where the “6ND FLOPs” training estimate in Chapter 16 comes from.</div>
+    </div>
+  </div>
+</main>
+<script src="assets/app.js"></script>
+<script>
+(function(){
+  const { $, $$, clamp } = ML;
+
+  /* ================= activation explorer ================= */
+  const ACT = {
+    relu: { f: (z) => Math.max(0, z), d: (z) => (z > 0 ? 1 : 0), t: 'ReLU — max(0, z)',
+      n: 'Gradient is exactly 1 wherever the unit is active, so signal passes through deep stacks without shrinking. Cheap (a comparison), sparse (half the units off), and the reason deep networks became trainable in the first place. Risk: a unit pushed permanently negative gets zero gradient forever.' },
+    sigmoid: { f: (z) => 1 / (1 + Math.exp(-z)), d: (z) => { const s = 1 / (1 + Math.exp(-z)); return s * (1 - s); }, t: 'Sigmoid — 1/(1+e⁻ᶻ)',
+      n: 'Peak derivative is only 0.25, and it collapses toward zero for |z| &gt; 4. Chain ten of those together and the gradient reaching layer 1 is around 1e-6. Fine as an output layer for probabilities; a poor choice inside a deep network.' },
+    tanh: { f: (z) => Math.tanh(z), d: (z) => 1 - Math.tanh(z) ** 2, t: 'Tanh',
+      n: 'Zero-centred, so activations do not drift positive the way sigmoid outputs do, and its peak derivative is 1. It still saturates hard at the ends. Common in older RNNs and still used where bounded activations are wanted.' },
+    gelu: { f: (z) => 0.5 * z * (1 + Math.tanh(Math.sqrt(2 / Math.PI) * (z + 0.044715 * z ** 3))), d: (z) => { const h = 1e-4; const f = ACT.gelu.f; return (f(z + h) - f(z - h)) / (2 * h); }, t: 'GELU',
+      n: 'A smooth ReLU: instead of a hard cut it scales the input by roughly the probability that it is positive. The smoothness gives slightly better gradients near zero, which is why transformers (GPT, BERT) adopted it over plain ReLU.' },
+    lrelu: { f: (z) => (z > 0 ? z : 0.1 * z), d: (z) => (z > 0 ? 1 : 0.1), t: 'Leaky ReLU (α = 0.1)',
+      n: 'Keeps a small slope for negative inputs so a “dead” unit can still receive gradient and recover. Costs nothing and removes one class of silent failure.' },
+  };
+  function drawAct() {
+    const k = $('#actSeg').dataset.value || 'relu', a = ACT[k];
+    const X = (z) => 310 + z * 55, Y = (v) => 110 - v * 45;
+    let p1 = '', p2 = '';
+    for (let z = -5; z <= 5; z += 0.05) {
+      p1 += (p1 ? 'L' : 'M') + X(z).toFixed(1) + ',' + clamp(Y(a.f(z)), 6, 175).toFixed(1) + ' ';
+      p2 += (p2 ? 'L' : 'M') + X(z).toFixed(1) + ',' + clamp(Y(a.d(z)), 6, 175).toFixed(1) + ' ';
+    }
+    $('#actSvg').innerHTML =
+      `<line class="ax" x1="20" y1="110" x2="600" y2="110"/><line class="ax" x1="310" y1="8" x2="310" y2="172"/>` +
+      `<path class="ln" d="${p1}"/><path class="dln" d="${p2}"/>` +
+      `<text x="565" y="126">z</text><text x="318" y="18">f(z)</text><text x="24" y="126">−5</text><text x="580" y="126">+5</text>`;
+    $('#actInfo .title').textContent = a.t;
+    $('#actInfo p').innerHTML = a.n;
+  }
+  $('#actSeg').addEventListener('segchange', drawAct);
+  drawAct();
+
+  /* ================= MLP trainer ================= */
+  let W1 = [], b1 = [], W2 = [], b2 = 0, data = [], hist = [], running = false, steps = 0;
+  const actFns = {
+    relu: { f: (z) => Math.max(0, z), d: (z) => (z > 0 ? 1 : 0) },
+    tanh: { f: (z) => Math.tanh(z), d: (z) => 1 - Math.tanh(z) ** 2 },
+    none: { f: (z) => z, d: () => 1 },
+  };
+  const H = () => +$('#hid').value;
+
+  function genData() {
+    const kind = $('#dataSeg').dataset.value || 'xor';
+    data = [];
+    for (let i = 0; i < 220; i++) {
+      let x = Math.random() * 2 - 1, y = Math.random() * 2 - 1, l;
+      if (kind === 'xor') l = (x > 0) !== (y > 0) ? 1 : 0;
+      else if (kind === 'circle') l = x * x + y * y < 0.42 ? 1 : 0;
+      else if (kind === 'linear') l = (0.8 * x + y > 0.1) ? 1 : 0;
+      else { // spiral
+        const r = Math.hypot(x, y), th = Math.atan2(y, x);
+        l = Math.sin(th * 1.6 + r * 5.2) > 0 ? 1 : 0;
+      }
+      if (Math.random() < 0.04) l = 1 - l;
+      data.push({ x, y, l });
+    }
+    init();
+  }
+  function init() {
+    const h = H();
+    W1 = []; b1 = []; W2 = []; b2 = 0; hist = []; steps = 0;
+    const s = Math.sqrt(2 / 2);
+    for (let i = 0; i < h; i++) {
+      W1.push([(Math.random() * 2 - 1) * s, (Math.random() * 2 - 1) * s]);
+      b1.push(0);
+      W2.push((Math.random() * 2 - 1) * Math.sqrt(2 / h));
+    }
+    drawMLP();
+  }
+  function forward(p, A) {
+    const h = W1.length, z1 = [], a1 = [];
+    for (let i = 0; i < h; i++) { const z = W1[i][0] * p.x + W1[i][1] * p.y + b1[i]; z1.push(z); a1.push(A.f(z)); }
+    let z2 = b2;
+    for (let i = 0; i < h; i++) z2 += W2[i] * a1[i];
+    return { z1, a1, p: 1 / (1 + Math.exp(-z2)) };
+  }
+  function trainStep() {
+    const A = actFns[$('#mActSeg').dataset.value || 'relu'], lr = Math.pow(10, +$('#mlr').value);
+    const h = W1.length, n = data.length;
+    const gW1 = W1.map(() => [0, 0]), gb1 = new Array(h).fill(0), gW2 = new Array(h).fill(0);
+    let gb2 = 0, loss = 0;
+    data.forEach(pt => {
+      const o = forward(pt, A);
+      const pr = clamp(o.p, 1e-7, 1 - 1e-7);
+      loss += -(pt.l * Math.log(pr) + (1 - pt.l) * Math.log(1 - pr));
+      const dz2 = pr - pt.l;
+      gb2 += dz2;
+      for (let i = 0; i < h; i++) {
+        gW2[i] += dz2 * o.a1[i];
+        const da = dz2 * W2[i], dz = da * A.d(o.z1[i]);
+        gW1[i][0] += dz * pt.x; gW1[i][1] += dz * pt.y; gb1[i] += dz;
+      }
+    });
+    for (let i = 0; i < h; i++) {
+      W1[i][0] -= lr * gW1[i][0] / n; W1[i][1] -= lr * gW1[i][1] / n;
+      b1[i] -= lr * gb1[i] / n; W2[i] -= lr * gW2[i] / n;
+    }
+    b2 -= lr * gb2 / n;
+    steps++;
+    hist.push(loss / n);
+    if (hist.length > 180) hist.shift();
+  }
+  function drawMLP() {
+    const A = actFns[$('#mActSeg').dataset.value || 'relu'];
+    const X = (x) => 25 + (x + 1) / 2 * 360, Y = (y) => 280 - (y + 1) / 2 * 260;
+    let g = '', G = 34;
+    for (let i = 0; i < G; i++) for (let j = 0; j < G; j++) {
+      const x = -1 + (i + .5) * 2 / G, y = -1 + (j + .5) * 2 / G;
+      const p = forward({ x, y }, A).p;
+      g += `<rect class="cell" x="${X(-1 + i * 2 / G).toFixed(1)}" y="${Y(-1 + (j + 1) * 2 / G).toFixed(1)}" width="${(360 / G + .8).toFixed(1)}" height="${(260 / G + .8).toFixed(1)}" fill="${p > 0.5 ? 'var(--amber)' : 'var(--accent)'}" opacity="${(Math.abs(p - 0.5) * 0.6 + 0.05).toFixed(3)}"/>`;
+    }
+    let correct = 0;
+    data.forEach(p => {
+      const pr = forward(p, A).p;
+      if ((pr > 0.5 ? 1 : 0) === p.l) correct++;
+      g += `<circle class="${p.l ? 'pb' : 'pa'}" cx="${X(p.x).toFixed(1)}" cy="${Y(p.y).toFixed(1)}" r="3.6"/>`;
+    });
+    g += `<line class="ax" x1="25" y1="280" x2="390" y2="280"/><line class="ax" x1="25" y1="16" x2="25" y2="280"/>`;
+    $('#mlpSvg').innerHTML = g;
+    $('#nAcc').textContent = (correct / data.length * 100).toFixed(1) + '%';
+    $('#nLoss').textContent = hist.length ? hist[hist.length - 1].toFixed(4) : '–';
+    $('#hidV').textContent = H();
+    $('#mlrV').textContent = Math.pow(10, +$('#mlr').value).toFixed(3);
+    if (hist.length > 1) {
+      const lo = Math.min(...hist), hi = Math.max(...hist);
+      const d = hist.map((v, i) => `${(i / (hist.length - 1) * 290 + 5).toFixed(1)},${(100 - (v - lo) / ((hi - lo) || 1) * 85).toFixed(1)}`).join(' L');
+      $('#nHist').innerHTML = `<path class="ln" d="M${d}"/><text x="5" y="12">loss · ${steps} steps</text>`;
+    } else $('#nHist').innerHTML = `<text x="5" y="55">press Train</text>`;
+  }
+  $('#nStep').onclick = () => { for (let i = 0; i < 50; i++) trainStep(); drawMLP(); };
+  $('#nReset').onclick = init;
+  $('#hid').addEventListener('input', init);
+  $('#dataSeg').addEventListener('segchange', genData);
+  $('#mActSeg').addEventListener('segchange', init);
+  $('#mlr').addEventListener('input', () => { $('#mlrV').textContent = Math.pow(10, +$('#mlr').value).toFixed(3); });
+  $('#nRun').onclick = async () => {
+    if (running) { running = false; $('#nRun').textContent = '▶ Train'; return; }
+    running = true; $('#nRun').textContent = '⏸ Pause';
+    while (running && steps < 6000) { for (let i = 0; i < 12; i++) trainStep(); drawMLP(); await ML.sleep(16); }
+    running = false; $('#nRun').textContent = '▶ Train';
+  };
+  $('#mlpSvg').addEventListener('click', (ev) => {
+    const svg = $('#mlpSvg'), pt = svg.createSVGPoint();
+    pt.x = ev.clientX; pt.y = ev.clientY;
+    const p = pt.matrixTransform(svg.getScreenCTM().inverse());
+    const x = (p.x - 25) / 360 * 2 - 1, y = (280 - p.y) / 260 * 2 - 1;
+    if (x < -1 || x > 1 || y < -1 || y > 1) return;
+    data.push({ x, y, l: ev.shiftKey ? 0 : 1 });
+    drawMLP();
+    ML.toast(ev.shiftKey ? 'Added a class-0 point' : 'Added a class-1 point (hold Shift for class 0)');
+  });
+  genData();
+})();
+</script>
+</body>
+</html>

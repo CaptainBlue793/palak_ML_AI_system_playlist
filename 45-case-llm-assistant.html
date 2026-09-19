@@ -1,0 +1,308 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Case Study: LLM Chat Assistant Platform</title>
+<link rel="stylesheet" href="assets/style.css">
+<script>try{var t=JSON.parse(localStorage.getItem('ml-theme'));if(t)document.documentElement.setAttribute('data-theme',t)}catch(e){}</script>
+<style>
+  .req { display:grid; grid-template-columns:repeat(auto-fit,minmax(160px,1fr)); gap:8px }
+  .req > div { padding:10px 12px; border-radius:12px; background:var(--surface-2); border:1px solid var(--border) }
+  .req b { display:block; font-size:11px; color:var(--muted); text-transform:uppercase; letter-spacing:.05em }
+  .req span { font-family:var(--mono); font-size:17px; font-weight:800 }
+  .turns-svg { width:100%; height:220px }
+  .turns-svg .ln { fill:none; stroke-width:2.6 }
+  .turns-svg text { font-size:10.5px; fill:var(--muted); font-family:var(--mono) }
+  .chatviz text { font-size:10px; fill:var(--text-2); font-family:var(--font); font-weight:600 }
+  .chatviz .sub { font-size:8.5px; fill:var(--muted); font-family:var(--mono); font-weight:400 }
+  .safety { display:grid; gap:8px }
+  .safety .r { display:grid; grid-template-columns:140px 1fr; gap:12px; padding:11px 13px; border-radius:12px; background:var(--surface-2); border:1px solid var(--border); font-size:13.5px }
+  .safety .r b { font-family:var(--mono); color:var(--accent) }
+</style>
+</head>
+<body data-chapter="45">
+<main class="content">
+
+  <section class="hero">
+    <div class="eyebrow"><span class="pill accent">Chapter 45</span><span class="pill pink">Case Study</span><span class="pill">⏱ 55 min</span></div>
+    <h1>Case Study: <span class="grad">LLM Chat Assistant</span></h1>
+    <p class="lead">Serve a conversational assistant to 10 million daily users: streaming responses, multi-turn context that grows every message, tool use, safety filtering, several model tiers, and a cost per conversation that has to stay below what the product earns.</p>
+    <ul class="objectives">
+      <li>Design the request path from gateway to token stream</li>
+      <li>Control the cost of growing conversation context</li>
+      <li>Exploit prefix caching and routing to cut spend several-fold</li>
+      <li>Build the safety pipeline without destroying usefulness</li>
+      <li>Measure quality continuously in production</li>
+    </ul>
+  </section>
+
+  <h2>1 · Requirements</h2>
+  <div class="req">
+    <div><b>DAU</b><span>10M</span></div>
+    <div><b>Messages/day</b><span>120M</span></div>
+    <div><b>Peak concurrent streams</b><span>180k</span></div>
+    <div><b>TTFT target</b><span>&lt; 800 ms p95</span></div>
+    <div><b>Output speed</b><span>&gt; 25 tok/s</span></div>
+    <div><b>Context window</b><span>up to 200k</span></div>
+  </div>
+  <p class="small muted" style="margin-top:10px"><b>In scope:</b> serving, routing, context management, safety, evaluation, cost. <b>Out of scope:</b> pretraining the base model (Chapter 52), the mobile client, billing.</p>
+
+  <div class="callout tip">
+    <div class="ico">🎯</div>
+    <div class="body"><div class="title">Metrics</div>
+      <p><b>Primary:</b> weekly retained users and conversations per user — quality shows up as people coming back. <b>Quality proxies:</b> sampled judge scores on live traffic, thumbs-down rate, regeneration rate, conversation abandonment. <b>Guardrails:</b> p95 TTFT and tokens/second, refusal and false-refusal rates, safety-violation rate, cost per conversation. <b>Baseline for any change:</b> the current production configuration, compared pairwise (Chapter 35).</p></div>
+  </div>
+
+  <h2>2 · The request path</h2>
+  <div class="panel">
+    <div class="panel-head"><div class="dots"><i></i><i></i><i></i></div><span class="p-title">One message, end to end</span><span class="p-tag">Step-through</span></div>
+    <div class="panel-body svg-scroll">
+      <svg id="chatSvg" class="diagram chatviz" viewBox="0 0 900 300">
+        <defs><marker id="ch45" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" class="arrow-head"/></marker></defs>
+        <path id="c-e1" class="edge dimmable" d="M110,55 L160,55" marker-end="url(#ch45)"/>
+        <path id="c-e2" class="edge dimmable" d="M280,55 L330,55" marker-end="url(#ch45)"/>
+        <path id="c-e3" class="edge dimmable" d="M450,55 L500,55" marker-end="url(#ch45)"/>
+        <path id="c-e4" class="edge dimmable" d="M620,55 L670,55" marker-end="url(#ch45)"/>
+        <path id="c-e5" class="edge dimmable" d="M790,80 L790,130" marker-end="url(#ch45)"/>
+        <path id="c-e6" class="edge dimmable" d="M710,155 L200,155 L200,105" marker-end="url(#ch45)"/>
+        <path id="c-tool" class="edge dimmable dash" d="M560,80 L560,205" marker-end="url(#ch45)"/>
+        <path id="c-log" class="edge dimmable dash" d="M380,180 L380,230" marker-end="url(#ch45)"/>
+        <g id="c-client" class="node dimmable" transform="translate(20,30)"><rect width="90" height="50" rx="11"/><text x="45" y="22" text-anchor="middle">Client</text><text x="45" y="38" text-anchor="middle" class="sub">SSE stream</text></g>
+        <g id="c-gw" class="node dimmable" transform="translate(160,30)"><rect width="120" height="50" rx="11"/><text x="60" y="22" text-anchor="middle">Gateway</text><text x="60" y="38" text-anchor="middle" class="sub">auth · quota · route</text></g>
+        <g id="c-ctx" class="node dimmable" transform="translate(330,30)"><rect width="120" height="50" rx="11"/><text x="60" y="22" text-anchor="middle">Context builder</text><text x="60" y="38" text-anchor="middle" class="sub">history · memory · RAG</text></g>
+        <g id="c-safe" class="node dimmable" transform="translate(500,30)"><rect width="120" height="50" rx="11"/><text x="60" y="22" text-anchor="middle">Input safety</text><text x="60" y="38" text-anchor="middle" class="sub">policy · injection</text></g>
+        <g id="c-inf" class="node dimmable" transform="translate(670,30)"><rect width="120" height="50" rx="11"/><text x="60" y="22" text-anchor="middle">Inference</text><text x="60" y="38" text-anchor="middle" class="sub">prefix cache · batch</text></g>
+        <g id="c-out" class="node dimmable" transform="translate(710,130)"><rect width="150" height="50" rx="11"/><text x="75" y="22" text-anchor="middle">Output safety</text><text x="75" y="38" text-anchor="middle" class="sub">streaming filter</text></g>
+        <g id="c-tools" class="node dimmable" transform="translate(480,205)"><rect width="160" height="50" rx="11"/><text x="80" y="22" text-anchor="middle">Tools / retrieval</text><text x="80" y="38" text-anchor="middle" class="sub">gated, sandboxed</text></g>
+        <g id="c-logs" class="node dimmable" transform="translate(300,230)"><rect width="160" height="46" rx="11"/><text x="80" y="20" text-anchor="middle">Traces + feedback</text><text x="80" y="36" text-anchor="middle" class="sub">sampled grading</text></g>
+      </svg>
+    </div>
+    <div class="stepper" data-diagram="chatSvg">
+      <ol class="steps">
+        <li data-title="Client opens a stream" data-on="c-client">Server-sent events over a long-lived HTTP connection. The client sends the new message plus a conversation id — <b>not</b> the whole history, which the server already has. Disconnection must be detectable so the server can cancel and free the slot (Chapter 26).</li>
+        <li data-title="Gateway" data-on="c-client c-gw c-e1" data-packet="c-client>c-gw">Authenticate, resolve tenant and plan, check rate limit and token quota, choose the model tier, attach a trace id. Thin and fast — this is on the path of every message in the product (Chapter 39).</li>
+        <li data-title="Build the context" data-on="c-gw c-ctx c-e2" data-packet="c-gw>c-ctx">Stable system prompt and tool schemas first (for caching), then long-term memory, then retrieved documents if the query needs them, then the conversation history, then the new message. Order is chosen for prefix caching, not for readability.</li>
+        <li data-title="Input safety" data-on="c-ctx c-safe c-e3" data-packet="c-ctx>c-safe" data-color="var(--amber)">A fast classifier on the user message; retrieved content fenced as untrusted data. Runs in parallel with cache warming so it costs almost no wall-clock time (Chapter 36).</li>
+        <li data-title="Inference with prefix caching" data-on="c-safe c-inf c-e4" data-packet="c-safe>c-inf" data-color="var(--green)">The scheduler finds the cached KV prefix for this conversation, prefills only the new tokens, and joins the continuous batch. This is the difference between prefilling 400 tokens and 40,000 on turn twenty.</li>
+        <li data-title="Tool calls, if any" data-on="c-inf c-tools c-tool" data-packet="c-inf>c-tools" data-color="var(--accent-2)">The model emits a structured call; the gateway authorises it against the user's permissions, executes in a sandbox with a timeout, and feeds the result back as untrusted data. The conversation continues in the same stream (Chapter 22).</li>
+        <li data-title="Stream out, filtered" data-on="c-inf c-out c-e5" data-packet="c-inf>c-out">Tokens stream to the client as they're produced, through an output filter that buffers a small window so a policy violation can be stopped mid-stream rather than after the user has read it.</li>
+        <li data-title="Return and record" data-on="c-out c-client c-e6 c-logs c-log" data-packet="c-out>c-client">First token typically within 600 ms. Everything — prompt version, model version, cache hit, token counts, latency, tool calls, user feedback — is traced. A sample goes to automated grading and weekly human review (Chapter 35).</li>
+      </ol>
+    </div>
+  </div>
+
+  <h2>3 · Deep dive: the cost of a long conversation</h2>
+  <p>Every turn resends the entire history. Without intervention, cost grows quadratically with conversation length — turn 30 pays for the 29 turns before it, again.</p>
+
+  <div class="panel">
+    <div class="panel-head"><div class="dots"><i></i><i></i><i></i></div><span class="p-title">Context strategy over a 30-turn conversation</span><span class="p-tag">Interactive</span></div>
+    <div class="panel-body">
+      <div class="seg" id="ctxSeg"><button data-v="full" class="active">Full history, no cache</button><button data-v="cache">Full history + prefix cache</button><button data-v="window">Sliding window</button><button data-v="summary">Rolling summary + recent turns</button></div>
+      <div class="svg-scroll"><svg id="turnsSvg" class="diagram turns-svg" viewBox="0 0 640 220"></svg></div>
+      <div class="stats">
+        <div class="stat bad"><div class="k">Tokens prefilled (30 turns)</div><div class="v" id="tTok" style="font-size:18px">–</div></div>
+        <div class="stat acc"><div class="k">Cost per conversation</div><div class="v" id="tCost" style="font-size:18px">–</div></div>
+        <div class="stat good"><div class="k">TTFT at turn 30</div><div class="v" id="tTtft" style="font-size:18px">–</div></div>
+        <div class="stat warn"><div class="k">Quality risk</div><div class="v" id="tQual" style="font-size:15px">–</div></div>
+      </div>
+      <div class="callout" id="ctxInfo" style="margin-top:12px"><div class="ico">💬</div><div class="body"><p style="margin:0"></p></div></div>
+    </div>
+  </div>
+
+  <div class="callout tip">
+    <div class="ico">💾</div>
+    <div class="body"><div class="title">Conversation-aware routing is what makes prefix caching work</div>
+      <p>A cached KV prefix lives on one specific replica. If the next turn lands elsewhere, the cache misses and you prefill 40,000 tokens again. So the router uses <b>sticky, conversation-affine routing</b> — hash the conversation id to a replica, with a fallback when that replica is overloaded or dies. Cache hit rate becomes a first-class serving metric: a drop from 85% to 40% roughly doubles prefill cost and visibly raises TTFT, and it's usually caused by a deployment or a routing change rather than by anything about the model.</p></div>
+  </div>
+
+  <h2>4 · Deep dive: model tiers and routing</h2>
+  <div class="table-wrap">
+    <table class="t">
+      <thead><tr><th>Tier</th><th>Handles</th><th>Share</th><th>Relative cost</th></tr></thead>
+      <tbody>
+        <tr><td><b>Small (8B, quantized)</b></td><td>Greetings, simple Q&amp;A, formatting, classification, title generation</td><td>~45%</td><td>1×</td></tr>
+        <tr><td><b>Medium (70B)</b></td><td>Most substantive chat, summarisation, drafting</td><td>~40%</td><td>7×</td></tr>
+        <tr><td><b>Large / reasoning</b></td><td>Hard analysis, multi-step maths and code, long documents</td><td>~13%</td><td>30×</td></tr>
+        <tr><td><b>Specialist</b></td><td>Embeddings, reranking, safety classifiers, title/summary models</td><td>~2% of spend</td><td>tiny</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="small muted" style="margin-top:8px">Routing signals: an explicit user choice, a cheap difficulty classifier on the message, conversation state (has it already escalated?), the tenant's plan, and current load. Every routing decision is logged so the router itself can be evaluated — misrouting to a too-small model is a quality incident that no model-level metric will show.</p>
+
+  <h2>5 · Deep dive: safety without ruining the product</h2>
+  <div class="safety">
+    <div class="r"><b>Input</b><span>Fast classifier on the user message; separate handling for retrieved and tool content, which is fenced as data. Latency budget: under 30 ms, run concurrently with cache warming.</span></div>
+    <div class="r"><b>System</b><span>Policy in the system prompt sets defaults, not guarantees. It is the cheapest layer and the weakest one (Chapter 36).</span></div>
+    <div class="r"><b>Output</b><span>Streaming filter with a small look-ahead buffer, so a violation is caught before the user reads it. Must not add perceptible delay to the first token.</span></div>
+    <div class="r"><b>Action</b><span>Anything with a side effect — sending, purchasing, deleting — is authorised in code against the user's real permissions, never by the model's say-so.</span></div>
+    <div class="r"><b>Feedback</b><span>Red-team suite in CI, sampled human review of refusals <i>and</i> near-misses, and a measured <b>false-refusal rate</b> so safety work doesn't quietly make the product useless.</span></div>
+  </div>
+
+  <div class="callout warn">
+    <div class="ico">🙅</div>
+    <div class="body"><div class="title">Over-refusal is a product failure with no error code</div>
+      <p>Every safety change should be evaluated on two sets: the harmful set (does it block?) and a <b>benign near-miss set</b> — security questions, medical questions, fiction, anything that pattern-matches to something risky. Teams that only measure the first ship assistants that refuse to explain how to kill a Linux process. Track false-refusal rate as a guardrail with the same seriousness as the violation rate.</p></div>
+  </div>
+
+  <h2>6 · Capacity and cost</h2>
+  <div class="table-wrap">
+    <table class="t">
+      <thead><tr><th>Quantity</th><th>Estimate</th><th>Notes</th></tr></thead>
+      <tbody>
+        <tr><td>Output tokens/day</td><td>~42B</td><td>120M messages × ~350 tokens</td></tr>
+        <tr><td>Input tokens/day (uncached)</td><td>~180B</td><td>Dominated by history; prefix caching removes most of it</td></tr>
+        <tr><td>Decode GPUs (peak)</td><td>~2,200</td><td>Continuous batching, GQA, fp8 KV cache</td></tr>
+        <tr><td>Prefill GPUs</td><td>~700</td><td>Separated from decode so long prompts don't stall streams</td></tr>
+        <tr><td>KV cache memory</td><td>~90 TB aggregate</td><td>180k concurrent streams; the real concurrency limit (Chapter 14)</td></tr>
+        <tr><td>Cost per conversation</td><td>~£0.012</td><td>With routing + caching; roughly 5× that without either</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="callout tip">
+    <div class="ico">🔀</div>
+    <div class="body"><div class="title">Disaggregating prefill from decode</div>
+      <p>Prefill is compute-bound and bursty; decode is memory-bound and steady. Running them on the same replicas means a single 100k-token prompt stalls everyone else's token stream. Splitting them — prefill on one pool, decode on another, with the KV cache transferred between them — lets each pool be sized, batched and scaled for its own profile. The cost is a network transfer of the cache, which is worth it above a certain scale and is over-engineering below it.</p></div>
+  </div>
+
+  <h2>7 · What breaks</h2>
+  <div class="table-wrap">
+    <table class="t">
+      <thead><tr><th>Failure</th><th>Symptom</th><th>Response</th></tr></thead>
+      <tbody>
+        <tr><td>Prefix cache hit rate collapses</td><td>TTFT doubles, cost spikes, no errors</td><td>Check routing stickiness and recent deploys; alert on hit rate directly</td></tr>
+        <tr><td>One tenant's batch traffic</td><td>Interactive p95 breaks</td><td>Priority classes and per-tenant quotas (Chapter 39)</td></tr>
+        <tr><td>A long-context request storm</td><td>KV memory exhausted, requests preempted</td><td>Admission control on context length; chunked prefill</td></tr>
+        <tr><td>Safety classifier outage</td><td>Fail open or closed?</td><td>Decide in advance: degrade to the stricter model tier, don't disable filtering</td></tr>
+        <tr><td>Model regression after a routing change</td><td>Thumbs-down rate rises, no infra signal</td><td>Sampled quality grading on live traffic, alerted per route</td></tr>
+        <tr><td>Client retries on slow streams</td><td>Load amplification during an incident</td><td>Long client timeouts, server-side cancellation, circuit breaker</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="callout interview"><div class="ico">🎤</div><div class="body"><div class="title">Interview drill</div>
+    <p class="small" style="margin:10px 0 0"><b>Follow-up:</b> “Cost per conversation doubled last week with flat traffic.” Where do you look?</p>
+    <details class="ans"><summary>How a strong answer sounds</summary><div>Cost per conversation is tokens × price, so I'd decompose it. Input tokens per message: did a prompt change, a memory feature, or a retrieval change add context? Prefix cache hit rate: a system-prompt edit or a routing change invalidates every cached prefix and silently doubles prefill — this is the single most common cause. Output length: a model or prompt change can make answers longer. Routing mix: are requests that used to go to the small tier now escalating? Conversation length: did a product change make sessions longer? All five are visible in the traces if the gateway logs token counts, cache hits and the routing decision per request — which is exactly why it should.</div></details>
+    <p class="small" style="margin:10px 0 0"><b>Follow-up:</b> “How do you know quality hasn't regressed?”</p>
+    <details class="ans"><summary>How a strong answer sounds</summary><div>Offline gates before release: a golden set of real conversations graded pairwise against the current production configuration, plus capability slices and a safety suite (Chapter 35). In production, continuously: sample a fraction of live conversations for automated rubric grading, with weekly human review of a smaller sample calibrated against the judge; watch implicit signals — regeneration rate, thumbs-down, conversation abandonment, escalation to support — sliced by model tier and route. Then any change ships through shadow and canary with those as guardrails. The offline number decides whether we try it; the production signals decide whether it stays.</div></details>
+  </div></div>
+
+  <div class="takeaways">
+    <h3>🧠 Key takeaways</h3>
+    <ul>
+      <li>Conversation cost grows quadratically with turns unless you cache prefixes and manage history.</li>
+      <li>Prefix caching only works with conversation-affine routing — track cache hit rate as a serving metric.</li>
+      <li>Tiered routing plus caching is the difference between viable and unviable unit economics.</li>
+      <li>Safety is layered, and false-refusal rate is a guardrail as important as violation rate.</li>
+      <li>Quality needs continuous sampled grading in production; infrastructure metrics cannot see it.</li>
+    </ul>
+  </div>
+
+  <div class="quiz-wrap">
+    <h2>Check your understanding</h2>
+    <div class="quiz-score"></div>
+
+    <div class="quiz" data-answer="1">
+      <p class="q">Why does a chat conversation's cost grow faster than linearly with turns?</p>
+      <div class="opts">
+        <button class="opt">Because output length grows each turn</button>
+        <button class="opt">Because every turn reprocesses the whole history, so total prefill is quadratic in turns</button>
+        <button class="opt">Because the model gets slower as context grows</button>
+        <button class="opt">Because safety filtering compounds</button>
+      </div>
+      <div class="explain">Turn n prefills roughly n turns of history. Summed over a conversation that's O(n²) — which is why prefix caching is the single most valuable optimisation here.</div>
+    </div>
+
+    <div class="quiz" data-answer="2">
+      <p class="q">Why must routing be conversation-affine?</p>
+      <div class="opts">
+        <button class="opt">To keep user data on one machine for privacy</button>
+        <button class="opt">To balance load evenly</button>
+        <button class="opt">Because the cached KV prefix lives on a specific replica — a different replica means a full re-prefill</button>
+        <button class="opt">Because models differ between replicas</button>
+      </div>
+      <div class="explain">Cache locality is the whole point. Sticky routing with an overload fallback preserves hit rate; round-robin destroys it.</div>
+    </div>
+
+    <div class="quiz" data-answer="0">
+      <p class="q">Why separate prefill and decode onto different pools at large scale?</p>
+      <div class="opts">
+        <button class="opt">They have opposite performance profiles, and a long prompt on a shared replica stalls other users' token streams</button>
+        <button class="opt">Prefill requires more precision</button>
+        <button class="opt">Decode cannot be batched</button>
+        <button class="opt">To reduce model memory</button>
+      </div>
+      <div class="explain">Prefill is compute-bound and bursty, decode is memory-bound and steady. Splitting lets each be sized and batched appropriately, at the cost of transferring the KV cache.</div>
+    </div>
+
+    <div class="quiz" data-answer="3">
+      <p class="q">Your safety change reduced violations by 40%. What else must you measure before shipping?</p>
+      <div class="opts">
+        <button class="opt">Model size</button>
+        <button class="opt">Token throughput</button>
+        <button class="opt">Cache hit rate</button>
+        <button class="opt">False-refusal rate on a benign near-miss set</button>
+      </div>
+      <div class="explain">Blocking more is trivially easy. The cost shows up as refusing legitimate requests, which has no error code and drives users away silently.</div>
+    </div>
+
+    <div class="quiz" data-answer="1">
+      <p class="q">TTFT rose from 600 ms to 2.4 s with unchanged traffic and no errors. First hypothesis?</p>
+      <div class="opts">
+        <button class="opt">The GPUs are thermally throttled</button>
+        <button class="opt">Prefix cache hit rate collapsed — likely a prompt edit or a routing change</button>
+        <button class="opt">The tokenizer changed</button>
+        <button class="opt">Users are typing longer messages</button>
+      </div>
+      <div class="explain">A cache miss means prefilling the whole conversation again. It shows up as a latency and cost change with every system metric looking healthy — which is why hit rate needs its own alert.</div>
+    </div>
+  </div>
+</main>
+<script src="assets/app.js"></script>
+<script>
+(function(){
+  const { $, $$, clamp, fmt } = ML;
+
+  function turns() {
+    const mode = $('#ctxSeg').dataset.value || 'full';
+    const N = 30, perTurn = 700;     // tokens added per turn (user + assistant)
+    let total = 0;
+    const series = [];
+    for (let t = 1; t <= N; t++) {
+      let prefill;
+      if (mode === 'full') prefill = t * perTurn;
+      else if (mode === 'cache') prefill = perTurn;                       // only the new turn
+      else if (mode === 'window') prefill = Math.min(t, 8) * perTurn;     // last 8 turns, no cache
+      else prefill = perTurn + 600;                                       // summary + recent turns
+      total += prefill;
+      series.push(prefill);
+    }
+    const X = (t) => 42 + (t - 1) / (N - 1) * 580, Y = (v) => 185 - clamp(v / (N * perTurn), 0, 1) * 165;
+    let p = '';
+    series.forEach((v, i) => { p += (p ? 'L' : 'M') + X(i + 1).toFixed(1) + ',' + Y(v).toFixed(1) + ' '; });
+    $('#turnsSvg').innerHTML =
+      `<line stroke="var(--border-strong)" x1="42" y1="185" x2="628" y2="185"/><line stroke="var(--border-strong)" x1="42" y1="10" x2="42" y2="185"/>` +
+      `<path class="ln" style="stroke:var(--accent)" d="${p}"/>` +
+      `<text x="280" y="206">conversation turn</text><text x="2" y="14">tokens prefilled</text>` +
+      `<text x="430" y="30" style="fill:var(--muted)">area under the curve = what you pay for</text>`;
+    const cost = total / 1e6 * 3 + N * 350 / 1e6 * 15;
+    const ttft = 0.15 + series[N - 1] / 9000;
+    $('#tTok').textContent = fmt(total, 0);
+    $('#tCost').textContent = '$' + cost.toFixed(4);
+    $('#tTtft').textContent = ttft.toFixed(2) + ' s';
+    const notes = {
+      full: ['⚠️ none', `🚩 <b>Quadratic growth.</b> By turn 30 each message prefills 21,000 tokens, and the conversation has prefilled <b>${fmt(total, 0)}</b> in total. TTFT degrades visibly as the conversation goes on — users describe this as "it gets slower the longer you talk to it", and they are describing your architecture.`],
+      cache: ['✅ none', `✅ <b>Prefix caching.</b> Only the new turn is prefilled; the rest of the KV state is already resident. Total prefill drops to <b>${fmt(total, 0)}</b> tokens — a ${(30 * 31 / 2 / 30).toFixed(0)}× reduction — and TTFT stays flat regardless of conversation length. Nothing about the model or the context changed, only where the computation happened. This is the highest-leverage optimisation in the entire system.`],
+      window: ['🚩 forgets earlier turns', `⚠️ <b>Sliding window.</b> Cost is bounded, and the assistant genuinely forgets what was said 9 turns ago — users notice immediately and it reads as incompetence. Acceptable only with caching on top, or for short-lived task-shaped conversations.`],
+      summary: ['⚠️ lossy compression', `✅ <b>Rolling summary plus recent turns.</b> Older history is compressed into a running summary (itself generated by a cheap model) while the last few turns stay verbatim. Cost stays flat, most long-range context survives, and the failure mode is subtle: details dropped by the summariser are gone. Combine with caching and it is the standard approach for very long sessions.`],
+    };
+    $('#tQual').textContent = notes[mode][0];
+    $('#ctxInfo p').innerHTML = notes[mode][1];
+  }
+  $('#ctxSeg').addEventListener('segchange', turns);
+  turns();
+})();
+</script>
+</body>
+</html>

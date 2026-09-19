@@ -1,0 +1,371 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Features &amp; Representations</title>
+<link rel="stylesheet" href="assets/style.css">
+<script>try{var t=JSON.parse(localStorage.getItem('ml-theme'));if(t)document.documentElement.setAttribute('data-theme',t)}catch(e){}</script>
+<style>
+  .hist { width:100%; height:190px; }
+  .hist rect { fill:var(--accent); opacity:.85; transition:height .35s, y .35s; }
+  .hist .ax { stroke:var(--border-strong); }
+  .hist text { font-size:10.5px; fill:var(--muted); font-family:var(--mono); }
+  .cyc { width:100%; max-width:320px; }
+  .cyc circle.ring { fill:none; stroke:var(--border); stroke-width:1.5; }
+  .cyc .pt { fill:var(--accent); }
+  .cyc .pt.hi { fill:var(--pink); }
+  .cyc text { font-size:10px; fill:var(--muted); font-family:var(--mono); }
+  .hashgrid { display:flex; flex-wrap:wrap; gap:3px; margin-top:10px; }
+  .hashgrid i { width:20px; height:20px; border-radius:4px; background:var(--surface-3); display:grid; place-items:center; font-size:9px; font-style:normal; font-family:var(--mono); color:var(--muted); }
+  .hashgrid i.one { background:var(--accent-soft); color:var(--accent); }
+  .hashgrid i.many { background:var(--red-soft); color:var(--red); font-weight:700; }
+  .fcost { display:grid; grid-template-columns:1fr auto auto auto; gap:8px 12px; font-size:13.5px; align-items:center; }
+  .fcost > div { padding:8px 10px; border-radius:10px; background:var(--surface-2); border:1px solid var(--border); }
+  .fcost .hd { background:none; border:none; font-weight:700; color:var(--muted); font-size:11.5px; text-transform:uppercase; letter-spacing:.05em; padding:0 10px; }
+  .fcost .num { font-family:var(--mono); text-align:right; }
+</style>
+</head>
+<body data-chapter="4">
+<main class="content">
+
+  <section class="hero">
+    <div class="eyebrow"><span class="pill accent">Chapter 4</span><span class="pill green">Beginner</span><span class="pill">⏱ 35 min</span></div>
+    <h1>Features &amp; <span class="grad">Representations</span></h1>
+    <p class="lead">A model only ever sees numbers. Everything between your raw data and those numbers — scaling, encoding, aggregating, embedding — is representation, and it decides how hard the learning problem is. Deep learning automated a lot of this. It did not automate all of it.</p>
+    <ul class="objectives">
+      <li>Transform numeric features so optimizers can actually work</li>
+      <li>Encode categoricals — one-hot, hashing, target encoding, embeddings</li>
+      <li>Build time, sequence and interaction features without leaking</li>
+      <li>Know when a learned representation replaces hand-engineering, and when it can't</li>
+      <li>Weigh a feature's value against its serving latency and maintenance cost</li>
+    </ul>
+  </section>
+
+  <h2>What counts as a feature</h2>
+  <p>A <strong>feature</strong> is any number derived from data that is <b>available at prediction time</b>, <b>computable inside the latency budget</b>, and <b>computed identically in training and serving</b>. Fail any of those three and it is not a feature, it is a future bug.</p>
+
+  <div class="grid c3">
+    <div class="card feature reveal"><div class="f-ico">⏱️</div><h4>Available in time</h4><p>Known before the event you're predicting. Pin every feature to the prediction timestamp (Chapter 29 makes this a system property).</p></div>
+    <div class="card feature reveal"><div class="f-ico" style="background:var(--accent-2-soft)">⚡</div><h4>Affordable</h4><p>A feature requiring a 300 ms join is unusable in a 50 ms budget. Precompute it, cache it, or drop it.</p></div>
+    <div class="card feature reveal"><div class="f-ico" style="background:var(--green-soft)">🔁</div><h4>Reproducible</h4><p>The same definition offline and online. Two implementations of “average order value” is the classic skew bug.</p></div>
+  </div>
+
+  <h2>Numeric features: shape matters more than you think</h2>
+  <p>Raw numbers are rarely model-ready. Incomes span four orders of magnitude, ages span two, and gradient-based optimizers hate that: the loss surface becomes a long thin valley and training crawls. Play with the transforms below.</p>
+
+  <div class="panel">
+    <div class="panel-head"><div class="dots"><i></i><i></i><i></i></div><span class="p-title">Transform playground — annual income</span><span class="p-tag">Interactive</span></div>
+    <div class="panel-body">
+      <div class="seg" id="txSeg"><button data-v="raw" class="active">Raw</button><button data-v="log">log1p</button><button data-v="std">Standardize</button><button data-v="minmax">Min-max</button><button data-v="quant">Quantile bins</button><button data-v="clip">Clip 1–99%</button></div>
+      <div class="svg-scroll"><svg id="histSvg" class="diagram hist" viewBox="0 0 640 190"></svg></div>
+      <div class="stats">
+        <div class="stat"><div class="k">Range</div><div class="v" id="txRange" style="font-size:16px">–</div></div>
+        <div class="stat acc"><div class="k">Mean / std</div><div class="v" id="txMean" style="font-size:16px">–</div></div>
+        <div class="stat good"><div class="k">Skew</div><div class="v" id="txSkew" style="font-size:16px">–</div></div>
+      </div>
+      <div class="callout" style="margin-top:12px" id="txInfo"><div class="ico">📘</div><div class="body"><div class="title"></div><p style="margin:0"></p></div></div>
+    </div>
+  </div>
+
+  <div class="callout tip">
+    <div class="ico">🧭</div>
+    <div class="body"><div class="title">Which transform when</div>
+      <ul class="mb0">
+        <li><b>Linear models and neural nets:</b> standardize (mean 0, std 1). Non-negotiable — it changes convergence by an order of magnitude.</li>
+        <li><b>Heavy-tailed positives</b> (income, counts, durations, prices): <code>log1p</code> first, then standardize.</li>
+        <li><b>Trees and gradient boosting:</b> scaling is irrelevant — they only compare thresholds. Don't waste effort.</li>
+        <li><b>Bounded inputs for images/audio:</b> min-max to [0,1] or [-1,1] to match what the pretrained network saw.</li>
+      </ul></div>
+  </div>
+
+  <h3>Missing values are information</h3>
+  <p>Never silently impute and move on. <code>NULL</code> usually means something: the field didn't exist yet, the user skipped it, the upstream service timed out. Impute <i>and</i> add a boolean <code>was_missing</code> flag so the model can use the fact of absence — and so a spike in missingness shows up in monitoring instead of quietly shifting your median.</p>
+
+  <h2>Categorical features</h2>
+  <p>Categories are the messiest part of tabular ML: they're high-cardinality, they change over time, and unseen values will absolutely appear in production.</p>
+
+  <div class="table-wrap">
+    <table class="t">
+      <thead><tr><th>Encoding</th><th>How it works</th><th>Use when</th><th>Watch out for</th></tr></thead>
+      <tbody>
+        <tr><td><b>One-hot</b></td><td>One binary column per value</td><td>&lt; ~50 values, linear models</td><td>Explodes with cardinality; unseen values become all-zeros</td></tr>
+        <tr><td><b>Ordinal / label</b></td><td>Map values to integers</td><td>Tree models, or genuinely ordered data</td><td>Implies an order to linear models that doesn't exist</td></tr>
+        <tr><td><b>Target encoding</b></td><td>Replace value with the mean label for that value</td><td>High cardinality + GBDT</td><td><b>Leaks badly</b> unless computed out-of-fold and smoothed</td></tr>
+        <tr><td><b>Hashing trick</b></td><td>hash(value) mod K → K slots</td><td>Unbounded, streaming vocabularies</td><td>Collisions; no interpretability</td></tr>
+        <tr><td><b>Embeddings</b></td><td>Learn a dense vector per value</td><td>Large vocabularies, neural models</td><td>Needs enough examples per value; cold start for new values</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="panel">
+    <div class="panel-head"><div class="dots"><i></i><i></i><i></i></div><span class="p-title">The hashing trick: collisions are usually fine</span><span class="p-tag">Interactive</span></div>
+    <div class="panel-body">
+      <div class="range-row"><label for="hashK">Hash space size K</label><input type="range" id="hashK" min="16" max="256" step="8" value="64"><output id="hashKv"></output></div>
+      <div class="range-row"><label for="hashV">Distinct values in the wild</label><input type="range" id="hashV" min="10" max="400" step="10" value="120"><output id="hashVv"></output></div>
+      <div class="hashgrid" id="hashGrid"></div>
+      <div class="stats" style="margin-top:12px">
+        <div class="stat acc"><div class="k">Slots used</div><div class="v" id="hashUsed">–</div></div>
+        <div class="stat bad"><div class="k">Colliding slots</div><div class="v" id="hashColl">–</div></div>
+        <div class="stat good"><div class="k">Memory vs one-hot</div><div class="v" id="hashMem" style="font-size:17px">–</div></div>
+      </div>
+      <p class="small muted" style="margin-top:8px">Two different categories sharing a slot is survivable: the model just sees a slightly blurred signal, and rare values collide with other rare values. This is how ad-click systems handle billions of feature values in fixed memory (Chapter 43).</p>
+    </div>
+  </div>
+
+  <div class="callout danger">
+    <div class="ico">🎯</div>
+    <div class="body"><div class="title">Target encoding: powerful and dangerous</div>
+      <p>Replacing “seller_id” with “that seller's historical fraud rate” is often the strongest feature you can build — and the easiest way to leak. The mean must be computed <b>out-of-fold</b> (or from strictly earlier time) and smoothed toward the global mean for rare values: <code>(sum + m·prior) / (count + m)</code>. Without both, the model memorises the target and your validation score is fiction.</p></div>
+  </div>
+
+  <h2>Interactions and crosses</h2>
+  <p>Linear models can't learn “this feature matters <i>only</i> when that other one is true”. You give it to them explicitly as a <strong>cross</strong>: <code>country × device</code>, <code>hour × is_weekend</code>, <code>query_token × product_category</code>. Crossed features were the backbone of pre-deep-learning ad systems and are still standard in the “wide” half of wide-and-deep models.</p>
+
+  <div class="split">
+    <div class="card"><h4 class="mt0">🌳 Trees get them free</h4><p class="small mb0">A decision tree splitting on <code>country</code> then <code>device</code> <i>is</i> an interaction. That's a big part of why GBDTs dominate tabular problems with minimal feature work.</p></div>
+    <div class="card"><h4 class="mt0">🧠 Deep nets learn them</h4><p class="small mb0">Hidden layers compose inputs multiplicatively-ish; attention learns which features interact per example. But with limited data, an explicit cross still beats hoping.</p></div>
+  </div>
+
+  <h2>Time and sequence features</h2>
+  <p>Timestamps are the richest and most leak-prone column you have. Three things to do with them:</p>
+
+  <div class="grid c3">
+    <div class="card"><h4 class="mt0">🔁 Cyclical encoding</h4><p class="small mb0">Hour 23 and hour 0 are adjacent, but as a number they're 23 apart. Encode as <code>sin(2πh/24), cos(2πh/24)</code> so the distance is right.</p></div>
+    <div class="card"><h4 class="mt0">📊 Rolling aggregates</h4><p class="small mb0">Count / mean / max over the last 1h, 24h, 30d, strictly before the prediction time. The workhorse of fraud and recommendation features.</p></div>
+    <div class="card"><h4 class="mt0">⏳ Recency &amp; gaps</h4><p class="small mb0">“Seconds since previous event”, “days since first seen”. Cheap, strong, and meaningful for nearly every user-level model.</p></div>
+  </div>
+
+  <div class="panel">
+    <div class="panel-head"><div class="dots"><i></i><i></i><i></i></div><span class="p-title">Why hour-of-day needs a circle</span><span class="p-tag">Interactive</span></div>
+    <div class="panel-body">
+      <div class="split" style="align-items:center">
+        <div class="center"><svg id="cycSvg" class="diagram cyc" viewBox="0 0 260 260"></svg></div>
+        <div>
+          <div class="range-row"><label for="cycH">Hour</label><input type="range" id="cycH" min="0" max="23" step="1" value="23"><output id="cycHv"></output></div>
+          <div class="stats" style="grid-template-columns:1fr">
+            <div class="stat"><div class="k">Raw distance to hour 0</div><div class="v" id="cycRaw">–</div></div>
+            <div class="stat good"><div class="k">Cyclical distance to hour 0</div><div class="v" id="cycCyc">–</div></div>
+          </div>
+          <p class="small muted">The raw integer says 23:00 and midnight are the two most different times of day. The sin/cos pair says they are neighbours — which is what every traffic, fraud and demand pattern actually looks like.</p>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <h2>Text, images and the rise of learned representations</h2>
+  <p>For unstructured data, hand-engineering lost. The progression is worth knowing because each step still appears in production systems.</p>
+
+  <div class="timeline">
+    <div class="ti reveal"><h4>Bag of words / n-grams</h4><p>Count each word. Sparse, enormous, no notion of meaning — “great” and “fantastic” are unrelated columns. Still a fine baseline and very fast.</p></div>
+    <div class="ti reveal"><h4>TF-IDF</h4><p>Weight words by rarity so “the” stops dominating. Powers BM25 and classic search; still the lexical half of hybrid retrieval (Chapter 21).</p></div>
+    <div class="ti reveal"><h4>Word embeddings</h4><p>word2vec/GloVe: one dense vector per word, learned from context. Meaning becomes geometry — but one vector per word, regardless of sentence.</p></div>
+    <div class="ti reveal"><h4>Contextual embeddings</h4><p>BERT-style encoders give each token a vector that depends on its sentence, so “bank” differs by context. This is what modern embedding models serve (Chapter 15).</p></div>
+    <div class="ti reveal"><h4>End-to-end learned</h4><p>The network consumes raw tokens or pixels and learns every intermediate representation itself. Your job shifts from crafting features to curating data and designing the input pipeline.</p></div>
+  </div>
+
+  <div class="callout warn">
+    <div class="ico">🧩</div>
+    <div class="body"><div class="title">“Deep learning means no feature engineering” is half true</div>
+      <p>It's true <i>within</i> a modality: you don't design edge detectors any more. It's false for the <b>system</b>. Someone still decides which 30-day aggregates get fetched, which user history is concatenated, what goes into the prompt, and how a categorical id maps to an embedding row. In recommender and tabular systems, feature work remains most of the measurable gains.</p></div>
+  </div>
+
+  <h2>Features have a running cost</h2>
+  <p>Every feature is a piece of production infrastructure: a pipeline that can break, a lookup that adds latency, a definition that can drift. Before adding one, ask what it costs per prediction.</p>
+
+  <div class="fcost">
+    <div class="hd">Feature</div><div class="hd num">Lift (AUC)</div><div class="hd num">p99 cost</div><div class="hd num">Verdict</div>
+    <div>User age, device, country (request payload)</div><div class="num">+0.021</div><div class="num">0 ms</div><div class="num">✅ ship</div>
+    <div>7-day rolling purchase count (online store lookup)</div><div class="num">+0.034</div><div class="num">4 ms</div><div class="num">✅ ship</div>
+    <div>Text embedding of the item description (cached)</div><div class="num">+0.018</div><div class="num">2 ms</div><div class="num">✅ ship</div>
+    <div>Live graph feature: “fraud rate of devices this card touched”</div><div class="num">+0.009</div><div class="num">85 ms</div><div class="num">⚠️ precompute or drop</div>
+    <div>Third-party credit API call</div><div class="num">+0.004</div><div class="num">300 ms + £0.02</div><div class="num">❌ no</div>
+  </div>
+  <p class="small muted" style="margin-top:10px">A real feature review looks exactly like this table. The strongest offline feature is not always the right feature.</p>
+
+  <div class="callout danger"><div class="ico">⚠️</div><div class="body"><div class="title">Common mistakes</div>
+    <ul class="mb0">
+      <li><b>Fitting encoders on the full dataset.</b> Scalers, target encoders and vocabularies must be fitted on training data only — otherwise validation is contaminated.</li>
+      <li><b>No plan for unseen categories.</b> Production will send you a country code, app version or merchant you've never seen. Reserve an explicit <code>&lt;UNK&gt;</code> slot and test it.</li>
+      <li><b>Rolling windows that include the present.</b> “Purchases in the last 7 days” computed with <code>&lt;=</code> instead of <code>&lt;</code> includes the event you're predicting.</li>
+      <li><b>Two implementations of one feature.</b> A SQL version for training and a Python version for serving will diverge. One definition, one code path (Chapter 29).</li>
+      <li><b>Hoarding features.</b> 400 features with 30 doing the work is 370 pipelines to maintain and 370 chances of a silent null. Prune by importance and by cost.</li>
+    </ul></div></div>
+
+  <div class="callout interview"><div class="ico">🎤</div><div class="body"><div class="title">Interview drill</div>
+    <p class="small" style="margin:10px 0 0"><b>Warm-up:</b> Design the feature set for “will this food delivery be late?”, predicted at order time.</p>
+    <details class="ans"><summary>How a strong answer sounds</summary><div>Three groups. <b>Order</b>: item count, prep-time estimate, price, is-scheduled. <b>Context</b>: hour and day cyclically encoded, weather, distance, current rain flag. <b>Aggregates as of now</b>: restaurant's median prep time over the last 30 days and last 2 hours, couriers available within 3 km, restaurant's current open-order backlog, courier's recent on-time rate. Everything must be computed with a strict “before order time” cut-off and served from an online store within a few milliseconds, with the same definitions used to build the training set — so I'd define them once in a feature repository rather than in two places.</div></details>
+    <p class="small" style="margin:10px 0 0"><b>Deeper:</b> You have 2 million distinct seller IDs and need them in a neural ranker. Options?</p>
+    <details class="ans"><summary>How a strong answer sounds</summary><div>An embedding table of 2M rows is memory-heavy and most rows will be undertrained, so: keep explicit embeddings for the head sellers that have enough traffic, hash the long tail into a shared bucket space, and add <i>descriptive</i> features (tenure, category, rating, historical rates computed out-of-fold) so a cold seller still gets a reasonable score from its attributes. That combination gives capacity where data exists, graceful degradation where it doesn't, and a fixed memory footprint — which is also what makes the model servable.</div></details>
+  </div></div>
+
+  <div class="takeaways">
+    <h3>🧠 Key takeaways</h3>
+    <ul>
+      <li>A feature must be available in time, affordable at serving, and defined identically offline and online.</li>
+      <li>Standardize (and log-transform skewed positives) for gradient-based models; skip it for trees.</li>
+      <li>Pick a categorical encoding by cardinality and model type; target encoding needs out-of-fold computation.</li>
+      <li>Encode cyclical time on a circle and build rolling aggregates with a strict time cut-off.</li>
+      <li>Judge features by lift <i>per millisecond and per pipeline</i>, not lift alone.</li>
+    </ul>
+  </div>
+
+  <div class="quiz-wrap">
+    <h2>Check your understanding</h2>
+    <div class="quiz-score"></div>
+
+    <div class="quiz" data-answer="1">
+      <p class="q">You're training gradient-boosted trees on tabular data. Which preprocessing step is least useful?</p>
+      <div class="opts">
+        <button class="opt">Adding a was_missing indicator column</button>
+        <button class="opt">Standardizing every numeric feature to mean 0, std 1</button>
+        <button class="opt">Building 30-day rolling aggregates</button>
+        <button class="opt">Out-of-fold target encoding for a high-cardinality ID</button>
+      </div>
+      <div class="explain">Trees split on thresholds, so monotone rescaling changes nothing. The other three all add real information.</div>
+    </div>
+
+    <div class="quiz" data-answer="3">
+      <p class="q">Encoding hour-of-day as the integers 0–23 in a neural net causes what problem?</p>
+      <div class="opts">
+        <button class="opt">Values are too large for the optimizer</button>
+        <button class="opt">It can't represent weekends</button>
+        <button class="opt">Nothing — it's the standard approach</button>
+        <button class="opt">23:00 and 00:00 appear maximally distant when they're adjacent</button>
+      </div>
+      <div class="explain">The model has to waste capacity learning that the ends wrap around. Sin/cos encoding puts them next to each other by construction.</div>
+    </div>
+
+    <div class="quiz" data-answer="2">
+      <p class="q">Target encoding a <code>merchant_id</code> column with the overall fraud rate per merchant, computed on the whole training set, causes…</p>
+      <div class="opts">
+        <button class="opt">Excessive memory use</button>
+        <button class="opt">Slower training</button>
+        <button class="opt">Leakage — each row's own label is in its encoding</button>
+        <button class="opt">Nothing, if you also one-hot encode</button>
+      </div>
+      <div class="explain">For rare merchants the encoded value is essentially the row's own label. Compute it out-of-fold (or from strictly earlier data) and smooth toward the prior.</div>
+    </div>
+
+    <div class="quiz" data-answer="0">
+      <p class="q">What is the main advantage of the hashing trick over one-hot encoding?</p>
+      <div class="opts">
+        <button class="opt">Fixed memory regardless of how many new values appear</button>
+        <button class="opt">It never loses information</button>
+        <button class="opt">It makes features easier to interpret</button>
+        <button class="opt">It removes the need for regularization</button>
+      </div>
+      <div class="explain">Hashing bounds the feature space in advance, so a streaming system with an unbounded vocabulary still fits in a known amount of memory. The cost is collisions and lost interpretability.</div>
+    </div>
+
+    <div class="quiz" data-answer="1">
+      <p class="q">A feature adds +0.002 AUC but requires a 250 ms third-party API call per prediction, in a service with a 100 ms p99 budget. What do you do?</p>
+      <div class="opts">
+        <button class="opt">Ship it — AUC is what matters</button>
+        <button class="opt">Drop it, or precompute it asynchronously and serve a cached value</button>
+        <button class="opt">Increase the latency budget</button>
+        <button class="opt">Call the API only for 10% of requests</button>
+      </div>
+      <div class="explain">A feature you cannot compute in time is not a feature. If the signal is genuinely valuable, move it offline: refresh it in the background and read a cached value at request time — accepting slight staleness in exchange for meeting the budget.</div>
+    </div>
+  </div>
+</main>
+<script src="assets/app.js"></script>
+<script>
+(function(){
+  const { $, $$, clamp, fmt } = ML;
+
+  /* ---------------- transform playground ---------------- */
+  // log-normal-ish incomes
+  const RAW = [];
+  let seed = 7;
+  const rnd = () => { seed = (seed * 1103515245 + 12345) % 2147483648; return seed / 2147483648; };
+  for (let i = 0; i < 4000; i++) {
+    const z = (rnd() + rnd() + rnd() + rnd() - 2) * 1.1;
+    RAW.push(Math.round(Math.exp(10.1 + z) / 100) * 100);
+  }
+  const mean = (a) => a.reduce((x, y) => x + y, 0) / a.length;
+  const std = (a) => { const m = mean(a); return Math.sqrt(mean(a.map(v => (v - m) ** 2))); };
+  const sorted = RAW.slice().sort((a, b) => a - b);
+  const q = (p) => sorted[Math.floor(p * (sorted.length - 1))];
+
+  const TX = {
+    raw: { f: (a) => a.slice(), t: 'Raw values', d: 'A long right tail: most people near the median, a few at 10×. Gradient-based models struggle — one big feature dominates the loss surface and the effective learning rate for every other weight collapses.' },
+    log: { f: (a) => a.map(v => Math.log1p(v)), t: 'log1p', d: 'The tail folds in and the distribution becomes roughly symmetric. Ratios become differences, which is usually what you actually mean: £20k→£40k and £200k→£400k are now the same distance.' },
+    std: { f: (a) => { const m = mean(a), s = std(a); return a.map(v => (v - m) / s); }, t: 'Standardize (z-score)', d: 'Mean 0, std 1. Every feature contributes on the same scale, so a single learning rate works for all of them. Note the tail is still there — standardizing does not fix skew, it only recentres it.' },
+    minmax: { f: (a) => { const lo = Math.min(...a), hi = Math.max(...a); return a.map(v => (v - lo) / (hi - lo)); }, t: 'Min-max to [0,1]', d: 'Bounded, which suits image pixels and inputs to bounded activations. Fragile with outliers: one billionaire squashes everyone else into the first 2% of the range.' },
+    quant: { f: (a) => a.map(v => sorted.findIndex(x => x >= v) / sorted.length * 10 | 0), t: 'Quantile bins (deciles)', d: 'Rank-based: each bin holds 10% of users. Immune to outliers and to units, and it discards magnitude — a good trade when only the ordering carries signal.' },
+    clip: { f: (a) => { const lo = q(0.01), hi = q(0.99); return a.map(v => clamp(v, lo, hi)); }, t: 'Winsorize (clip 1st–99th percentile)', d: 'Keeps the shape but caps extremes, so a data-entry error of £99,999,999 cannot dominate the gradient. Often applied before log or standardization.' },
+  };
+  function drawHist() {
+    const key = $('#txSeg').dataset.value || 'raw';
+    const tx = TX[key], vals = tx.f(RAW);
+    const lo = Math.min(...vals), hi = Math.max(...vals), B = 34;
+    const bins = new Array(B).fill(0);
+    vals.forEach(v => bins[clamp(Math.floor((v - lo) / (hi - lo || 1) * B), 0, B - 1)]++);
+    const mx = Math.max(...bins);
+    let g = '<line class="ax" x1="30" y1="160" x2="620" y2="160"/>';
+    bins.forEach((b, i) => {
+      const h = b / mx * 130, w = 580 / B - 3;
+      g += `<rect x="${30 + i * (580 / B)}" y="${160 - h}" width="${w}" height="${h}" rx="2"/>`;
+    });
+    const f = (v) => key === 'raw' || key === 'clip' ? '£' + fmt(v, 0) : v.toFixed(2);
+    g += `<text x="30" y="176">${f(lo)}</text><text x="560" y="176">${f(hi)}</text>`;
+    $('#histSvg').innerHTML = g;
+    $('#txRange').textContent = f(lo) + ' … ' + f(hi);
+    $('#txMean').textContent = (key === 'raw' || key === 'clip' ? '£' + fmt(mean(vals), 0) : mean(vals).toFixed(2)) + ' / ' + (key === 'raw' || key === 'clip' ? fmt(std(vals), 0) : std(vals).toFixed(2));
+    const m = mean(vals), s = std(vals);
+    const sk = s ? mean(vals.map(v => ((v - m) / s) ** 3)) : 0;
+    $('#txSkew').textContent = sk.toFixed(2) + (Math.abs(sk) < 0.4 ? ' ✅' : Math.abs(sk) < 1 ? ' ⚠️' : ' 🚩');
+    $('#txInfo .title').textContent = tx.t;
+    $('#txInfo p').textContent = tx.d;
+  }
+  $('#txSeg').addEventListener('segchange', drawHist);
+  drawHist();
+
+  /* ---------------- hashing trick ---------------- */
+  function hashDemo() {
+    const K = +$('#hashK').value, V = +$('#hashV').value;
+    $('#hashKv').textContent = K + ' slots';
+    $('#hashVv').textContent = V + ' values';
+    const slots = new Array(K).fill(0);
+    for (let i = 0; i < V; i++) {
+      let h = 2166136261;
+      const sVal = 'category_' + i;
+      for (let c = 0; c < sVal.length; c++) { h ^= sVal.charCodeAt(c); h = Math.imul(h, 16777619) >>> 0; }
+      slots[h % K]++;
+    }
+    $('#hashGrid').innerHTML = slots.map(c => `<i class="${c === 0 ? '' : c === 1 ? 'one' : 'many'}">${c || ''}</i>`).join('');
+    const used = slots.filter(c => c).length, coll = slots.filter(c => c > 1).length;
+    $('#hashUsed').textContent = used + ' / ' + K;
+    $('#hashColl').textContent = coll + ' (' + Math.round(coll / K * 100) + '%)';
+    $('#hashMem').textContent = (V / K).toFixed(1) + '× smaller';
+  }
+  $('#hashK').addEventListener('input', hashDemo);
+  $('#hashV').addEventListener('input', hashDemo);
+  hashDemo();
+
+  /* ---------------- cyclical encoding ---------------- */
+  function cyc() {
+    const h = +$('#cycH').value;
+    $('#cycHv').textContent = String(h).padStart(2, '0') + ':00';
+    let g = '<circle class="ring" cx="130" cy="130" r="92"/>';
+    for (let i = 0; i < 24; i++) {
+      const a = (i / 24) * Math.PI * 2 - Math.PI / 2;
+      const x = 130 + Math.cos(a) * 92, y = 130 + Math.sin(a) * 92;
+      g += `<circle class="pt ${i === h ? 'hi' : ''}" cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="${i === h ? 8 : 4}"/>`;
+      if (i % 3 === 0) g += `<text x="${(130 + Math.cos(a) * 112 - 7).toFixed(1)}" y="${(130 + Math.sin(a) * 112 + 4).toFixed(1)}">${String(i).padStart(2, '0')}</text>`;
+    }
+    const a0 = -Math.PI / 2, ah = (h / 24) * Math.PI * 2 - Math.PI / 2;
+    g += `<line x1="${130 + Math.cos(a0) * 92}" y1="${130 + Math.sin(a0) * 92}" x2="${130 + Math.cos(ah) * 92}" y2="${130 + Math.sin(ah) * 92}" stroke="var(--amber)" stroke-width="2.5" stroke-dasharray="5 4"/>`;
+    $('#cycSvg').innerHTML = g;
+    const cycD = Math.hypot(Math.cos(ah) - Math.cos(a0), Math.sin(ah) - Math.sin(a0));
+    $('#cycRaw').textContent = Math.abs(h - 0).toFixed(0) + ' hours apart';
+    $('#cycCyc').textContent = cycD.toFixed(2) + ' (max 2.0)';
+  }
+  $('#cycH').addEventListener('input', cyc);
+  cyc();
+})();
+</script>
+</body>
+</html>

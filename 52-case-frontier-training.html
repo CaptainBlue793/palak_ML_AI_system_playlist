@@ -1,0 +1,321 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Case Study: Training a Frontier LLM</title>
+<link rel="stylesheet" href="assets/style.css">
+<script>try{var t=JSON.parse(localStorage.getItem('ml-theme'));if(t)document.documentElement.setAttribute('data-theme',t)}catch(e){}</script>
+<style>
+  .req { display:grid; grid-template-columns:repeat(auto-fit,minmax(160px,1fr)); gap:8px }
+  .req > div { padding:10px 12px; border-radius:12px; background:var(--surface-2); border:1px solid var(--border) }
+  .req b { display:block; font-size:11px; color:var(--muted); text-transform:uppercase; letter-spacing:.05em }
+  .req span { font-family:var(--mono); font-size:17px; font-weight:800 }
+  .runviz text { font-size:10px; fill:var(--text-2); font-family:var(--font); font-weight:600 }
+  .runviz .sub { font-size:8.5px; fill:var(--muted); font-family:var(--mono); font-weight:400 }
+  .losssvg { width:100%; height:230px }
+  .losssvg text { font-size:10px; fill:var(--muted); font-family:var(--mono) }
+  .mem { display:grid; gap:8px }
+  .mem .r { display:grid; grid-template-columns:175px 1fr; gap:12px; padding:11px 13px; border-radius:12px; background:var(--surface-2); border:1px solid var(--border); font-size:13.5px }
+  .mem .r b { font-family:var(--mono); color:var(--accent) }
+  .day { display:grid; grid-template-columns:78px 1fr; gap:12px; padding:10px 12px; border-radius:12px; background:var(--surface-2); border:1px solid var(--border); font-size:13.5px; margin-bottom:8px }
+  .day b { font-family:var(--mono); color:var(--accent-2); font-size:12.5px }
+</style>
+</head>
+<body data-chapter="52">
+<main class="content">
+
+  <section class="hero">
+    <div class="eyebrow"><span class="pill accent">Chapter 52</span><span class="pill pink">Case Study</span><span class="pill">⏱ 55 min</span></div>
+    <h1>Case Study: <span class="grad">Training a Frontier LLM</span></h1>
+    <p class="lead">Ten thousand GPUs, ninety days, and a nine-figure budget spent on a single computation that either produces a frontier model or does not. There is no A/B test and no gradual rollout — you make the architectural decisions once, watch a loss curve for three months, and find out at the end. This chapter is the capstone: every earlier chapter shows up here, and the hardest problems turn out to be operational rather than mathematical.</p>
+    <ul class="objectives">
+      <li>Allocate a fixed compute budget between model size, data and inference cost</li>
+      <li>Build the data pipeline that decides the model's ceiling before training starts</li>
+      <li>Choose a parallelism strategy that fits memory and keeps the interconnect busy</li>
+      <li>Operate a 90-day run through hardware failures, stragglers and loss spikes</li>
+      <li>Decide, from evidence, whether the result is worth launching</li>
+    </ul>
+  </section>
+
+  <h2>1 · The commitment</h2>
+  <div class="req">
+    <div><b>Compute</b><span>3×10²⁵ FLOPs</span></div>
+    <div><b>GPUs</b><span>10,240</span></div>
+    <div><b>Wall-clock</b><span>~88 days</span></div>
+    <div><b>Tokens</b><span>~14T</span></div>
+    <div><b>Target MFU</b><span>&gt; 45%</span></div>
+    <div><b>Budget</b><span>~£140M</span></div>
+  </div>
+  <p class="small muted" style="margin-top:10px"><b>In scope:</b> compute allocation, data curation, parallelism, run operations, evaluation, the launch decision. <b>Out of scope:</b> datacentre construction and power, chip procurement, and the serving system that comes afterwards (Chapter 45).</p>
+
+  <div class="callout warn">
+    <div class="ico">🎲</div>
+    <div class="body"><div class="title">What makes this different from every other chapter</div>
+      <p>Everywhere else in this course you ship, measure and iterate. Here the feedback loop is ninety days long and you get one attempt per budget cycle. The decisions that matter — model shape, data mixture, tokenizer, optimizer, learning-rate schedule — are made before a single full-scale step runs, and they are effectively irreversible by week two. The entire discipline is therefore about <b>de-risking in advance</b>: scaling-law fits from small runs, ablations at 1% scale, and instrumentation good enough that you notice a problem on day three rather than day forty.</p></div>
+  </div>
+
+  <h2>2 · Deep dive: allocating the budget</h2>
+  <p>Compute is roughly <code>6 × parameters × tokens</code>. With the total fixed, every choice of model size implies a token count, and they trade off in ways that do not stop at the training bill.</p>
+
+  <div class="panel">
+    <div class="panel-head"><div class="dots"><i></i><i></i><i></i></div><span class="p-title">Four ways to spend 3×10²⁵ FLOPs</span><span class="p-tag">Interactive</span></div>
+    <div class="panel-body">
+      <div class="seg" id="allocSeg"><button data-v="big" class="active">400B dense, 1.2T tokens</button><button data-v="chin">140B dense, 3.6T tokens</button><button data-v="over">70B dense, 14T tokens</button><button data-v="moe">MoE, 320B total / 40B active</button></div>
+      <div class="svg-scroll"><svg id="lossSvg" class="diagram losssvg" viewBox="0 0 640 230"></svg></div>
+      <div class="stats">
+        <div class="stat acc"><div class="k">Final training loss</div><div class="v" id="aLoss" style="font-size:18px">–</div></div>
+        <div class="stat good"><div class="k">Inference cost / 1M tok</div><div class="v" id="aInf" style="font-size:18px">–</div></div>
+        <div class="stat warn"><div class="k">Wall-clock</div><div class="v" id="aTime" style="font-size:18px">–</div></div>
+        <div class="stat bad"><div class="k">Main risk</div><div class="v" id="aRisk" style="font-size:14px">–</div></div>
+      </div>
+      <div class="callout" id="allocInfo" style="margin-top:12px"><div class="ico">⚖️</div><div class="body"><p style="margin:0"></p></div></div>
+    </div>
+  </div>
+
+  <div class="callout tip">
+    <div class="ico">💡</div>
+    <div class="body"><div class="title">Compute-optimal is not deployment-optimal</div>
+      <p>Scaling laws tell you the model size that minimises <em>training</em> loss for a given training budget. That is the right answer only if you train once and never serve anything. If the model will answer a trillion tokens a month for two years, inference dominates total cost by a wide margin, and deliberately over-training a smaller model — spending more training compute than the compute-optimal point suggests, for a worse training loss than a bigger model would reach — produces a cheaper, faster product with a better total-cost picture. The compute-optimal point is a reference, not a target (Chapter 16).</p></div>
+  </div>
+
+  <h2>3 · Data: the decision made before training starts</h2>
+  <div class="panel">
+    <div class="panel-head"><div class="dots"><i></i><i></i><i></i></div><span class="p-title">From raw crawl to training shards</span><span class="p-tag">Step-through</span></div>
+    <div class="panel-body svg-scroll">
+      <svg id="runSvg" class="diagram runviz" viewBox="0 0 900 300">
+        <defs><marker id="fr52" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" class="arrow-head"/></marker></defs>
+        <path id="f-e1" class="edge dimmable" d="M115,55 L165,55" marker-end="url(#fr52)"/>
+        <path id="f-e2" class="edge dimmable" d="M285,55 L335,55" marker-end="url(#fr52)"/>
+        <path id="f-e3" class="edge dimmable" d="M455,55 L505,55" marker-end="url(#fr52)"/>
+        <path id="f-e4" class="edge dimmable" d="M625,55 L675,55" marker-end="url(#fr52)"/>
+        <path id="f-e5" class="edge dimmable" d="M750,80 L750,150" marker-end="url(#fr52)"/>
+        <path id="f-e6" class="edge dimmable" d="M665,175 L470,175" marker-end="url(#fr52)"/>
+        <path id="f-abl" class="edge dimmable dash" d="M400,80 L400,235" marker-end="url(#fr52)"/>
+        <g id="f-raw" class="node dimmable" transform="translate(20,30)"><rect width="95" height="50" rx="11"/><text x="47" y="22" text-anchor="middle">Raw corpora</text><text x="47" y="38" text-anchor="middle" class="sub">~100T tokens</text></g>
+        <g id="f-filt" class="node dimmable" transform="translate(165,30)"><rect width="120" height="50" rx="11"/><text x="60" y="22" text-anchor="middle">Filter</text><text x="60" y="38" text-anchor="middle" class="sub">quality · safety · lang</text></g>
+        <g id="f-dedup" class="node dimmable" transform="translate(335,30)"><rect width="120" height="50" rx="11"/><text x="60" y="22" text-anchor="middle">Deduplicate</text><text x="60" y="38" text-anchor="middle" class="sub">exact + fuzzy</text></g>
+        <g id="f-mix" class="node dimmable" transform="translate(505,30)"><rect width="120" height="50" rx="11"/><text x="60" y="22" text-anchor="middle">Mixture</text><text x="60" y="38" text-anchor="middle" class="sub">weights · curriculum</text></g>
+        <g id="f-tok" class="node dimmable" transform="translate(675,30)"><rect width="150" height="50" rx="11"/><text x="75" y="22" text-anchor="middle">Tokenize + shard</text><text x="75" y="38" text-anchor="middle" class="sub">~14T tokens</text></g>
+        <g id="f-train" class="node dimmable" transform="translate(665,150)"><rect width="170" height="50" rx="11"/><text x="85" y="22" text-anchor="middle">The run</text><text x="85" y="38" text-anchor="middle" class="sub">10,240 GPUs · 88 d</text></g>
+        <g id="f-eval" class="node dimmable" transform="translate(300,150)"><rect width="170" height="50" rx="11"/><text x="85" y="22" text-anchor="middle">Checkpoints + evals</text><text x="85" y="38" text-anchor="middle" class="sub">every 2,000 steps</text></g>
+        <g id="f-ab" class="node dimmable" transform="translate(320,235)"><rect width="170" height="46" rx="11"/><text x="85" y="20" text-anchor="middle">Ablations at 1% scale</text><text x="85" y="36" text-anchor="middle" class="sub">decide before you commit</text></g>
+      </svg>
+    </div>
+    <div class="stepper" data-diagram="runSvg">
+      <ol class="steps">
+        <li data-title="Start with far more than you need" data-on="f-raw">Web crawl, books, code, papers, curated reference material, licensed corpora. Perhaps 100 trillion tokens raw, of which you will keep a seventh. Having surplus is what makes aggressive filtering affordable — quality is bought by throwing data away.</li>
+        <li data-title="Filter hard" data-on="f-raw f-filt f-e1" data-packet="f-raw>f-filt">Language identification, a learned quality classifier, heuristics for boilerplate and machine-generated spam, safety and CSAM removal, and PII scrubbing. Filtering is where most of the measurable quality comes from, and every filter is a value judgement about what the model will be good at (Chapter 16).</li>
+        <li data-title="Deduplicate, then deduplicate again" data-on="f-filt f-dedup f-e2" data-packet="f-filt>f-dedup" data-color="var(--green)">Exact and fuzzy dedup across the whole corpus. Duplicated data wastes compute, encourages memorisation, and corrupts evaluation when a benchmark leaks in. Cross-checking against every eval set you intend to use is a mandatory step, not a nicety — and it is one of the most common ways frontier results turn out to be wrong.</li>
+        <li data-title="Choose the mixture" data-on="f-dedup f-mix f-e3" data-packet="f-dedup>f-mix" data-color="var(--accent-2)">How much code, how much maths, how many languages, how much conversational text. Code improves reasoning even for non-code tasks; over-weighting one domain quietly costs another. Mixture weights are set from 1%-scale ablations, and a curriculum — general data first, high-quality and long-context material late — reliably beats a fixed blend.</li>
+        <li data-title="Tokenize and shard" data-on="f-mix f-tok f-e4" data-packet="f-mix>f-tok">The tokenizer is frozen for the model's lifetime: vocabulary size trades embedding parameters against sequence length, and poor multilingual coverage becomes a permanent tax on every non-English user (Chapter 15). Shard so any worker can stream any shard, and make the ordering reproducible from a seed.</li>
+        <li data-title="Decide everything at 1% scale first" data-on="f-ab f-abl" data-packet="f-ab>f-mix" data-color="var(--amber)">Mixture weights, learning rate, batch schedule, architectural details — all chosen from small runs whose results extrapolate along a fitted scaling law. This is the single highest-value activity in the whole programme: a week of ablations routinely saves a month of full-scale compute, and nothing else recovers a wrong decision made on day zero.</li>
+        <li data-title="Run, and watch" data-on="f-tok f-train f-e5 f-eval f-e6" data-packet="f-tok>f-train">Checkpoint frequently, evaluate continuously on a fixed suite, and compare the loss curve against the predicted curve daily. A run that is 3% off prediction on day five is telling you something, and the cost of investigating is two days while the cost of ignoring it is eighty.</li>
+      </ol>
+    </div>
+  </div>
+
+  <h2>4 · Parallelism and the memory arithmetic</h2>
+  <div class="mem">
+    <div class="r"><b>Parameters</b><span>140B parameters in bf16 = 280 GB. Already far beyond one 80 GB GPU, before anything else exists.</span></div>
+    <div class="r"><b>Optimizer state</b><span>Adam keeps two moments plus an fp32 master copy: roughly 12 bytes per parameter, about 1.7 TB. This, not the weights, is what dominates training memory (Chapter 23).</span></div>
+    <div class="r"><b>Gradients</b><span>Another 280 GB in bf16, plus the reduction buffers for communication.</span></div>
+    <div class="r"><b>Activations</b><span>Scales with batch × sequence × layers. Selective recomputation trades roughly 30% extra compute for a large memory saving, and it is nearly always the right trade.</span></div>
+    <div class="r"><b>The plan</b><span>Tensor parallel 8 inside a node over NVLink, pipeline parallel 12 across nodes, data parallel 107 groups on top with fully sharded optimizer state, plus sequence parallelism for long context. Roughly: fastest link for the chattiest dimension (Chapter 24).</span></div>
+    <div class="r"><b>The constraint</b><span>Every dimension buys memory with communication. Tensor parallelism beyond a node collapses on interconnect bandwidth; pipeline parallelism creates bubbles that interleaved schedules only partly hide; data parallelism needs a batch large enough to shard and small enough to still learn.</span></div>
+  </div>
+  <p class="small muted" style="margin-top:8px">Sanity-check the plan with MFU before committing: <code>MFU = achieved FLOPs ÷ peak FLOPs</code>. Above 45% is good at this scale, below 30% means the interconnect or the pipeline schedule is wasting a third of a nine-figure budget — and that is worth a week of profiling before day one, not after.</p>
+
+  <h2>5 · Eighty-eight days</h2>
+  <div class="day"><b>Day 0</b><span>Burn-in: a 6-hour full-scale run at the real configuration. Confirm MFU, checkpoint save and restore, the evaluation harness, and the dashboards. Teams that skip this discover a broken restore path on day nine and lose everything since the last verified checkpoint.</span></div>
+  <div class="day"><b>Day 1–3</b><span>Loss falls fast and predictably. Compare against the scaling-law projection every few hours. Early divergence is the cheapest signal you will ever get — and the last point at which restarting is merely embarrassing rather than catastrophic.</span></div>
+  <div class="day"><b>Day 4</b><span>First hardware failure. At 10,240 GPUs a node dies every few hours: memory errors, thermal events, a failed optical link. The run must detect, evict and resume from the last checkpoint automatically, or engineers spend ninety days restarting jobs by hand.</span></div>
+  <div class="day"><b>Day 11</b><span>A straggler. One node runs 8% slow — a throttling GPU or a degraded link — and because every step synchronises, the whole cluster runs 8% slow. Per-rank step-time monitoring finds it; without that instrumentation it hides for weeks and costs millions.</span></div>
+  <div class="day"><b>Day 23</b><span>A loss spike. Rewind to a checkpoint before it, skip the offending data batches, and resume — sometimes with a lower learning rate. Spikes correlate with pathological data, so the batches are worth inspecting: it is often a repeated document or an encoding artefact that dedup missed.</span></div>
+  <div class="day"><b>Day 40</b><span>Evaluations plateau on one capability while loss keeps falling. Usually a mixture problem, and it is the most painful moment of the run: you can adjust the remaining curriculum, but you cannot un-train what has happened. This is exactly the decision the 1%-scale ablations existed to prevent.</span></div>
+  <div class="day"><b>Day 66</b><span>A silent data corruption. A shard serves malformed tokens and loss degrades without any error being raised. Checksums on shards and an automatic sanity-check on batch statistics are the only defence; hardware does not always tell you it is wrong.</span></div>
+  <div class="day"><b>Day 88</b><span>Learning rate decays to its floor; final checkpoints written. Pretraining is finished, and the model is not yet a product — post-training is a separate programme with its own risks (Chapters 17 and 18).</span></div>
+
+  <div class="callout warn">
+    <div class="ico">🔁</div>
+    <div class="body"><div class="title">Determinism, checkpointing and the ability to rewind</div>
+      <p>A 90-day run <em>will</em> be interrupted, so the ability to resume exactly is a hard requirement rather than an operational nicety. That means checkpointing model, optimizer state, data-loader position and RNG state together, atomically; writing asynchronously so the cluster is not idle during a multi-terabyte save; and keeping enough history to rewind past a spike that is only recognised hours later. Teams that keep only the last two checkpoints discover on day 23 that both are already contaminated (Chapter 25).</p></div>
+  </div>
+
+  <h2>6 · Evaluation and the launch decision</h2>
+  <div class="table-wrap">
+    <table class="t">
+      <thead><tr><th>Stage</th><th>What it answers</th><th>Failure mode it catches</th></tr></thead>
+      <tbody>
+        <tr><td>Loss vs projection</td><td>Is the run healthy?</td><td>Divergence, stragglers, data corruption — daily, during the run</td></tr>
+        <tr><td>Capability suite</td><td>Reasoning, code, maths, multilingual, long-context</td><td>Mixture problems, capability plateaus</td></tr>
+        <tr><td>Contamination audit</td><td>Did benchmark data leak into training?</td><td>The single most common reason a headline result is not real</td></tr>
+        <tr><td>Human preference</td><td>Is it actually better to use?</td><td>Benchmark gains that no user can feel</td></tr>
+        <tr><td>Safety and red-team</td><td>What can it be made to do?</td><td>Harms that no capability benchmark measures (Chapter 36)</td></tr>
+        <tr><td>Serving economics</td><td>Can we afford to run it?</td><td>A model that is excellent and unshippable (Chapters 26, 38)</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="small muted" style="margin-top:8px">The launch decision is not "did the loss go down". It is whether the capability gain is large enough to justify the serving cost, whether the safety evaluation is acceptable, whether the contamination audit is clean, and whether people prefer it in blind comparison against the model you already ship. A model can win on every benchmark and still be the wrong thing to launch.</p>
+
+  <h2>7 · Where the money goes</h2>
+  <div class="table-wrap">
+    <table class="t">
+      <thead><tr><th>Line</th><th>Share</th><th>Notes</th></tr></thead>
+      <tbody>
+        <tr><td>Pretraining compute</td><td>~62%</td><td>10,240 GPUs × 88 days, at realised MFU — not peak</td></tr>
+        <tr><td>Failed and abandoned runs</td><td>~12%</td><td>Budget for it explicitly; a programme that assumes one clean run is not a plan</td></tr>
+        <tr><td>Ablations and scaling-law fits</td><td>~8%</td><td>The highest return per pound spent anywhere in the programme</td></tr>
+        <tr><td>Data pipeline</td><td>~7%</td><td>Filtering and dedup at 100T-token scale is a serious distributed-systems project</td></tr>
+        <tr><td>Post-training</td><td>~7%</td><td>Instruction tuning, preference data, alignment (Chapters 17, 18)</td></tr>
+        <tr><td>Evaluation and red-teaming</td><td>~4%</td><td>Mostly human time, and the last thing that should be cut</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="small muted" style="margin-top:8px">A 10% MFU improvement is worth roughly £9M on this budget. That is why a fortnight of profiling before day one is one of the best-value engineering decisions available, and why MFU is watched like a production SLO for three months.</p>
+
+  <h2>8 · What breaks</h2>
+  <div class="table-wrap">
+    <table class="t">
+      <thead><tr><th>Failure</th><th>Symptom</th><th>Response</th></tr></thead>
+      <tbody>
+        <tr><td>Node failure</td><td>Every few hours at this scale</td><td>Automatic detection, eviction, spare capacity, resume from checkpoint</td></tr>
+        <tr><td>Straggler</td><td>Whole cluster slows by the slowest rank</td><td>Per-rank step-time monitoring; evict and replace</td></tr>
+        <tr><td>Loss spike</td><td>Sudden jump, sometimes unrecoverable</td><td>Rewind, skip the batches, inspect them, consider lowering the learning rate</td></tr>
+        <tr><td>Silent data corruption</td><td>Loss degrades with no error</td><td>Shard checksums and automatic batch-statistic sanity checks</td></tr>
+        <tr><td>Benchmark contamination</td><td>Excellent scores, ordinary model</td><td>Cross-check every eval set against the corpus before training, and audit after</td></tr>
+        <tr><td>Checkpoint history too short</td><td>Cannot rewind past a late-detected problem</td><td>Retain a ladder of checkpoints; storage is trivially cheap against the run</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="callout interview"><div class="ico">🎤</div><div class="body"><div class="title">Interview drill</div>
+    <p class="small" style="margin:10px 0 0"><b>Follow-up:</b> “Day 30 of 88. Loss is 4% above the projected curve. What do you do?”</p>
+    <details class="ans"><summary>How a strong answer sounds</summary><div>First, establish whether it is the model or the measurement. I would check the evaluation harness and the loss-computation path before believing anything, because a tokenizer or masking change in the eval code produces exactly this signature and costs nothing to rule out. If the gap is real, I would decompose it: is it uniform across data domains, or concentrated in one — which would point at the mixture or a corrupted shard? Are batch statistics normal, are shard checksums clean, did anything change in the data loader? Is throughput and MFU normal, since a straggler shows up as slow rather than worse, and the two get confused. Is it gradient-norm or learning-rate related — a schedule bug, or the aftermath of a spike that was partially recovered? Then the decision, which is genuinely hard: 4% at day 30 with a smooth curve and normal internals is often something you ride out, because rewinding costs a third of the budget and the projection itself has error bars fitted from small-scale runs. A 4% gap that is widening, or that coincides with a specific domain, is a rewind to the last clean checkpoint. What makes this answerable at all is having decided the thresholds in advance — before the run, when nobody has sunk £50M into the current trajectory and everyone's judgement is still clear.</div></details>
+    <p class="small" style="margin:10px 0 0"><b>Follow-up:</b> “The model beats your current production model on every benchmark. Do you launch it?”</p>
+    <details class="ans"><summary>How a strong answer sounds</summary><div>Not on that evidence alone. I would want four more things. A contamination audit — benchmark gains are the expected symptom of eval data leaking into a 14-trillion-token corpus, and this is the most common reason a frontier result turns out not to be real. Human preference in blind pairwise comparison on our actual traffic distribution, because benchmark gains regularly fail to show up in anything a user can feel. Safety and red-team results, since a more capable model is also more capable of harm and that evaluation is not optional. And serving economics: if it is 5% better and three times the cost per token, the right move may be to distil it, or to route only hard queries to it, rather than to replace the production model wholesale. Then I would ship it the way anything else ships — shadow, canary, staged rollout with guardrails on latency, cost and safety, and a rollback that someone has actually tested. The training run being finished does not make the model a product; it makes it a candidate.</div></details>
+  </div></div>
+
+  <div class="takeaways">
+    <h3>🧠 Key takeaways</h3>
+    <ul>
+      <li>Compute-optimal minimises training loss; if you are going to serve the model, deliberately over-training a smaller one usually wins on total cost.</li>
+      <li>Data filtering, dedup and mixture decide the model's ceiling, and they are fixed before the first full-scale step runs.</li>
+      <li>Ablations and scaling-law fits at 1% scale are the highest-return activity in the programme — nothing else recovers a wrong day-zero decision.</li>
+      <li>At 10,000 GPUs, failures, stragglers and silent corruption are routine; automatic resume, per-rank monitoring and a checkpoint ladder are load-bearing.</li>
+      <li>MFU is a financial metric at this scale — ten percentage points is millions of pounds.</li>
+      <li>The launch decision weighs capability, contamination, human preference, safety and serving cost together; a benchmark sweep decides nothing on its own.</li>
+    </ul>
+  </div>
+
+  <div class="quiz-wrap">
+    <h2>Check your understanding</h2>
+    <div class="quiz-score"></div>
+
+    <div class="quiz" data-answer="1">
+      <p class="q">Why might you deliberately train a smaller model past its compute-optimal point?</p>
+      <div class="opts">
+        <button class="opt">Smaller models always reach lower loss eventually</button>
+        <button class="opt">Because inference cost dominates over a deployed model's lifetime, so a cheaper, faster model with slightly worse loss wins on total cost</button>
+        <button class="opt">Because scaling laws do not apply above 100B parameters</button>
+        <button class="opt">To reduce the data pipeline's cost</button>
+      </div>
+      <div class="explain">Compute-optimal answers "lowest training loss for this training budget". If you serve a trillion tokens a month for two years, that is the wrong question.</div>
+    </div>
+
+    <div class="quiz" data-answer="2">
+      <p class="q">What dominates memory during training?</p>
+      <div class="opts">
+        <button class="opt">The model weights</button>
+        <button class="opt">The data loader buffers</button>
+        <button class="opt">Optimizer state — roughly 12 bytes per parameter for Adam with an fp32 master copy</button>
+        <button class="opt">The tokenizer vocabulary</button>
+      </div>
+      <div class="explain">140B parameters is 280 GB of bf16 weights but about 1.7 TB of optimizer state, which is why sharding it across data-parallel ranks is the first thing you do.</div>
+    </div>
+
+    <div class="quiz" data-answer="0">
+      <p class="q">One node out of 10,240 runs 8% slower. What is the effect?</p>
+      <div class="opts">
+        <button class="opt">The entire cluster runs ~8% slower, because every step synchronises on the slowest rank</button>
+        <button class="opt">Throughput drops by 8/10,240</button>
+        <button class="opt">Only that node's gradients are delayed</button>
+        <button class="opt">Nothing, the scheduler routes around it</button>
+      </div>
+      <div class="explain">Synchronous data-parallel training moves at the pace of the slowest worker. Per-rank step-time monitoring is what turns an invisible multi-million-pound leak into a ten-minute eviction.</div>
+    </div>
+
+    <div class="quiz" data-answer="3">
+      <p class="q">Why are ablations at 1% scale the highest-value activity in the programme?</p>
+      <div class="opts">
+        <button class="opt">They are required for regulatory approval</button>
+        <button class="opt">They produce the final model's checkpoints</button>
+        <button class="opt">They reduce the data pipeline's cost</button>
+        <button class="opt">Because the full run's decisions are irreversible, and small runs extrapolate along a fitted scaling law for a fraction of a percent of the budget</button>
+      </div>
+      <div class="explain">A week of ablations routinely saves a month of full-scale compute. Nothing recovers a wrong mixture or learning-rate decision once the run is a fortnight in.</div>
+    </div>
+
+    <div class="quiz" data-answer="1">
+      <p class="q">Your model wins on every public benchmark. What must be verified first?</p>
+      <div class="opts">
+        <button class="opt">That MFU exceeded 45%</button>
+        <button class="opt">That benchmark data did not leak into the 14T-token training corpus</button>
+        <button class="opt">That the tokenizer vocabulary is large enough</button>
+        <button class="opt">That the checkpoint ladder is complete</button>
+      </div>
+      <div class="explain">Contamination produces exactly this symptom, and at 14 trillion tokens it is the default outcome unless you actively checked. Human preference, safety and serving cost are the other three gates.</div>
+    </div>
+  </div>
+</main>
+<script src="assets/app.js"></script>
+<script>
+(function(){
+  const { $ } = ML;
+
+  const MODES = {
+    big: { loss: 1.79, inf: 8.4, days: 88, risk: '⚠️ serving cost', N: 400, D: 1.2,
+      note: `⚠️ <b>400B dense on 1.2T tokens.</b> Past the compute-optimal point in the other direction: a very large model that has not seen enough data. Training loss is respectable and every downstream number is dragged down by under-training — and you are then left serving 400B parameters forever. This was roughly the pre-Chinchilla consensus, and correcting it was one of the most consequential findings in the field.` },
+    chin: { loss: 1.71, inf: 3.1, days: 88, risk: '✅ balanced', N: 140, D: 3.6,
+      note: `✅ <b>140B dense on 3.6T tokens.</b> Approximately compute-optimal: for this training budget, no other dense split reaches a lower training loss. The correct reference point, and the correct answer if the model will be trained once and served rarely — a research artefact, an internal teacher model, or the starting point for distillation.` },
+    over: { loss: 1.74, inf: 1.4, days: 88, risk: '✅ best economics', N: 70, D: 14,
+      note: `✅ <b>70B dense on 14T tokens.</b> Deliberately over-trained: worse training loss than the compute-optimal point, and less than half the inference cost per token. Over a two-year deployment answering a trillion tokens a month, serving dominates total cost so completely that the small loss penalty is repaid many times over. It also fits on fewer GPUs per replica, which improves latency and capacity planning. This is what most production frontier models actually are.` },
+    moe: { loss: 1.68, inf: 1.9, days: 96, risk: '⚠️ operational complexity', N: 320, D: 5.5,
+      note: `✅ <b>Mixture of experts: 320B total, ~40B active per token.</b> The best loss <em>and</em> near-dense-70B serving cost, because only a fraction of the parameters activate per token. The bill arrives elsewhere: routing instability during training, expert load imbalance, all 320B parameters resident in serving memory, a harder parallelism plan, and more ways for the run to go wrong at 10,000 GPUs (Chapter 24). Choose it when you have the operational maturity to run it — and not on your first frontier attempt.` },
+  };
+
+  function draw() {
+    const m = MODES[$('#allocSeg').dataset.value || 'big'];
+    const x0 = 46, x1 = 600, yb = 170, yt = 26;
+    // loss vs tokens seen, for this configuration
+    const X = (t) => x0 + (t / 14) * (x1 - x0);
+    const L = (t) => m.loss + 0.62 * Math.exp(-t / (m.D * 0.42));
+    const Y = (v) => yb - (2.45 - v) / 0.85 * (yb - yt);
+    let p = '';
+    for (let t = 0.05; t <= m.D; t += m.D / 90) p += (p ? 'L' : 'M') + X(t).toFixed(1) + ',' + Y(Math.min(L(t), 2.44)).toFixed(1) + ' ';
+    let out = `<line stroke="var(--border-strong)" x1="${x0}" y1="${yb}" x2="${x1}" y2="${yb}"/><line stroke="var(--border-strong)" x1="${x0}" y1="${yt - 8}" x2="${x0}" y2="${yb}"/>`;
+    // reference: the compute-optimal curve, always drawn faintly
+    const ref = MODES.chin;
+    let rp = '';
+    for (let t = 0.05; t <= ref.D; t += ref.D / 90) rp += (rp ? 'L' : 'M') + X(t).toFixed(1) + ',' + Y(Math.min(ref.loss + 0.62 * Math.exp(-t / (ref.D * 0.42)), 2.44)).toFixed(1) + ' ';
+    out += `<path d="${rp}" fill="none" stroke="var(--border-strong)" stroke-width="2" stroke-dasharray="5 4"/>`;
+    out += `<path d="${p}" fill="none" stroke="var(--accent)" stroke-width="2.8"/>`;
+    const ex = X(m.D), ey = Y(m.loss + 0.62 * Math.exp(-1 / 0.42));
+    out += `<circle cx="${ex.toFixed(1)}" cy="${ey.toFixed(1)}" r="6" fill="var(--pink)"/>`;
+    out += `<text x="${Math.min(ex + 10, 480).toFixed(1)}" y="${(ey + 4).toFixed(1)}" style="fill:var(--pink);font-weight:700">${m.N}B · ${m.D}T tokens</text>`;
+    out += `<text x="${x0}" y="190" style="fill:var(--muted)">tokens seen (trillions) →</text>`;
+    out += `<text x="2" y="18" style="fill:var(--muted)">loss</text>`;
+    out += `<text x="${x0}" y="210" style="fill:var(--muted);font-size:9px">dashed = the compute-optimal reference; every curve costs the same 3×10²⁵ FLOPs</text>`;
+    $('#lossSvg').innerHTML = out;
+    $('#aLoss').textContent = m.loss.toFixed(2);
+    $('#aInf').textContent = '£' + m.inf.toFixed(1);
+    $('#aTime').textContent = m.days + ' d';
+    $('#aRisk').textContent = m.risk;
+    $('#allocInfo p').innerHTML = m.note;
+  }
+  $('#allocSeg').addEventListener('segchange', draw);
+  draw();
+})();
+</script>
+</body>
+</html>

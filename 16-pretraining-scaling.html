@@ -1,0 +1,331 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Pretraining, Scaling Laws &amp; Data Curation</title>
+<link rel="stylesheet" href="assets/style.css">
+<script>try{var t=JSON.parse(localStorage.getItem('ml-theme'));if(t)document.documentElement.setAttribute('data-theme',t)}catch(e){}</script>
+<style>
+  .funnel { display:grid; gap:6px; margin-top:12px }
+  .funnel .st { display:grid; grid-template-columns:190px 1fr 110px; gap:10px; align-items:center; font-size:13.5px }
+  .funnel .bar { height:24px; border-radius:7px; background:var(--surface-3); overflow:hidden }
+  .funnel .bar i { display:block; height:100%; background:linear-gradient(90deg,var(--accent),var(--accent-2)); transition:width .4s }
+  .funnel .v { font-family:var(--mono); text-align:right; color:var(--muted); font-size:12.5px }
+  .scale-svg { width:100%; height:250px }
+  .scale-svg .ln { fill:none; stroke:var(--accent); stroke-width:2.6 }
+  .scale-svg .iso { fill:none; stroke:var(--border-strong); stroke-dasharray:4 4 }
+  .scale-svg .pt { fill:var(--pink) }
+  .scale-svg text { font-size:10.5px; fill:var(--muted); font-family:var(--mono) }
+  .mixtbl td.n { font-family:var(--mono); text-align:right }
+</style>
+</head>
+<body data-chapter="16">
+<main class="content">
+
+  <section class="hero">
+    <div class="eyebrow"><span class="pill accent">Chapter 16</span><span class="pill cyan">Intermediate</span><span class="pill">⏱ 45 min</span></div>
+    <h1>Pretraining, Scaling Laws <span class="grad">&amp; Data Curation</span></h1>
+    <p class="lead">Pretraining is one objective — predict the next token — applied to an enormous, ruthlessly filtered corpus. The interesting engineering is not the loss function; it's deciding how big a model to train, for how long, on <i>which</i> tokens, given a fixed pile of money.</p>
+    <ul class="objectives">
+      <li>Explain what next-token prediction actually teaches a model</li>
+      <li>Design a data pipeline: filter, deduplicate, mix, shard</li>
+      <li>Use scaling laws to pick model size and token count for a compute budget</li>
+      <li>Adjust that choice when inference cost matters more than training cost</li>
+      <li>Avoid contamination and know what “emergence” does and doesn't mean</li>
+    </ul>
+  </section>
+
+  <h2>One objective, enormous consequences</h2>
+  <p>The loss is cross-entropy on the next token, computed at every position in parallel thanks to causal masking. To predict well across trillions of tokens, a model is forced to internalise grammar, facts, code semantics, arithmetic patterns, translation, style and a good deal of reasoning — because all of them reduce prediction error.</p>
+
+  <pre class="code">for batch in stream:                       <span class="c"># ~4M tokens per step at frontier scale</span>
+    logits = model(batch[:, :-1])
+    loss   = cross_entropy(logits, batch[:, 1:])
+    loss.backward(); clip_(1.0); opt.step(); sched.step()</pre>
+
+  <div class="callout tip">
+    <div class="ico">🎯</div>
+    <div class="body"><div class="title">Why this objective is so efficient</div>
+      <p>Every token is a labelled example, and the labels are free. A 2-trillion-token corpus gives 2 trillion supervised predictions with no annotation budget at all. That's the entire reason self-supervised pretraining scaled when supervised learning could not.</p></div>
+  </div>
+
+  <h2>The data pipeline is the product</h2>
+  <p>Raw web text is mostly unusable. Every serious pretraining effort is a filtering pipeline, and the ratio between what goes in and what survives is brutal.</p>
+
+  <div class="panel">
+    <div class="panel-head"><div class="dots"><i></i><i></i><i></i></div><span class="p-title">From crawl to training tokens</span><span class="p-tag">Interactive</span></div>
+    <div class="panel-body">
+      <div class="range-row"><label for="fRaw">Raw crawl (trillions of tokens)</label><input type="range" id="fRaw" min="1" max="200" step="1" value="90"><output id="fRawV"></output></div>
+      <div class="range-row"><label for="fQual">Quality-filter strictness</label><input type="range" id="fQual" min="1" max="10" step="1" value="6"><output id="fQualV"></output></div>
+      <div class="range-row"><label for="fDedup">Deduplication aggressiveness</label><input type="range" id="fDedup" min="1" max="10" step="1" value="7"><output id="fDedupV"></output></div>
+      <div class="funnel" id="funnel"></div>
+      <div class="callout" id="funInfo" style="margin-top:12px"><div class="ico">🧹</div><div class="body"><p style="margin:0"></p></div></div>
+    </div>
+  </div>
+
+  <div class="table-wrap">
+    <table class="t">
+      <thead><tr><th>Stage</th><th>What it removes</th><th>Typical technique</th></tr></thead>
+      <tbody>
+        <tr><td><b>Language ID</b></td><td>Text outside your target languages</td><td>fastText classifier with a confidence threshold</td></tr>
+        <tr><td><b>Heuristic quality</b></td><td>Boilerplate, menus, gibberish, keyword spam</td><td>Line-length, symbol ratio, stopword presence, repetition rules</td></tr>
+        <tr><td><b>Model-based quality</b></td><td>Low-information pages</td><td>Classifier trained to recognise reference-quality text (Wikipedia, books)</td></tr>
+        <tr><td><b>Exact dedup</b></td><td>Identical documents</td><td>Content hashing</td></tr>
+        <tr><td><b>Fuzzy dedup</b></td><td>Near-duplicates, templated pages</td><td>MinHash + LSH on shingles, then a connected-components sweep</td></tr>
+        <tr><td><b>Safety &amp; PII</b></td><td>Abuse material, personal data</td><td>Classifiers, regex/NER redaction, blocklists (Chapter 37)</td></tr>
+        <tr><td><b>Decontamination</b></td><td>Benchmark test sets</td><td>N-gram overlap against every eval you plan to report</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="callout warn">
+    <div class="ico">♻️</div>
+    <div class="body"><div class="title">Deduplication is worth more than almost anything else</div>
+      <p>Web crawls contain the same text dozens of times — mirrors, quotes, templates, scraped copies. Duplicates waste compute, encourage memorisation (a privacy and copyright hazard), and distort the data mixture. Published results consistently show deduplicated corpora reach the same loss with substantially fewer tokens. Do exact dedup first (cheap), then MinHash/LSH near-dedup (expensive but high value).</p></div>
+  </div>
+
+  <h3>Mixture matters as much as volume</h3>
+  <div class="table-wrap">
+    <table class="t mixtbl">
+      <thead><tr><th>Source</th><th>Share of tokens</th><th>Why it's in the mix</th></tr></thead>
+      <tbody>
+        <tr><td>Filtered web</td><td class="n">55–70%</td><td>Breadth, recency, sheer volume</td></tr>
+        <tr><td>Code</td><td class="n">10–20%</td><td>Improves reasoning and structure even for non-code tasks</td></tr>
+        <tr><td>Books &amp; long-form</td><td class="n">5–10%</td><td>Long-range coherence, narrative, rarer vocabulary</td></tr>
+        <tr><td>Academic &amp; reference</td><td class="n">3–8%</td><td>Density of factual, well-formed prose</td></tr>
+        <tr><td>Curated Q&amp;A, forums</td><td class="n">3–8%</td><td>Dialogue shape and practical problem-solving</td></tr>
+        <tr><td>Multilingual</td><td class="n">5–15%</td><td>Coverage; upsampled because it's scarce after filtering</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="small muted">High-quality sources are usually <b>upsampled</b> (repeated 2–4 epochs) while web text is seen once. Repeating a small corpus too many times produces diminishing returns and eventually memorisation.</p>
+
+  <h2>Scaling laws: how to spend a compute budget</h2>
+  <p>Loss falls predictably as a power law in model size, data and compute. The practical question is how to split a fixed budget <code>C ≈ 6·N·D</code> between parameters N and tokens D.</p>
+
+  <div class="split">
+    <div class="card"><h4 class="mt0">Kaplan et al. (2020)</h4><p class="small mb0">Found loss scaling smoothly with N, D and C, and suggested spending most of the budget on <b>parameters</b>. This is why 2020–2021 models grew enormous while token counts stayed near 300B.</p></div>
+    <div class="card"><h4 class="mt0">Chinchilla (2022)</h4><p class="small mb0">Corrected it: for a fixed budget, N and D should grow <b>together</b> — roughly <b>20 tokens per parameter</b>. A 70B model on 1.4T tokens beat a 280B model on 300B tokens using the same compute.</p></div>
+  </div>
+
+  <div class="panel">
+    <div class="panel-head"><div class="dots"><i></i><i></i><i></i></div><span class="p-title">Compute-optimal calculator</span><span class="p-tag">Interactive</span></div>
+    <div class="panel-body">
+      <div class="range-row"><label for="sBudget">Compute budget (H100-days at 40% MFU)</label><input type="range" id="sBudget" min="10" max="100000" step="10" value="3000"><output id="sBudgetV"></output></div>
+      <div class="range-row"><label for="sRatio">Tokens per parameter</label><input type="range" id="sRatio" min="3" max="300" step="1" value="20"><output id="sRatioV"></output></div>
+      <div class="svg-scroll"><svg id="scaleSvg" class="diagram scale-svg" viewBox="0 0 640 250"></svg></div>
+      <div class="stats">
+        <div class="stat acc"><div class="k">Model size N</div><div class="v" id="sN" style="font-size:18px">–</div></div>
+        <div class="stat"><div class="k">Training tokens D</div><div class="v" id="sD" style="font-size:18px">–</div></div>
+        <div class="stat good"><div class="k">Relative loss</div><div class="v" id="sLoss" style="font-size:18px">–</div></div>
+        <div class="stat warn"><div class="k">Inference cost / 1M tokens</div><div class="v" id="sInf" style="font-size:18px">–</div></div>
+      </div>
+      <div class="callout" id="sInfo" style="margin-top:12px"><div class="ico">⚖️</div><div class="body"><p style="margin:0"></p></div></div>
+    </div>
+  </div>
+
+  <div class="callout tip">
+    <div class="ico">💸</div>
+    <div class="body"><div class="title">Compute-optimal ≠ deployment-optimal</div>
+      <p>Chinchilla minimises training loss per training FLOP. If you will serve the model billions of times, inference cost dominates the total, and it is worth <b>over-training a smaller model</b> — 100–300 tokens per parameter — because the serving bill scales with N forever while the extra training cost is paid once. That's exactly why 7–8B models are now trained on 10–15T tokens.</p></div>
+  </div>
+
+  <h2>What pretraining feels like in practice</h2>
+  <div class="table-wrap">
+    <table class="t">
+      <thead><tr><th>Knob</th><th>Typical choice at 7B scale</th><th>Note</th></tr></thead>
+      <tbody>
+        <tr><td>Global batch</td><td>2–4M tokens</td><td>Ramped up during training; interacts with the learning rate</td></tr>
+        <tr><td>Peak LR</td><td>~3e-4 (AdamW)</td><td>Roughly ∝ 1/√width; big models use smaller rates</td></tr>
+        <tr><td>Schedule</td><td>2k-step warmup, cosine to ~10% of peak</td><td>Some runs use warmup-stable-decay so the run can be extended</td></tr>
+        <tr><td>Sequence length</td><td>4k–8k, extended later</td><td>Train short, extend context in a final phase — much cheaper</td></tr>
+        <tr><td>Weight decay / clip</td><td>0.1 / 1.0</td><td>Clipping is what saves you from a bad batch</td></tr>
+        <tr><td>Checkpoints</td><td>Every 1–2k steps</td><td>Hardware will fail; see Chapter 25</td></tr>
+        <tr><td>Evals</td><td>Every few thousand steps</td><td>Held-out loss plus a small, fast capability suite</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="callout warn">
+    <div class="ico">🧪</div>
+    <div class="body"><div class="title">Everything is decided on small models first</div>
+      <p>Nobody tunes hyperparameters at 70B. You run a ladder of small models (e.g. 70M → 300M → 1B), fit the scaling trend, and extrapolate. Data-mixture ablations, tokenizer choice and architecture changes are all validated this way. When people say “scaling laws”, day to day they mean “the tool we use to make one expensive run non-speculative”.</p></div>
+  </div>
+
+  <h2>Emergence and contamination</h2>
+  <div class="split">
+    <div class="card"><h4 class="mt0">✨ “Emergent” abilities</h4><p class="small mb0">Some capabilities appear to switch on abruptly with scale. Much of that abruptness is a <b>metric artefact</b>: exact-match scoring turns smooth improvements into a step. Smooth metrics (log-likelihood, partial credit) usually show gradual gains — useful to know before you build a roadmap on a cliff edge.</p></div>
+    <div class="card"><h4 class="mt0">🚨 Benchmark contamination</h4><p class="small mb0">If the test set was on the web, it's in your corpus. Decontaminate by n-gram matching against every benchmark you'll report, keep a private held-out set, and treat any suspiciously strong public-benchmark result as contaminated until proven otherwise (Chapter 35).</p></div>
+  </div>
+
+  <div class="callout danger"><div class="ico">⚠️</div><div class="body"><div class="title">Common mistakes</div>
+    <ul class="mb0">
+      <li><b>Scaling parameters without scaling data.</b> A big model on too few tokens is undertrained and expensive to serve — the pre-Chinchilla error.</li>
+      <li><b>Skipping near-duplicate removal.</b> You pay full compute for repeated text and increase memorisation risk.</li>
+      <li><b>Filtering so hard that you delete the long tail.</b> Aggressive quality classifiers strip dialects, minority languages and technical jargon, and the model's coverage narrows.</li>
+      <li><b>Reporting benchmarks without decontamination.</b> The number is meaningless and someone will find out.</li>
+      <li><b>Tuning on the big run.</b> Establish hyperparameters on a ladder of small models; the big run is for execution, not exploration.</li>
+      <li><b>Forgetting the data licence.</b> Provenance is a legal requirement at this scale, not a nicety (Chapter 37).</li>
+    </ul></div></div>
+
+  <div class="callout interview"><div class="ico">🎤</div><div class="body"><div class="title">Interview drill</div>
+    <p class="small" style="margin:10px 0 0"><b>Warm-up:</b> You have compute for either a 30B model on 600B tokens or a 7B model on 2.6T tokens. Which do you pick?</p>
+    <details class="ans"><summary>How a strong answer sounds</summary><div>Both are roughly the same training FLOPs. Chinchilla says the compute-optimal split is around 20 tokens per parameter, so 30B/600B and 7B/2.6T are respectively at 20 and 370 tokens per parameter — the first is compute-optimal, the second is heavily over-trained. If this is a research artefact and training loss is the goal, take the 30B. If it will be served at scale, take the 7B: it costs roughly 4× less per generated token forever, fits on smaller hardware, and the quality gap after over-training is small. The deciding question is the ratio of inference volume to training cost.</div></details>
+    <p class="small" style="margin:10px 0 0"><b>Deeper:</b> Your pretraining loss is fine but downstream code ability is weak. What do you investigate?</p>
+    <details class="ans"><summary>How a strong answer sounds</summary><div>Loss is dominated by the majority of the mixture, so a weak minority domain barely moves it — I'd compute <i>per-domain</i> held-out loss rather than the aggregate. Then check the mixture share of code and whether aggressive quality filters stripped repositories; check the tokenizer's handling of indentation and identifiers, since a code-hostile vocabulary costs both context and accuracy; check dedup didn't remove near-identical but legitimate code files wholesale; and consider a mid-training phase that upsamples high-quality code. I'd validate each hypothesis on a small-model ablation before touching the main run.</div></details>
+  </div></div>
+
+  <div class="takeaways">
+    <h3>🧠 Key takeaways</h3>
+    <ul>
+      <li>Next-token prediction turns unlabelled text into trillions of free supervised examples.</li>
+      <li>Most of pretraining engineering is filtering, deduplicating and mixing data — not the loss.</li>
+      <li>Chinchilla: for a fixed budget, grow parameters and tokens together, roughly 20 tokens per parameter.</li>
+      <li>If inference volume is large, over-train a smaller model — serving cost scales with N forever.</li>
+      <li>Decide architecture and hyperparameters on a ladder of small models; decontaminate before reporting anything.</li>
+    </ul>
+  </div>
+
+  <div class="quiz-wrap">
+    <h2>Check your understanding</h2>
+    <div class="quiz-score"></div>
+
+    <div class="quiz" data-answer="1">
+      <p class="q">What did the Chinchilla result change?</p>
+      <div class="opts">
+        <button class="opt">It showed data quality matters more than quantity</button>
+        <button class="opt">It showed model size and training tokens should scale together, ~20 tokens per parameter</button>
+        <button class="opt">It introduced the transformer architecture</button>
+        <button class="opt">It proved larger models always win</button>
+      </div>
+      <div class="explain">Before it, budgets went disproportionately into parameters. Chinchilla showed those models were undertrained: the same compute spent on a smaller model and more tokens produced a better model.</div>
+    </div>
+
+    <div class="quiz" data-answer="2">
+      <p class="q">Why is near-duplicate removal so valuable in a pretraining corpus?</p>
+      <div class="opts">
+        <button class="opt">It makes the tokenizer smaller</button>
+        <button class="opt">It is required for causal masking</button>
+        <button class="opt">It saves compute, reduces memorisation and stops duplicates distorting the mixture</button>
+        <button class="opt">It improves GPU utilization</button>
+      </div>
+      <div class="explain">Repeated text is paid for at full price, encourages verbatim memorisation (a privacy and copyright risk), and silently upweights whatever happens to be duplicated most.</div>
+    </div>
+
+    <div class="quiz" data-answer="0">
+      <p class="q">You will serve a model to 100M users daily. How should that change the Chinchilla-optimal choice?</p>
+      <div class="opts">
+        <button class="opt">Train a smaller model on far more tokens than compute-optimal</button>
+        <button class="opt">Train a larger model on fewer tokens</button>
+        <button class="opt">It shouldn't — scaling laws are about quality, not deployment</button>
+        <button class="opt">Use a bigger vocabulary instead</button>
+      </div>
+      <div class="explain">Inference cost is proportional to parameters and is paid on every request forever. Over-training a smaller model shifts cost into the one-off training bill.</div>
+    </div>
+
+    <div class="quiz" data-answer="3">
+      <p class="q">Your model scores suspiciously well on a public benchmark. Most likely explanation?</p>
+      <div class="opts">
+        <button class="opt">The benchmark is too easy</button>
+        <button class="opt">The evaluation harness has a bug</button>
+        <button class="opt">Emergent capability from scale</button>
+        <button class="opt">Test-set contamination in the pretraining corpus</button>
+      </div>
+      <div class="explain">Public benchmarks are on the web, therefore in the crawl. Run n-gram decontamination and re-check on a private held-out set before believing the number.</div>
+    </div>
+
+    <div class="quiz" data-answer="2">
+      <p class="q">How are hyperparameters for a 70B pretraining run usually chosen?</p>
+      <div class="opts">
+        <button class="opt">By grid search at full scale</button>
+        <button class="opt">By copying the previous run exactly</button>
+        <button class="opt">By fitting trends on a ladder of small models and extrapolating</button>
+        <button class="opt">By Bayesian optimisation during the run</button>
+      </div>
+      <div class="explain">Full-scale search is unaffordable. You fit scaling trends on 70M–1B models, extrapolate, and use the big run for execution rather than exploration.</div>
+    </div>
+  </div>
+</main>
+<script src="assets/app.js"></script>
+<script>
+(function(){
+  const { $, $$, clamp, fmt } = ML;
+
+  /* ================= data funnel ================= */
+  function funnel() {
+    const raw = +$('#fRaw').value, q = +$('#fQual').value, d = +$('#fDedup').value;
+    $('#fRawV').textContent = raw + ' T tokens';
+    $('#fQualV').textContent = q + ' / 10';
+    $('#fDedupV').textContent = d + ' / 10';
+    const stages = [
+      ['Raw crawl', 1],
+      ['After language ID', 0.42],
+      ['After heuristic filters', 0.42 * (1 - q * 0.045)],
+      ['After model-based quality', 0.42 * (1 - q * 0.045) * (1 - q * 0.035)],
+      ['After exact dedup', 0.42 * (1 - q * 0.045) * (1 - q * 0.035) * 0.72],
+      ['After fuzzy dedup', 0.42 * (1 - q * 0.045) * (1 - q * 0.035) * 0.72 * (1 - d * 0.052)],
+      ['After safety &amp; PII', 0.42 * (1 - q * 0.045) * (1 - q * 0.035) * 0.72 * (1 - d * 0.052) * 0.96],
+      ['Final training tokens', 0.42 * (1 - q * 0.045) * (1 - q * 0.035) * 0.72 * (1 - d * 0.052) * 0.96 * 0.985],
+    ];
+    $('#funnel').innerHTML = stages.map(([n, f], i) =>
+      `<div class="st"><span>${n}</span><div class="bar"><i style="width:${(f * 100).toFixed(1)}%;${i === stages.length - 1 ? 'background:var(--green)' : ''}"></i></div><span class="v">${(raw * f).toFixed(2)} T</span></div>`).join('');
+    const final = raw * stages[stages.length - 1][1];
+    const keep = stages[stages.length - 1][1] * 100;
+    $('#funInfo p').innerHTML = `You keep <b>${keep.toFixed(1)}%</b> of the crawl — <b>${final.toFixed(2)}T usable tokens</b>. ` +
+      (q >= 8 ? 'At this strictness you are also deleting dialects, minority languages and technical jargon: high-quality classifiers are biased toward encyclopedic English, and over-filtering narrows what the model can do. ' : q <= 3 ? 'Loose filtering keeps volume but lets boilerplate and spam through, which wastes compute and dilutes the mixture. ' : 'A reasonable balance — this is roughly the survival rate published pipelines report. ') +
+      (d >= 8 ? 'Very aggressive dedup can remove legitimately similar documents (forms, product pages, standard library code); measure the effect on a small model rather than assuming more is better.' : 'Fuzzy dedup is where most of the remaining waste lives — it is expensive to run but consistently pays for itself.');
+  }
+  ['#fRaw', '#fQual', '#fDedup'].forEach(id => $(id).addEventListener('input', funnel));
+  funnel();
+
+  /* ================= scaling ================= */
+  function scaling() {
+    const days = +$('#sBudget').value, ratio = +$('#sRatio').value;
+    $('#sBudgetV').textContent = fmt(days, 0) + ' H100-days';
+    $('#sRatioV').textContent = ratio + ' tokens/param';
+    const C = days * 86400 * 1e15 * 0.4;             // FLOPs
+    // C = 6 N D, D = ratio * N  ->  N = sqrt(C / (6*ratio))
+    const N = Math.sqrt(C / (6 * ratio));
+    const D = N * ratio;
+    // toy Chinchilla-style loss
+    const L = 1.69 + 406.4 / Math.pow(N, 0.34) + 410.7 / Math.pow(D, 0.28);
+    const Lopt = (() => { let best = 1e9; for (let r = 3; r <= 300; r++) { const n = Math.sqrt(C / (6 * r)), dd = n * r; best = Math.min(best, 1.69 + 406.4 / Math.pow(n, 0.34) + 410.7 / Math.pow(dd, 0.28)); } return best; })();
+    $('#sN').textContent = N >= 1e9 ? (N / 1e9).toFixed(1) + ' B' : (N / 1e6).toFixed(0) + ' M';
+    $('#sD').textContent = D >= 1e12 ? (D / 1e12).toFixed(2) + ' T' : (D / 1e9).toFixed(0) + ' B';
+    $('#sLoss').textContent = L.toFixed(4);
+    $('#sInf').textContent = '$' + (N / 1e9 * 0.06).toFixed(2);
+
+    // curve: loss vs ratio at fixed C
+    const X = (r) => 45 + (Math.log10(r) - Math.log10(3)) / (Math.log10(300) - Math.log10(3)) * 575;
+    let d = '', lo = 1e9, hi = -1e9;
+    const pts = [];
+    for (let r = 3; r <= 300; r *= 1.03) {
+      const n = Math.sqrt(C / (6 * r)), dd = n * r;
+      const l = 1.69 + 406.4 / Math.pow(n, 0.34) + 410.7 / Math.pow(dd, 0.28);
+      pts.push([r, l]); lo = Math.min(lo, l); hi = Math.max(hi, l);
+    }
+    const Y = (l) => 215 - (hi - l) / ((hi - lo) || 1) * 180;
+    pts.forEach(([r, l]) => { d += (d ? 'L' : 'M') + X(r).toFixed(1) + ',' + Y(l).toFixed(1) + ' '; });
+    const bestR = pts.reduce((a, b) => (b[1] < a[1] ? b : a))[0];
+    $('#scaleSvg').innerHTML =
+      `<line stroke="var(--border-strong)" x1="45" y1="215" x2="628" y2="215"/><line stroke="var(--border-strong)" x1="45" y1="12" x2="45" y2="215"/>` +
+      `<path class="ln" d="${d}"/>` +
+      `<line class="iso" x1="${X(bestR)}" y1="12" x2="${X(bestR)}" y2="215"/>` +
+      `<text x="${clamp(X(bestR) - 55, 50, 520)}" y="24">compute-optimal ≈ ${bestR.toFixed(0)}</text>` +
+      `<circle class="pt" cx="${X(ratio)}" cy="${Y(L)}" r="6"/>` +
+      `<text x="300" y="238">tokens per parameter (log scale)</text><text x="2" y="14">loss</text>` +
+      [3, 10, 20, 50, 100, 300].map(r => `<text x="${X(r) - 8}" y="230">${r}</text>`).join('');
+
+    $('#sInfo p').innerHTML = ratio < bestR * 0.6
+      ? `⚠️ <b>Undertrained.</b> At ${ratio} tokens/param this budget is going into parameters you cannot afford to train properly — and into a model that will be expensive to serve. Loss is ${(L - Lopt).toFixed(4)} above the best achievable for this compute.`
+      : ratio > bestR * 2.5
+        ? `💸 <b>Heavily over-trained</b> relative to the compute-optimal point (loss ${(L - Lopt).toFixed(4)} above optimum) — which is often <b>the right commercial choice</b>. The model is ${(Math.sqrt(ratio / bestR)).toFixed(1)}× smaller than compute-optimal, so every inference call is correspondingly cheaper, forever.`
+        : `✅ <b>Near compute-optimal.</b> Best training loss per FLOP. Fine for a research artefact; if this model will serve heavy traffic, slide the ratio right and accept a slightly higher loss for a much cheaper model.`;
+  }
+  ['#sBudget', '#sRatio'].forEach(id => $(id).addEventListener('input', scaling));
+  scaling();
+})();
+</script>
+</body>
+</html>

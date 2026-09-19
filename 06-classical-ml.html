@@ -1,0 +1,418 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Classical ML: Trees &amp; Ensembles</title>
+<link rel="stylesheet" href="assets/style.css">
+<script>try{var t=JSON.parse(localStorage.getItem('ml-theme'));if(t)document.documentElement.setAttribute('data-theme',t)}catch(e){}</script>
+<style>
+  .tree-svg, .boost-svg { width:100%; }
+  .tree-svg .pa { fill:var(--accent); } .tree-svg .pb { fill:var(--amber); }
+  .tree-svg .cell { opacity:.2; }
+  .tree-svg .ax, .boost-svg .ax { stroke:var(--border-strong); }
+  .tree-svg text, .boost-svg text { font-size:10.5px; fill:var(--muted); font-family:var(--mono); }
+  .boost-svg .pt { fill:var(--accent-2); }
+  .boost-svg .pred { fill:none; stroke:var(--accent); stroke-width:2.6; }
+  .boost-svg .res { stroke:var(--red); stroke-width:1.4; opacity:.55; }
+  .boost-svg .stump { fill:none; stroke:var(--pink); stroke-width:2; stroke-dasharray:5 3; }
+  .ens-row { display:grid; grid-template-columns:110px 1fr; gap:10px; align-items:center; margin-bottom:6px; font-size:13px; }
+  .ens-row .bar { height:14px; border-radius:99px; background:var(--surface-3); overflow:hidden; }
+  .ens-row .bar i { display:block; height:100%; background:var(--accent); }
+  .imp { display:grid; gap:6px; }
+  .imp .r { display:grid; grid-template-columns:150px 1fr 54px; gap:10px; align-items:center; font-size:13px; }
+  .imp .tk { height:12px; border-radius:99px; background:var(--surface-3); overflow:hidden; }
+  .imp .tk i { display:block; height:100%; background:linear-gradient(90deg,var(--accent),var(--accent-2)); }
+  .imp .v { font-family:var(--mono); text-align:right; color:var(--muted); }
+</style>
+</head>
+<body data-chapter="6">
+<main class="content">
+
+  <section class="hero">
+    <div class="eyebrow"><span class="pill accent">Chapter 6</span><span class="pill green">Beginner</span><span class="pill">⏱ 35 min</span></div>
+    <h1>Classical ML: <span class="grad">Trees &amp; Ensembles</span></h1>
+    <p class="lead">Deep learning owns text, images and audio. On the spreadsheet-shaped data that runs most businesses, gradient-boosted trees are still the model to beat — and the model you should build first, because they're fast, robust and almost free to serve.</p>
+    <ul class="objectives">
+      <li>Explain how a decision tree chooses a split</li>
+      <li>See how depth controls the bias–variance trade-off</li>
+      <li>Distinguish bagging (random forests) from boosting (GBDT)</li>
+      <li>Tune the handful of hyperparameters that actually matter</li>
+      <li>Read feature importance without fooling yourself</li>
+    </ul>
+  </section>
+
+  <h2>One question at a time</h2>
+  <p>A <strong>decision tree</strong> is a flowchart the machine writes. At each node it picks one feature and one threshold that best separate the classes, then recurses on each side. Prediction is walking from the root to a leaf and reading off the majority class (or the mean value).</p>
+
+  <p>“Best” needs a score. The usual one is <strong>Gini impurity</strong> — the probability that two randomly drawn items from a node have different labels:</p>
+  <pre class="code">Gini = 1 − Σ pₖ²        <span class="c"># 0 = pure node, 0.5 = fifty-fifty (binary)</span>
+gain = Gini(parent) − weighted average Gini(children)</pre>
+  <p>The tree tries every feature and every candidate threshold, and keeps the split with the largest gain. That's the entire training algorithm — a greedy search, repeated.</p>
+
+  <div class="callout analogy">
+    <div class="ico">🩺</div>
+    <div class="body"><div class="title">Analogy: triage questions</div>
+      <p>A nurse doesn't ask 40 questions in a fixed order. They ask the one that splits the possibilities fastest — “are you in pain?” — then branch. A tree is that instinct, made numerical: at every point, ask the question that separates the outcomes best.</p></div>
+  </div>
+
+  <div class="panel">
+    <div class="panel-head"><div class="dots"><i></i><i></i><i></i></div><span class="p-title">Grow a tree — watch depth trade bias for variance</span><span class="p-tag">Interactive</span></div>
+    <div class="panel-body">
+      <div class="split" style="grid-template-columns:minmax(0,1.2fr) minmax(0,1fr)">
+        <div class="svg-scroll"><svg id="treeSvg" class="diagram tree-svg" viewBox="0 0 400 300"></svg></div>
+        <div>
+          <div class="range-row"><label for="depth">Max depth</label><input type="range" id="depth" min="1" max="9" step="1" value="3"><output id="depthV"></output></div>
+          <div class="range-row"><label for="minleaf">Min samples per leaf</label><input type="range" id="minleaf" min="1" max="20" step="1" value="4"><output id="minleafV"></output></div>
+          <div class="stats" style="grid-template-columns:1fr 1fr">
+            <div class="stat acc"><div class="k">Train accuracy</div><div class="v" id="trAcc">–</div></div>
+            <div class="stat good"><div class="k">Test accuracy</div><div class="v" id="teAcc">–</div></div>
+            <div class="stat"><div class="k">Leaves</div><div class="v" id="nLeaf">–</div></div>
+            <div class="stat warn"><div class="k">Gap</div><div class="v" id="gap">–</div></div>
+          </div>
+          <div class="callout" id="treeInfo" style="margin-top:10px"><div class="ico">📘</div><div class="body"><p style="margin:0"></p></div></div>
+          <button class="btn sm ghost" id="newData">🎲 New sample</button>
+        </div>
+      </div>
+      <div class="legend"><span><i style="background:var(--accent)"></i>class 0</span><span><i style="background:var(--amber)"></i>class 1</span><span><i style="background:var(--border-strong)"></i>shaded = the tree's decision regions</span></div>
+    </div>
+  </div>
+
+  <div class="callout warn">
+    <div class="ico">🪓</div>
+    <div class="body"><div class="title">A single deep tree always overfits</div>
+      <p>Grow it far enough and every training point gets its own leaf: 100% training accuracy, and a boundary that memorises noise. The fix isn't a better splitting rule — it's <b>many trees</b>, which is where ensembles come in.</p></div>
+  </div>
+
+  <h2>Bagging: average away the variance</h2>
+  <p>A <strong>random forest</strong> trains hundreds of deep trees, each on a bootstrap sample of the rows and a random subset of the features at each split, then averages their votes. Each tree is individually overfitted, but their errors are partly independent — so averaging cancels much of the noise while keeping the signal.</p>
+
+  <div class="split">
+    <div class="card"><h4 class="mt0">Why the randomness matters</h4><p class="small mb0">If every tree saw the same data and features, they'd be nearly identical and averaging would achieve nothing. Row sampling (<i>bagging</i>) plus column sampling <b>decorrelates</b> them, and decorrelation is exactly what makes the average better than the parts.</p></div>
+    <div class="card"><h4 class="mt0">Free validation</h4><p class="small mb0">Each tree leaves out ~37% of rows (the <b>out-of-bag</b> sample). Scoring each row with only the trees that never saw it gives an honest estimate without a separate holdout — handy when data is scarce.</p></div>
+  </div>
+
+  <h2>Boosting: fix your own mistakes, repeatedly</h2>
+  <p><strong>Gradient boosting</strong> takes the opposite approach. Instead of many strong independent trees, it builds many <i>weak</i> trees in sequence, where each one is fitted to the <b>residual errors</b> of everything built so far. Step through it:</p>
+
+  <div class="panel">
+    <div class="panel-head"><div class="dots"><i></i><i></i><i></i></div><span class="p-title">Gradient boosting, tree by tree</span><span class="p-tag">Interactive</span></div>
+    <div class="panel-body">
+      <div class="svg-scroll"><svg id="boostSvg" class="diagram boost-svg" viewBox="0 0 620 280"></svg></div>
+      <div class="controls">
+        <button class="btn sm primary" id="addTree">+ Add one tree</button>
+        <button class="btn sm" id="add10">+ Add 10</button>
+        <button class="btn sm ghost" id="boostReset">↺ Reset</button>
+        <div class="field"><label class="small muted" for="shrink">learning rate</label>
+          <select class="inp" id="shrink"><option value="1">1.0 (no shrinkage)</option><option value="0.3" selected>0.3</option><option value="0.1">0.1</option></select></div>
+      </div>
+      <div class="stats" style="margin-top:10px">
+        <div class="stat acc"><div class="k">Trees</div><div class="v" id="bN">0</div></div>
+        <div class="stat"><div class="k">Train MSE</div><div class="v" id="bTr">–</div></div>
+        <div class="stat good"><div class="k">Test MSE</div><div class="v" id="bTe">–</div></div>
+      </div>
+      <p class="small muted" style="margin-top:8px" id="bNote">Each new tree (dashed) is fitted to what the current model still gets wrong. With a small learning rate you need more trees, but you overfit far more slowly — which is why <code>n_estimators</code> and <code>learning_rate</code> are always tuned together, with early stopping on a validation set.</p>
+    </div>
+  </div>
+
+  <div class="table-wrap">
+    <table class="t">
+      <thead><tr><th></th><th>Random forest (bagging)</th><th>Gradient boosting (GBDT)</th></tr></thead>
+      <tbody>
+        <tr><td><b>Trees are</b></td><td>Deep, independent, trained in parallel</td><td>Shallow (depth 3–8), sequential, each fixing the last</td></tr>
+        <tr><td><b>Reduces</b></td><td>Variance</td><td>Bias (and variance, via shrinkage + subsampling)</td></tr>
+        <tr><td><b>Tuning</b></td><td>Forgiving — more trees never hurts</td><td>Sensitive — rate × trees × depth interact</td></tr>
+        <tr><td><b>Typical accuracy</b></td><td>Very good</td><td>Usually the best on tabular data</td></tr>
+        <tr><td><b>Use when</b></td><td>You want a strong baseline with almost no tuning</td><td>You want maximum accuracy and can tune + early-stop</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h2>The three libraries you'll actually use</h2>
+  <div class="grid c3">
+    <div class="card feature reveal"><div class="f-ico">⚡</div><h4>XGBoost</h4><p>The one that popularised GBDT competitively. Level-wise growth, strong regularization, excellent docs, runs everywhere.</p></div>
+    <div class="card feature reveal"><div class="f-ico" style="background:var(--accent-2-soft)">🌿</div><h4>LightGBM</h4><p>Histogram binning plus leaf-wise growth: much faster on wide/large data. Usually the default today. Watch overfitting on small datasets.</p></div>
+    <div class="card feature reveal"><div class="f-ico" style="background:var(--green-soft)">🐈</div><h4>CatBoost</h4><p>Native categorical handling with ordered target statistics that avoid the leakage of naive target encoding. Strong out-of-the-box defaults.</p></div>
+  </div>
+
+  <div class="callout tip">
+    <div class="ico">🎚️</div>
+    <div class="body"><div class="title">The hyperparameters worth your time</div>
+      <ul class="mb0">
+        <li><code>learning_rate</code> + <code>n_estimators</code> — set the rate low (0.03–0.1) and let <b>early stopping</b> choose the number of trees.</li>
+        <li><code>max_depth</code> / <code>num_leaves</code> — capacity per tree. The main overfitting knob.</li>
+        <li><code>min_child_samples</code> — refuse leaves built from a handful of rows; crucial on imbalanced data.</li>
+        <li><code>subsample</code> + <code>colsample_bytree</code> — stochasticity; both regularizes and speeds training.</li>
+        <li><code>reg_lambda</code> — L2 on leaf values. Cheap insurance.</li>
+      </ul>
+      <p style="margin:8px 0 0">Everything else is a rounding error compared with better features.</p></div>
+  </div>
+
+  <h2>Feature importance: useful, and easy to misread</h2>
+  <p>Tree models will happily hand you a ranked list of features. Three things to know before you present it to anyone.</p>
+
+  <div class="imp" style="margin:14px 0">
+    <div class="r"><span>merchant_risk_30d</span><div class="tk"><i style="width:100%"></i></div><span class="v">0.31</span></div>
+    <div class="r"><span>amount_zscore</span><div class="tk"><i style="width:71%"></i></div><span class="v">0.22</span></div>
+    <div class="r"><span>hour_sin</span><div class="tk"><i style="width:45%"></i></div><span class="v">0.14</span></div>
+    <div class="r"><span>device_age_days</span><div class="tk"><i style="width:29%"></i></div><span class="v">0.09</span></div>
+    <div class="r"><span>country × device cross</span><div class="tk"><i style="width:19%"></i></div><span class="v">0.06</span></div>
+  </div>
+
+  <div class="callout danger">
+    <div class="ico">🔍</div>
+    <div class="body"><div class="title">Three traps in that chart</div>
+      <ul class="mb0">
+        <li><b>Split-count importance favours high-cardinality features.</b> A continuous column offers thousands of thresholds, so it wins on count without being more useful. Prefer gain-based or permutation importance.</li>
+        <li><b>Correlated features share credit arbitrarily.</b> Two near-duplicate columns each look half as important as either would alone — and dropping “the unimportant one” can cost you nothing or everything.</li>
+        <li><b>Importance is not causation.</b> It says the model used it, not that changing it changes the outcome. SHAP values explain the model's behaviour — still not the world's.</li>
+      </ul></div>
+  </div>
+
+  <h2>Trees vs. neural networks, honestly</h2>
+  <div class="table-wrap">
+    <table class="t">
+      <thead><tr><th>Situation</th><th>Reach for</th><th>Why</th></tr></thead>
+      <tbody>
+        <tr><td>Tabular data, &lt; ~1M rows, mixed types</td><td><b>GBDT</b></td><td>Better accuracy per hour of work; handles monotone transforms, missing values and outliers natively</td></tr>
+        <tr><td>Text, images, audio, video</td><td><b>Neural nets</b></td><td>Representation learning on raw signal; trees can't see pixels or word order</td></tr>
+        <tr><td>Huge sparse ID features (ads, recsys)</td><td><b>NN with embeddings</b> (often + GBDT)</td><td>Embeddings generalise across rare IDs; production ranking stacks use both</td></tr>
+        <tr><td>Strict CPU-only, &lt; 5 ms budget</td><td><b>GBDT</b></td><td>A 300-tree model is a few hundred KB and microseconds per prediction</td></tr>
+        <tr><td>You need a baseline by Friday</td><td><b>GBDT</b></td><td>Defaults are strong; the result tells you whether the problem is learnable at all</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="callout tip">
+    <div class="ico">🚀</div>
+    <div class="body"><div class="title">Trees are a joy to serve</div>
+      <p>No GPU, no batching, a model file measured in megabytes, and inference that's a few hundred branch comparisons. Latency is microseconds and deployment is “copy a file”. When you're weighing a 0.3% accuracy gain from a neural ranker against this, count the serving bill too (Chapter 38).</p></div>
+  </div>
+
+  <div class="callout danger"><div class="ico">⚠️</div><div class="body"><div class="title">Common mistakes</div>
+    <ul class="mb0">
+      <li><b>One-hot encoding a 50,000-value column for a tree.</b> Each binary column is a weak split; trees choke. Use native categorical support or target/ordinal encoding instead.</li>
+      <li><b>Standardizing inputs for trees.</b> Harmless but pointless — splits are threshold comparisons, so monotone rescaling changes nothing.</li>
+      <li><b>Tuning <code>n_estimators</code> by hand.</b> Set the learning rate, then let early stopping on a validation set pick the count.</li>
+      <li><b>Assuming a random forest can't overfit.</b> It resists it, but with noisy labels and deep trees it absolutely can.</li>
+      <li><b>Extrapolating.</b> A tree can never predict outside the range of the target it saw. For trends that grow, model the trend explicitly or use a linear component.</li>
+    </ul></div></div>
+
+  <div class="callout interview"><div class="ico">🎤</div><div class="body"><div class="title">Interview drill</div>
+    <p class="small" style="margin:10px 0 0"><b>Warm-up:</b> Why does a random forest generally beat a single deep tree?</p>
+    <details class="ans"><summary>How a strong answer sounds</summary><div>A single deep tree has low bias and very high variance — small changes in the data produce a completely different tree. Averaging many trees trained on bootstrapped rows with random feature subsets keeps the low bias while cancelling much of the variance, because the trees' errors are only partly correlated. The randomness is the point: identical trees would average to the same overfitted model.</div></details>
+    <p class="small" style="margin:10px 0 0"><b>Deeper:</b> You're asked to justify choosing LightGBM over a deep neural network for a 3-million-row fraud model.</p>
+    <details class="ans"><summary>How a strong answer sounds</summary><div>On mixed-type tabular data with heavy class imbalance, GBDT typically matches or beats a tuned MLP with a fraction of the effort, handles missing values and outliers natively, and needs no scaling. It trains in minutes on CPU, so we can retrain daily as fraud patterns shift; the serving model is a few megabytes and runs in microseconds inside a 10 ms budget with no GPU cost. I'd still use embeddings from a neural component for high-cardinality entity IDs and graph signals if evaluation shows they add lift — but the default should be the model that gets a trustworthy baseline into production this week, with the NN as the challenger.</div></details>
+  </div></div>
+
+  <div class="takeaways">
+    <h3>🧠 Key takeaways</h3>
+    <ul>
+      <li>A tree greedily picks the split with the biggest impurity reduction; depth controls overfitting.</li>
+      <li>Random forests reduce variance by averaging decorrelated deep trees; boosting reduces bias by sequentially fitting residuals.</li>
+      <li>Tune learning rate, depth, min-samples and subsampling — and let early stopping choose the tree count.</li>
+      <li>Feature importance is about the model, not the world; correlated features split credit unpredictably.</li>
+      <li>GBDT remains the first thing to try on tabular data, and it is cheap and delightful to serve.</li>
+    </ul>
+  </div>
+
+  <div class="quiz-wrap">
+    <h2>Check your understanding</h2>
+    <div class="quiz-score"></div>
+
+    <div class="quiz" data-answer="1">
+      <p class="q">What does a decision tree maximise when choosing a split?</p>
+      <div class="opts">
+        <button class="opt">The number of samples in the left child</button>
+        <button class="opt">The reduction in impurity (e.g. Gini or entropy)</button>
+        <button class="opt">The correlation between feature and label</button>
+        <button class="opt">The margin between classes</button>
+      </div>
+      <div class="explain">It tries candidate thresholds and keeps the one whose children are purest, weighted by their size. Margins belong to SVMs, not trees.</div>
+    </div>
+
+    <div class="quiz" data-answer="3">
+      <p class="q">Which is the key difference between bagging and boosting?</p>
+      <div class="opts">
+        <button class="opt">Bagging uses trees; boosting uses linear models</button>
+        <button class="opt">Boosting can be parallelised; bagging cannot</button>
+        <button class="opt">Bagging needs a validation set; boosting doesn't</button>
+        <button class="opt">Bagging trains independent trees in parallel; boosting trains them sequentially on residuals</button>
+      </div>
+      <div class="explain">That dependency is also why boosting needs careful tuning and early stopping, while bagging is forgiving — and why bagging parallelises trivially and boosting doesn't.</div>
+    </div>
+
+    <div class="quiz" data-answer="0">
+      <p class="q">You lower the GBDT learning rate from 0.3 to 0.05. What else must change?</p>
+      <div class="opts">
+        <button class="opt">Increase the number of trees (and use early stopping)</button>
+        <button class="opt">Decrease max depth proportionally</button>
+        <button class="opt">Standardize the features</button>
+        <button class="opt">Nothing — they're independent</button>
+      </div>
+      <div class="explain">Each tree now contributes less, so you need roughly proportionally more of them. Lower rate + more trees usually generalises better, at the cost of training time.</div>
+    </div>
+
+    <div class="quiz" data-answer="2">
+      <p class="q">Your tree model must predict energy demand that grows year on year. What's the catch?</p>
+      <div class="opts">
+        <button class="opt">Trees can't handle time features</button>
+        <button class="opt">Trees require standardized inputs for time series</button>
+        <button class="opt">Trees cannot extrapolate beyond the target range they saw in training</button>
+        <button class="opt">Trees always underfit seasonal data</button>
+      </div>
+      <div class="explain">A leaf predicts a constant learned from training data, so next year's higher demand is simply unreachable. Model the trend separately (e.g. predict the ratio to a trend line) or add a linear component.</div>
+    </div>
+
+    <div class="quiz" data-answer="1">
+      <p class="q">A feature shows high split-count importance in your forest. What can you conclude?</p>
+      <div class="opts">
+        <button class="opt">It causes the outcome</button>
+        <button class="opt">Little — high-cardinality features win on split count regardless of usefulness</button>
+        <button class="opt">Removing it will definitely hurt accuracy</button>
+        <button class="opt">It is independent of the other features</button>
+      </div>
+      <div class="explain">Continuous or high-cardinality columns offer many candidate thresholds and are chosen often. Use gain-based or permutation importance, and verify by actually removing the feature and re-scoring.</div>
+    </div>
+  </div>
+</main>
+<script src="assets/app.js"></script>
+<script>
+(function(){
+  const { $, $$, clamp } = ML;
+
+  /* ================= decision tree on 2-D data ================= */
+  let TR = [], TE = [];
+  function genPoints() {
+    const make = (n) => {
+      const out = [];
+      for (let i = 0; i < n; i++) {
+        const x = Math.random(), y = Math.random();
+        // two blobs + a curved boundary + label noise
+        const t = (Math.sin(x * 6) * 0.18 + 0.5);
+        let l = y > t ? 1 : 0;
+        if (Math.random() < 0.09) l = 1 - l;
+        out.push({ x, y, l });
+      }
+      return out;
+    };
+    TR = make(160); TE = make(160);
+  }
+  function gini(rows) {
+    if (!rows.length) return 0;
+    const p = rows.filter(r => r.l === 1).length / rows.length;
+    return 1 - p * p - (1 - p) * (1 - p);
+  }
+  function build(rows, depth, maxDepth, minLeaf) {
+    const g = gini(rows);
+    const majority = rows.filter(r => r.l === 1).length * 2 >= rows.length ? 1 : 0;
+    if (depth >= maxDepth || g === 0 || rows.length < minLeaf * 2) return { leaf: majority, n: rows.length };
+    let best = null;
+    for (const f of ['x', 'y']) {
+      const vals = rows.map(r => r[f]).sort((a, b) => a - b);
+      for (let i = minLeaf; i < vals.length - minLeaf; i += Math.max(1, Math.floor(vals.length / 24))) {
+        const thr = (vals[i] + vals[i - 1]) / 2;
+        const L = rows.filter(r => r[f] <= thr), R = rows.filter(r => r[f] > thr);
+        if (L.length < minLeaf || R.length < minLeaf) continue;
+        const gain = g - (L.length * gini(L) + R.length * gini(R)) / rows.length;
+        if (!best || gain > best.gain) best = { gain, f, thr, L, R };
+      }
+    }
+    if (!best || best.gain <= 1e-9) return { leaf: majority, n: rows.length };
+    return { f: best.f, thr: best.thr, l: build(best.L, depth + 1, maxDepth, minLeaf), r: build(best.R, depth + 1, maxDepth, minLeaf) };
+  }
+  const predict = (t, p) => t.leaf !== undefined ? t.leaf : predict(p[t.f] <= t.thr ? t.l : t.r, p);
+  const countLeaves = (t) => t.leaf !== undefined ? 1 : countLeaves(t.l) + countLeaves(t.r);
+
+  function drawTree() {
+    const d = +$('#depth').value, ml = +$('#minleaf').value;
+    $('#depthV').textContent = d; $('#minleafV').textContent = ml;
+    const tree = build(TR, 0, d, ml);
+    const X = (x) => 25 + x * 360, Y = (y) => 275 - y * 250;
+    let g = '';
+    const G = 40;
+    for (let i = 0; i < G; i++) for (let j = 0; j < G; j++) {
+      const p = { x: (i + .5) / G, y: (j + .5) / G };
+      const c = predict(tree, p);
+      g += `<rect class="cell" x="${X(i / G)}" y="${Y((j + 1) / G)}" width="${360 / G + .6}" height="${250 / G + .6}" fill="${c ? 'var(--amber)' : 'var(--accent)'}"/>`;
+    }
+    TR.forEach(p => { g += `<circle class="${p.l ? 'pb' : 'pa'}" cx="${X(p.x).toFixed(1)}" cy="${Y(p.y).toFixed(1)}" r="3.6"/>`; });
+    g += `<line class="ax" x1="25" y1="275" x2="390" y2="275"/><line class="ax" x1="25" y1="18" x2="25" y2="275"/>`;
+    $('#treeSvg').innerHTML = g;
+
+    const acc = (set) => set.filter(p => predict(tree, p) === p.l).length / set.length;
+    const a1 = acc(TR), a2 = acc(TE), leaves = countLeaves(tree);
+    $('#trAcc').textContent = (a1 * 100).toFixed(1) + '%';
+    $('#teAcc').textContent = (a2 * 100).toFixed(1) + '%';
+    $('#nLeaf').textContent = leaves;
+    $('#gap').textContent = ((a1 - a2) * 100).toFixed(1) + ' pts';
+    const info = $('#treeInfo p');
+    if (d <= 2) info.innerHTML = '<b>Underfitting.</b> Too few questions to describe a curved boundary — train and test accuracy are both mediocre and close together. That closeness is the signature of high bias.';
+    else if (a1 - a2 > 0.09) info.innerHTML = '<b>Overfitting.</b> The regions have become islands around individual points — including the 9% of labels that are deliberately noisy. Training accuracy climbs, test accuracy stalls or falls, and the gap widens.';
+    else info.innerHTML = '<b>A reasonable fit.</b> The boundary follows the real shape without chasing individual points. Note how much of the tuning is just “stop splitting sooner”.';
+  }
+  $('#depth').addEventListener('input', drawTree);
+  $('#minleaf').addEventListener('input', drawTree);
+  $('#newData').onclick = () => { genPoints(); drawTree(); };
+  genPoints(); drawTree();
+
+  /* ================= gradient boosting ================= */
+  let BX = [], BY = [], BTE = [], stumps = [], base = 0;
+  function genBoost() {
+    BX = []; BY = []; BTE = [];
+    for (let i = 0; i < 60; i++) {
+      const x = i / 59;
+      const f = Math.sin(x * 5.5) * 0.28 + x * 0.35 + 0.35;
+      BX.push(x); BY.push(clamp(f + (Math.random() - 0.5) * 0.14, 0.02, 0.98));
+      BTE.push(clamp(f + (Math.random() - 0.5) * 0.14, 0.02, 0.98));
+    }
+    stumps = []; base = BY.reduce((a, b) => a + b, 0) / BY.length;
+    drawBoost();
+  }
+  const predictB = (x) => base + stumps.reduce((s, st) => s + st.lr * (x <= st.thr ? st.lv : st.rv), 0);
+  function addStump() {
+    const lr = +$('#shrink').value;
+    const res = BX.map((x, i) => BY[i] - predictB(x));
+    let best = null;
+    for (let k = 3; k < BX.length - 3; k++) {
+      const thr = (BX[k] + BX[k - 1]) / 2;
+      const L = [], R = [];
+      BX.forEach((x, i) => (x <= thr ? L : R).push(res[i]));
+      const mL = L.reduce((a, b) => a + b, 0) / L.length, mR = R.reduce((a, b) => a + b, 0) / R.length;
+      const sse = L.reduce((s, v) => s + (v - mL) ** 2, 0) + R.reduce((s, v) => s + (v - mR) ** 2, 0);
+      if (!best || sse < best.sse) best = { sse, thr, lv: mL, rv: mR };
+    }
+    if (best) stumps.push({ thr: best.thr, lv: best.lv, rv: best.rv, lr });
+  }
+  function drawBoost() {
+    const X = (x) => 40 + x * 550, Y = (y) => 250 - y * 220;
+    let g = `<line class="ax" x1="40" y1="250" x2="600" y2="250"/><line class="ax" x1="40" y1="15" x2="40" y2="250"/>`;
+    // prediction curve
+    let path = '';
+    for (let x = 0; x <= 1.0001; x += 0.004) path += (path ? 'L' : 'M') + X(x).toFixed(1) + ',' + Y(clamp(predictB(x), -0.1, 1.1)).toFixed(1) + ' ';
+    // last stump
+    if (stumps.length) {
+      const st = stumps[stumps.length - 1];
+      g += `<path class="stump" d="M${X(0)},${Y(0.5 + st.lr * st.lv)} L${X(st.thr)},${Y(0.5 + st.lr * st.lv)} L${X(st.thr)},${Y(0.5 + st.lr * st.rv)} L${X(1)},${Y(0.5 + st.lr * st.rv)}"/>`;
+      g += `<text x="${X(1) - 190}" y="${Y(0.5 + st.lr * st.rv) - 8}" style="fill:var(--pink)">newest tree (offset for clarity)</text>`;
+    }
+    BX.forEach((x, i) => {
+      g += `<line class="res" x1="${X(x)}" y1="${Y(BY[i])}" x2="${X(x)}" y2="${Y(clamp(predictB(x), -0.1, 1.1))}"/>`;
+      g += `<circle class="pt" cx="${X(x).toFixed(1)}" cy="${Y(BY[i]).toFixed(1)}" r="3.4"/>`;
+    });
+    g += `<path class="pred" d="${path}"/>`;
+    $('#boostSvg').innerHTML = g;
+    const mse = (arr) => BX.reduce((s, x, i) => s + (arr[i] - predictB(x)) ** 2, 0) / BX.length;
+    $('#bN').textContent = stumps.length;
+    $('#bTr').textContent = mse(BY).toFixed(5);
+    $('#bTe').textContent = mse(BTE).toFixed(5);
+    if (stumps.length > 60) $('#bNote').innerHTML = '⚠️ <b>Watch the two MSEs diverge.</b> Train keeps falling while test flattens or rises — that is the moment early stopping would have halted training. In practice you monitor a validation metric and stop after N rounds without improvement.';
+  }
+  $('#addTree').onclick = () => { addStump(); drawBoost(); };
+  $('#add10').onclick = () => { for (let i = 0; i < 10; i++) addStump(); drawBoost(); };
+  $('#boostReset').onclick = genBoost;
+  genBoost();
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,380 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Distributed Training II: Tensor, Pipeline &amp; MoE</title>
+<link rel="stylesheet" href="assets/style.css">
+<script>try{var t=JSON.parse(localStorage.getItem('ml-theme'));if(t)document.documentElement.setAttribute('data-theme',t)}catch(e){}</script>
+<style>
+  .gantt { display:grid; gap:2px; margin-top:10px; font-size:9px }
+  .gantt .row { display:grid; gap:2px; grid-auto-flow:column; grid-auto-columns:1fr }
+  .gantt .lbl { font-family:var(--mono); font-size:10px; color:var(--muted); display:grid; align-items:center }
+  .gantt i { height:20px; border-radius:3px; background:var(--surface-3); display:grid; place-items:center; font-style:normal; color:#fff; font-family:var(--mono) }
+  .gantt i.f { background:var(--accent) }
+  .gantt i.b { background:var(--accent-2) }
+  .gantt i.bubble { background:var(--surface-3) }
+  .plan { display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:10px; margin-top:12px }
+  .plan > div { padding:12px; border-radius:12px; border:1px solid var(--border); background:var(--surface-2); text-align:center }
+  .plan .big { font-family:var(--mono); font-size:26px; font-weight:800; color:var(--accent) }
+  .plan small { color:var(--muted); font-size:11.5px }
+  .moe-svg { width:100%; height:230px }
+  .moe-svg text { font-size:10.5px; fill:var(--muted); font-family:var(--mono) }
+  .moe-svg rect.ex { fill:var(--surface-2); stroke:var(--border-strong) }
+  .moe-svg rect.ex.hot { fill:var(--red-soft); stroke:var(--red); stroke-width:2 }
+  .moe-svg rect.ex.on { fill:var(--accent-soft); stroke:var(--accent); stroke-width:2 }
+</style>
+</head>
+<body data-chapter="24">
+<main class="content">
+
+  <section class="hero">
+    <div class="eyebrow"><span class="pill accent">Chapter 24</span><span class="pill">Advanced</span><span class="pill">⏱ 45 min</span></div>
+    <h1>Distributed Training II: <span class="grad">Tensor, Pipeline &amp; MoE</span></h1>
+    <p class="lead">When a single layer no longer fits, or the network can't carry the gradients, you stop splitting the batch and start splitting the model. Tensor parallelism cuts each matrix; pipeline parallelism cuts the stack; mixture-of-experts cuts the <i>computation</i>. Real runs use all of them at once.</p>
+    <ul class="objectives">
+      <li>Split a matmul across GPUs and know where the collectives land</li>
+      <li>Compute and reduce the pipeline bubble</li>
+      <li>Compose 3D parallelism and map it onto the cluster topology</li>
+      <li>Explain MoE routing, capacity factors and load balancing</li>
+      <li>Choose a parallelism strategy from model size and interconnect</li>
+    </ul>
+  </section>
+
+  <h2>Tensor parallelism: split the matrices</h2>
+  <p>A linear layer <code>Y = XW</code> can be split by columns of W (each GPU produces some output features) or by rows (each GPU produces a partial sum). Transformers alternate the two so that one collective per sub-layer is enough.</p>
+
+  <pre class="code"><span class="c"># MLP block, 2-way tensor parallel</span>
+W1 split by COLUMNS → each GPU computes part of the hidden activations
+                      (no communication: outputs are independent features)
+GELU applied locally
+W2 split by ROWS    → each GPU computes a partial output sum
+all-reduce          → add the partials to get the true output   ← the one collective
+
+<span class="c"># attention: heads are split across GPUs, then one all-reduce after the output projection</span></pre>
+
+  <div class="callout warn">
+    <div class="ico">🔗</div>
+    <div class="body"><div class="title">Tensor parallelism is an intra-node technique</div>
+      <p>It requires an all-reduce <b>twice per transformer block</b> — dozens of times per forward pass, on the critical path with nothing to overlap. On NVLink at ~400 GB/s that's tolerable; over a 25 GB/s network it destroys throughput. The near-universal rule: <b>TP degree ≤ GPUs per node</b> (usually 2, 4 or 8).</p></div>
+  </div>
+
+  <h2>Pipeline parallelism: split the layers</h2>
+  <p>Put layers 1–8 on GPU 0, 9–16 on GPU 1, and so on. Activations flow forward between stages, gradients flow back. The problem is obvious: while stage 0 works, stages 1–3 have nothing to do. That idle time is the <b>bubble</b>, and micro-batching is how you shrink it.</p>
+
+  <div class="panel">
+    <div class="panel-head"><div class="dots"><i></i><i></i><i></i></div><span class="p-title">Pipeline schedule &amp; bubble</span><span class="p-tag">Interactive</span></div>
+    <div class="panel-body">
+      <div class="range-row"><label for="ppStages">Pipeline stages</label><input type="range" id="ppStages" min="2" max="8" step="1" value="4"><output id="ppStagesV"></output></div>
+      <div class="range-row"><label for="ppMicro">Micro-batches per step</label><input type="range" id="ppMicro" min="1" max="24" step="1" value="4"><output id="ppMicroV"></output></div>
+      <div class="seg" id="ppSched"><button data-v="naive" class="active">Naive (all forward, then all backward)</button><button data-v="1f1b">1F1B (interleaved)</button></div>
+      <div class="gantt" id="ppGantt"></div>
+      <div class="stats" style="margin-top:12px">
+        <div class="stat bad"><div class="k">Bubble</div><div class="v" id="ppBubble">–</div></div>
+        <div class="stat acc"><div class="k">Utilization</div><div class="v" id="ppUtil">–</div></div>
+        <div class="stat good"><div class="k">Peak activation memory</div><div class="v" id="ppMem" style="font-size:17px">–</div></div>
+      </div>
+      <div class="callout" id="ppInfo" style="margin-top:12px"><div class="ico">🫧</div><div class="body"><p style="margin:0"></p></div></div>
+      <div class="legend"><span><i style="background:var(--accent)"></i>forward</span><span><i style="background:var(--accent-2)"></i>backward</span><span><i style="background:var(--surface-3)"></i>idle (bubble)</span></div>
+    </div>
+  </div>
+
+  <div class="callout tip">
+    <div class="ico">📐</div>
+    <div class="body"><div class="title">The bubble formula</div>
+      <p><code>bubble fraction = (stages − 1) / (micro_batches + stages − 1)</code>. With 4 stages and 4 micro-batches you waste 43%; with 4 stages and 32 micro-batches, 8.6%. The rule of thumb is <b>micro-batches ≥ 4× stages</b>. The catch is that more in-flight micro-batches means more stored activations — which is exactly what 1F1B scheduling addresses, by starting backward passes as early as possible.</p></div>
+  </div>
+
+  <h2>Sequence and context parallelism</h2>
+  <p>For very long contexts the activations for a <i>single</i> sequence stop fitting. Sequence parallelism splits along the token dimension: each GPU holds part of the sequence, and attention is computed by passing key/value blocks around a ring (“ring attention”), so no device ever materialises the full T×T score matrix. It composes with tensor parallelism and is how 100k+ token training runs are done.</p>
+
+  <h2>3D parallelism: composing the dimensions</h2>
+  <p>Real frontier runs combine all of them. The art is mapping each dimension onto the hardware so the chattiest one stays on the fastest link.</p>
+
+  <div class="table-wrap">
+    <table class="t">
+      <thead><tr><th>Dimension</th><th>Splits</th><th>Communication</th><th>Place it</th></tr></thead>
+      <tbody>
+        <tr><td><b>Tensor (TP)</b></td><td>Each matrix</td><td>All-reduce twice per block — constant, on the critical path</td><td><b>Inside a node</b> (NVLink)</td></tr>
+        <tr><td><b>Sequence (SP)</b></td><td>The token dimension</td><td>Ring exchange of K/V blocks</td><td>With TP, inside a node</td></tr>
+        <tr><td><b>Pipeline (PP)</b></td><td>Layer groups</td><td>Point-to-point activations at stage boundaries — small</td><td><b>Across nodes</b></td></tr>
+        <tr><td><b>Data (DP/FSDP)</b></td><td>The batch</td><td>All-reduce of gradients once per step — overlappable</td><td>Outermost, across everything</td></tr>
+        <tr><td><b>Expert (EP)</b></td><td>MoE experts</td><td>All-to-all of tokens per MoE layer</td><td>Needs good bisection bandwidth</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="panel">
+    <div class="panel-head"><div class="dots"><i></i><i></i><i></i></div><span class="p-title">Parallelism planner</span><span class="p-tag">Interactive</span></div>
+    <div class="panel-body">
+      <div class="range-row"><label for="plP">Model size (B parameters)</label><input type="range" id="plP" min="1" max="600" step="1" value="70"><output id="plPV"></output></div>
+      <div class="range-row"><label for="plG">Total GPUs (80 GB each, 8 per node)</label><input type="range" id="plG" min="8" max="4096" step="8" value="256"><output id="plGV"></output></div>
+      <div class="range-row"><label for="plSeq">Sequence length</label><input type="range" id="plSeq" min="2048" max="131072" step="2048" value="8192"><output id="plSeqV"></output></div>
+      <div class="plan" id="planOut"></div>
+      <div class="callout" id="planInfo" style="margin-top:12px"><div class="ico">🗺️</div><div class="body"><p style="margin:0"></p></div></div>
+    </div>
+  </div>
+
+  <h2>Mixture of Experts: more parameters, same compute</h2>
+  <p>Replace the MLP in some blocks with N expert MLPs plus a router that sends each <i>token</i> to the top-k experts (usually k = 1 or 2). Total parameters grow N×, but each token only activates k of them — so capacity grows while FLOPs per token stay roughly flat.</p>
+
+  <div class="panel">
+    <div class="panel-head"><div class="dots"><i></i><i></i><i></i></div><span class="p-title">Expert routing and load balance</span><span class="p-tag">Interactive</span></div>
+    <div class="panel-body">
+      <div class="range-row"><label for="moeN">Experts</label><input type="range" id="moeN" min="4" max="64" step="4" value="8"><output id="moeNV"></output></div>
+      <div class="range-row"><label for="moeK">Top-k per token</label><input type="range" id="moeK" min="1" max="4" step="1" value="2"><output id="moeKV"></output></div>
+      <div class="range-row"><label for="moeCap">Capacity factor</label><input type="range" id="moeCap" min="1" max="2.5" step="0.1" value="1.25"><output id="moeCapV"></output></div>
+      <div class="range-row"><label for="moeBal">Router balance (0 = collapsed, 1 = uniform)</label><input type="range" id="moeBal" min="0" max="1" step="0.05" value="0.75"><output id="moeBalV"></output></div>
+      <div class="svg-scroll"><svg id="moeSvg" class="diagram moe-svg" viewBox="0 0 640 230"></svg></div>
+      <div class="stats">
+        <div class="stat acc"><div class="k">Total parameters</div><div class="v" id="moeParams" style="font-size:17px">–</div></div>
+        <div class="stat"><div class="k">Active per token</div><div class="v" id="moeActive" style="font-size:17px">–</div></div>
+        <div class="stat bad"><div class="k">Tokens dropped</div><div class="v" id="moeDrop" style="font-size:17px">–</div></div>
+        <div class="stat good"><div class="k">Effective quality</div><div class="v" id="moeQual" style="font-size:17px">–</div></div>
+      </div>
+      <div class="callout" id="moeInfo" style="margin-top:12px"><div class="ico">🧩</div><div class="body"><p style="margin:0"></p></div></div>
+    </div>
+  </div>
+
+  <div class="callout warn">
+    <div class="ico">⚖️</div>
+    <div class="body"><div class="title">Routers collapse without help</div>
+      <p>Left alone, a router discovers that sending everything to two good experts lowers loss fastest, and the rest never train. Every MoE implementation adds an <b>auxiliary load-balancing loss</b> that penalises uneven expert assignment, plus a capacity factor that caps tokens per expert (the excess is dropped or passed through). Watch per-expert token counts during training the way you watch the loss curve — collapse is the characteristic MoE failure.</p></div>
+  </div>
+
+  <div class="table-wrap">
+    <table class="t">
+      <thead><tr><th>MoE property</th><th>Consequence</th></tr></thead>
+      <tbody>
+        <tr><td>Parameters ≫ active parameters</td><td>Great quality per training FLOP; poor quality per <b>GB of memory</b></td></tr>
+        <tr><td>All-to-all communication per MoE layer</td><td>Needs high bisection bandwidth; sensitive to topology</td></tr>
+        <tr><td>All experts must be resident to serve</td><td>Inference memory is set by <i>total</i> parameters — expensive to host</td></tr>
+        <tr><td>Routing is discrete</td><td>Load varies per batch; capacity and dropping affect quality</td></tr>
+        <tr><td>Fine-tuning is harder</td><td>Small datasets can destabilise routing; freeze the router or tune gently</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="callout danger"><div class="ico">⚠️</div><div class="body"><div class="title">Common mistakes</div>
+    <ul class="mb0">
+      <li><b>Tensor parallelism across nodes.</b> Two all-reduces per block over the network will halve your throughput or worse.</li>
+      <li><b>Too few micro-batches for the pipeline depth.</b> A 50% bubble is a 50% waste, and the fix is a scheduling parameter, not hardware.</li>
+      <li><b>Ignoring the last pipeline stage's extra memory.</b> Stages are rarely balanced; the first and last hold embeddings and the loss head.</li>
+      <li><b>Not monitoring MoE expert utilization.</b> Collapse is silent in the loss curve and obvious in the routing histogram.</li>
+      <li><b>Assuming MoE is cheap to serve.</b> Training FLOPs fall; serving memory does not.</li>
+      <li><b>Changing parallel layout without re-checking the global batch.</b> The batch and learning-rate schedule are coupled to the DP degree.</li>
+    </ul></div></div>
+
+  <div class="callout interview"><div class="ico">🎤</div><div class="body"><div class="title">Interview drill</div>
+    <p class="small" style="margin:10px 0 0"><b>Warm-up:</b> Why is tensor parallelism kept within a node while pipeline parallelism crosses nodes?</p>
+    <details class="ans"><summary>How a strong answer sounds</summary><div>Their communication profiles are opposite. Tensor parallelism needs an all-reduce of the full activation tensor twice per transformer block — frequent, latency-sensitive, on the critical path, with nothing to overlap it with. Pipeline parallelism sends only the boundary activations between adjacent stages, a handful of point-to-point transfers per micro-batch, which tolerates higher latency and lower bandwidth. So you put TP on NVLink inside a node and let PP take the slow inter-node hops, with data parallelism outermost because its one all-reduce per step can overlap with the backward pass.</div></details>
+    <p class="small" style="margin:10px 0 0"><b>Deeper:</b> You're given 512 GPUs for a 200B-parameter model. Sketch the layout.</p>
+    <details class="ans"><summary>How a strong answer sounds</summary><div>Start from memory: 200B in mixed precision with optimizer state is ~3.2 TB, so we need model sharding regardless. I'd use TP=8 within each node (NVLink), PP across nodes sized so each stage's layers plus activations fit — say PP=8, giving a model-parallel group of 64 GPUs — and DP=8 over the remaining dimension, with FSDP or ZeRO-1 inside the data-parallel groups to shard optimizer state. Micro-batches at least 32 to keep the pipeline bubble near 10%, activation checkpointing on, and sequence parallelism if the context is long. Then I'd validate rather than trust the plan: measure MFU, check the per-stage balance (the first and last stages carry embeddings and the loss head), and confirm the global batch and learning-rate schedule still match what the scaling-law work assumed.</div></details>
+  </div></div>
+
+  <div class="takeaways">
+    <h3>🧠 Key takeaways</h3>
+    <ul>
+      <li>Tensor parallelism splits matrices and all-reduces twice per block — keep it inside a node.</li>
+      <li>Pipeline parallelism splits layers; the bubble is (stages−1)/(micro-batches+stages−1), so use many micro-batches and 1F1B.</li>
+      <li>Sequence parallelism splits the token dimension for very long contexts.</li>
+      <li>3D parallelism maps the chattiest dimension to the fastest link: TP inside nodes, PP across, DP outermost.</li>
+      <li>MoE buys parameters without FLOPs, at the cost of all-to-all traffic, routing instability and serving memory.</li>
+    </ul>
+  </div>
+
+  <div class="quiz-wrap">
+    <h2>Check your understanding</h2>
+    <div class="quiz-score"></div>
+
+    <div class="quiz" data-answer="1">
+      <p class="q">With 8 pipeline stages and 8 micro-batches, what fraction of time is bubble?</p>
+      <div class="opts">
+        <button class="opt">About 12%</button>
+        <button class="opt">About 47%</button>
+        <button class="opt">About 8%</button>
+        <button class="opt">0% — micro-batching eliminates it</button>
+      </div>
+      <div class="explain">(8−1)/(8+8−1) = 7/15 ≈ 47%. You need roughly 4× more micro-batches than stages before the bubble becomes small.</div>
+    </div>
+
+    <div class="quiz" data-answer="2">
+      <p class="q">Why is tensor parallelism across a slow network so damaging?</p>
+      <div class="opts">
+        <button class="opt">It requires more memory per GPU</button>
+        <button class="opt">It changes the gradient mathematics</button>
+        <button class="opt">It all-reduces activations twice per transformer block, on the critical path</button>
+        <button class="opt">It prevents mixed precision</button>
+      </div>
+      <div class="explain">Dozens of blocking collectives per forward pass, with no compute to hide them behind. Data parallelism's single overlappable all-reduce per step is far more tolerant of slow links.</div>
+    </div>
+
+    <div class="quiz" data-answer="0">
+      <p class="q">An MoE model has 8 experts with top-2 routing. Roughly how do parameters and per-token compute compare with a dense model of the same expert size?</p>
+      <div class="opts">
+        <button class="opt">~8× the parameters, ~2× the active compute</button>
+        <button class="opt">~8× both</button>
+        <button class="opt">~2× the parameters, ~8× the compute</button>
+        <button class="opt">Identical on both counts</button>
+      </div>
+      <div class="explain">All experts exist in memory; only k run per token. That's the trade: capacity scales with N, FLOPs with k — and serving memory with N, which is the part people forget.</div>
+    </div>
+
+    <div class="quiz" data-answer="3">
+      <p class="q">Your MoE run shows two experts receiving 70% of all tokens. What's the fix?</p>
+      <div class="opts">
+        <button class="opt">Increase the learning rate</button>
+        <button class="opt">Reduce the number of experts to two</button>
+        <button class="opt">Disable the capacity factor</button>
+        <button class="opt">Strengthen the load-balancing auxiliary loss and check the capacity factor</button>
+      </div>
+      <div class="explain">Router collapse. The auxiliary loss penalises uneven assignment; capacity limits cap any single expert's share. Monitor per-expert token counts as a first-class metric.</div>
+    </div>
+
+    <div class="quiz" data-answer="2">
+      <p class="q">Which parallelism dimension is best placed outermost, across the whole cluster?</p>
+      <div class="opts">
+        <button class="opt">Tensor parallelism</button>
+        <button class="opt">Sequence parallelism</button>
+        <button class="opt">Data parallelism</button>
+        <button class="opt">Expert parallelism</button>
+      </div>
+      <div class="explain">Its single gradient all-reduce per step can overlap with the backward pass, so it tolerates the slowest links — which is exactly what the outermost dimension gets.</div>
+    </div>
+  </div>
+</main>
+<script src="assets/app.js"></script>
+<script>
+(function(){
+  const { $, $$, clamp, fmt } = ML;
+
+  /* ================= pipeline gantt ================= */
+  function pipe() {
+    const S = +$('#ppStages').value, M = +$('#ppMicro').value;
+    const sched = $('#ppSched').dataset.value || 'naive';
+    $('#ppStagesV').textContent = S; $('#ppMicroV').textContent = M;
+    // build a schedule grid: rows = stages, cols = time slots
+    const T = sched === 'naive' ? 2 * M + 2 * (S - 1) : 2 * M + 2 * (S - 1);
+    const grid = Array.from({ length: S }, () => new Array(T).fill(''));
+    if (sched === 'naive') {
+      for (let m = 0; m < M; m++) for (let s = 0; s < S; s++) grid[s][m + s] = 'f';
+      const bStart = M + S - 1;
+      for (let m = 0; m < M; m++) for (let s = S - 1; s >= 0; s--) grid[s][bStart + m + (S - 1 - s)] = 'b';
+    } else {
+      // 1F1B: warmup forwards, then alternate
+      for (let s = 0; s < S; s++) {
+        let t = s;
+        const warm = Math.min(M, S - s);
+        for (let m = 0; m < warm; m++) { grid[s][t] = 'f'; t += 1; }
+        let fDone = warm, bDone = 0;
+        while (bDone < M) {
+          if (bDone < M) { grid[s][t] = 'b'; t += 1; bDone++; }
+          if (fDone < M) { grid[s][t] = 'f'; t += 1; fDone++; }
+        }
+      }
+    }
+    const used = grid.flat().filter(Boolean).length;
+    const span = Math.max(...grid.map(r => { let last = 0; r.forEach((c, i) => { if (c) last = i; }); return last + 1; }));
+    const total = S * span;
+    const bubble = 1 - used / total;
+    $('#ppGantt').innerHTML = grid.map((row, s) =>
+      `<div class="row" style="grid-template-columns:52px repeat(${span},1fr)"><span class="lbl">stage ${s}</span>` +
+      row.slice(0, span).map(c => `<i class="${c === 'f' ? 'f' : c === 'b' ? 'b' : 'bubble'}">${c ? c.toUpperCase() : ''}</i>`).join('') +
+      `</div>`).join('');
+    $('#ppBubble').textContent = (bubble * 100).toFixed(1) + '%';
+    $('#ppUtil').textContent = ((1 - bubble) * 100).toFixed(1) + '%';
+    const inflight = sched === 'naive' ? M : Math.min(M, S);
+    $('#ppMem').textContent = inflight + ' micro-batches in flight';
+    $('#ppInfo p').innerHTML = sched === 'naive'
+      ? `<b>Naive schedule.</b> All forwards run before any backward, so every micro-batch’s activations are held simultaneously — ${inflight} in flight. Bubble is ${(bubble * 100).toFixed(0)}%; the theoretical value is (S−1)/(M+S−1) = ${((S - 1) / (M + S - 1) * 100).toFixed(0)}%. Raising micro-batches shrinks the bubble but increases peak memory.`
+      : `<b>1F1B.</b> Each stage starts a backward as soon as it can, so at most ${inflight} micro-batches’ activations are alive regardless of M — the same bubble as naive, with far less memory. This is why every production pipeline implementation uses interleaved scheduling.`;
+  }
+  ['#ppStages', '#ppMicro'].forEach(id => $(id).addEventListener('input', pipe));
+  $('#ppSched').addEventListener('segchange', pipe);
+  pipe();
+
+  /* ================= parallelism planner ================= */
+  function plan() {
+    const P = +$('#plP').value * 1e9, G = +$('#plG').value, seq = +$('#plSeq').value;
+    $('#plPV').textContent = (P / 1e9).toFixed(0) + ' B';
+    $('#plGV').textContent = G + ' GPUs (' + (G / 8) + ' nodes)';
+    $('#plSeqV').textContent = fmt(seq, 0) + ' tokens';
+    const stateGB = P * 16 / 1e9;                       // weights+grads+adam
+    const perGPU = 80, usable = 62;                      // leave room for activations
+    const shards = Math.ceil(stateGB / usable);
+    let tp = 1;
+    while (tp < 8 && shards > tp * 8) tp *= 2;
+    tp = clamp(tp, 1, 8);
+    if (seq >= 32768) tp = Math.max(tp, 4);
+    let pp = clamp(Math.ceil(shards / tp), 1, Math.max(1, Math.floor(G / tp / 1)));
+    pp = Math.min(pp, 16);
+    let dp = Math.max(1, Math.floor(G / (tp * pp)));
+    const mpGroup = tp * pp;
+    const perGpuState = stateGB / mpGroup;
+    const actGB = clamp(seq / 8192 * 9 / tp, 1, 60);
+    $('#planOut').innerHTML = [
+      ['TP', tp, 'tensor — within a node'],
+      ['PP', pp, 'pipeline — across nodes'],
+      ['DP', dp, 'data — outermost'],
+      ['GPUs used', tp * pp * dp, 'of ' + G],
+      ['Memory / GPU', (perGpuState + actGB).toFixed(0) + ' GB', 'state + activations'],
+    ].map(([k, v, s]) => `<div><div class="big">${v}</div><b style="font-size:13px">${k}</b><br><small>${s}</small></div>`).join('');
+    const fits = perGpuState + actGB <= perGPU;
+    $('#planInfo p').innerHTML = (fits ? '✅ ' : '⚠️ ') +
+      `A model-parallel group of <b>${mpGroup} GPUs</b> holds one full copy (${perGpuState.toFixed(0)} GB of state per GPU), replicated <b>${dp}×</b> for data parallelism. ` +
+      (tp > 1 ? `TP=${tp} stays inside a node so its per-block all-reduces run on NVLink. ` : 'No tensor parallelism needed — the model shards fit without splitting individual matrices. ') +
+      (pp > 1 ? `PP=${pp} crosses nodes, where only boundary activations travel; use at least <b>${pp * 4} micro-batches</b> to keep the bubble under ~15%. ` : '') +
+      (fits ? '' : `At ${(perGpuState + actGB).toFixed(0)} GB per GPU this still overflows — add activation checkpointing, raise TP or PP, or shard optimizer state with ZeRO-1 inside the data-parallel groups.`) +
+      (seq >= 32768 ? ' At this sequence length, add sequence/context parallelism so no device materialises the full attention matrix.' : '');
+  }
+  ['#plP', '#plG', '#plSeq'].forEach(id => $(id).addEventListener('input', plan));
+  plan();
+
+  /* ================= MoE ================= */
+  function moe() {
+    const N = +$('#moeN').value, k = +$('#moeK').value, cap = +$('#moeCap').value, bal = +$('#moeBal').value;
+    $('#moeNV').textContent = N; $('#moeKV').textContent = 'top-' + k;
+    $('#moeCapV').textContent = cap.toFixed(2) + '×'; $('#moeBalV').textContent = bal.toFixed(2);
+    // token distribution: mix of uniform and skewed
+    const load = [];
+    for (let i = 0; i < N; i++) {
+      const skew = Math.exp(-i / 1.5);
+      load.push(bal * (1 / N) + (1 - bal) * skew);
+    }
+    const z = load.reduce((a, b) => a + b, 0);
+    const frac = load.map(v => v / z);
+    const capShare = cap * k / N;
+    let dropped = 0;
+    frac.forEach(f => { if (f > capShare) dropped += (f - capShare); });
+    const W = 600 / N;
+    let g = '';
+    frac.forEach((f, i) => {
+      const h = clamp(f / Math.max(...frac) * 150, 4, 150);
+      const over = f > capShare;
+      g += `<rect class="ex ${over ? 'hot' : 'on'}" x="${20 + i * W + 2}" y="${180 - h}" width="${W - 4}" height="${h}" rx="4"/>`;
+      if (N <= 16) g += `<text x="${20 + i * W + W / 2 - 6}" y="196">e${i}</text>`;
+    });
+    g += `<line x1="20" y1="180" x2="620" y2="180" stroke="var(--border-strong)"/>`;
+    const capY = 180 - clamp(capShare / Math.max(...frac) * 150, 4, 150);
+    g += `<line x1="20" y1="${capY}" x2="620" y2="${capY}" stroke="var(--red)" stroke-dasharray="5 4"/><text x="530" y="${capY - 5}" style="fill:var(--red)">capacity limit</text>`;
+    g += `<text x="20" y="216">tokens routed per expert</text>`;
+    $('#moeSvg').innerHTML = g;
+
+    const dense = 7;
+    $('#moeParams').textContent = (dense * (1 + (N - 1) * 0.65)).toFixed(0) + ' B';
+    $('#moeActive').textContent = (dense * (1 + (k - 1) * 0.65)).toFixed(1) + ' B';
+    $('#moeDrop').textContent = (dropped * 100).toFixed(1) + '%';
+    const qual = clamp(1 - dropped * 2.2 - (1 - bal) * 0.25, 0, 1);
+    $('#moeQual').textContent = (qual * 100).toFixed(0) + '%';
+    $('#moeInfo p').innerHTML = bal < 0.4
+      ? `🚨 <b>Router collapse.</b> A few experts take most of the tokens, exceed capacity and drop ${(dropped * 100).toFixed(0)}% of them, while the rest barely train. Strengthen the auxiliary load-balancing loss, add router noise during training, and watch this histogram every few hundred steps.`
+      : dropped > 0.02
+        ? `⚠️ <b>${(dropped * 100).toFixed(1)}% of tokens exceed capacity</b> and are dropped or passed through unchanged. Raise the capacity factor (more memory and compute) or improve balance. A little dropping is normal; several percent is a quality problem.`
+        : `✅ <b>Healthy routing.</b> Every expert gets a workable share and almost nothing is dropped. Note the headline trade: ${(dense * (1 + (N - 1) * 0.65)).toFixed(0)}B total parameters but only ${(dense * (1 + (k - 1) * 0.65)).toFixed(1)}B active per token — cheap to train, and still expensive to <i>serve</i>, because every expert must be resident in memory.`;
+  }
+  ['#moeN', '#moeK', '#moeCap', '#moeBal'].forEach(id => $(id).addEventListener('input', moe));
+  moe();
+})();
+</script>
+</body>
+</html>

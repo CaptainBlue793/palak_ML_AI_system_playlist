@@ -1,0 +1,293 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Palak Deb Patra's ML &amp; AI Systems Playlist</title>
+<meta name="author" content="Palak Deb Patra">
+<meta name="description" content="Palak Deb Patra's ML &amp; AI Systems Playlist — 52 interactive chapters with live diagrams, trainers, simulators and quizzes, from gradient descent to frontier training runs.">
+<link rel="stylesheet" href="assets/style.css">
+<script>try{var t=JSON.parse(localStorage.getItem('ml-theme'));if(t)document.documentElement.setAttribute('data-theme',t)}catch(e){}</script>
+<style>
+  .home-top { display:flex; align-items:center; gap:12px; max-width:1480px; margin:0 auto; padding:18px 24px; }
+  .home-top .brand { display:flex; align-items:center; gap:10px; font-weight:800; font-size:17px; color:var(--text); letter-spacing:-.02em; line-height:1.2; }
+  .byline { display:flex; align-items:center; gap:10px; margin:0 0 18px; color:var(--text-2); font-size:15px; }
+  .byline .av { width:34px; height:34px; flex:none; border-radius:50%; display:grid; place-items:center; font-family:var(--mono); font-weight:800; font-size:13px; color:#fff; background:linear-gradient(135deg,var(--accent),var(--accent-2)); box-shadow:0 6px 18px var(--accent-soft); }
+  .byline b { color:var(--text); }
+  .home-top .spacer { flex:1; }
+  .wrap { max-width:1480px; margin:0 auto; padding:0 40px 100px; }
+  .home-hero { display:grid; grid-template-columns: 1.15fr .85fr; gap:36px; align-items:center; padding:40px 0 30px; }
+  @media (max-width:900px){ .home-hero{ grid-template-columns:1fr; } }
+  @media (max-width:600px){ .wrap{ padding:0 16px 70px; } }
+  .home-hero h1 { font-size:clamp(38px,6vw,64px); line-height:1.02; letter-spacing:-.04em; margin:14px 0 18px; font-weight:800; }
+  .home-hero p.lead { font-size:19px; color:var(--text-2); max-width:760px; margin:0 0 26px; }
+  .cta { display:flex; gap:12px; flex-wrap:wrap; }
+  .cta .btn { padding:12px 22px; font-size:15px; border-radius:12px; }
+  .progress-card { padding:26px; border-radius:22px; background:var(--surface); border:1px solid var(--border); box-shadow:var(--shadow-lg); position:relative; overflow:hidden; }
+  .progress-card::after { content:""; position:absolute; width:260px; height:260px; right:-90px; top:-90px; background:radial-gradient(var(--accent-soft), transparent 70%); }
+  .ring-row { display:flex; align-items:center; gap:22px; position:relative; z-index:1; }
+  .ring { width:120px; height:120px; flex:none; }
+  .ring circle { fill:none; stroke-width:11; }
+  .ring .bg { stroke:var(--surface-3); }
+  .ring .fg { stroke:url(#rg); stroke-linecap:round; transform:rotate(-90deg); transform-origin:50% 50%; transition:stroke-dashoffset 1.2s cubic-bezier(.2,.8,.2,1); }
+  .ring text { fill:var(--text); font-weight:800; font-size:24px; text-anchor:middle; dominant-baseline:middle; font-family:var(--mono); }
+  .lvl-bars { margin-top:20px; display:grid; gap:10px; position:relative; z-index:1; }
+  .lvl-bars .row { display:grid; grid-template-columns:110px 1fr 40px; gap:10px; align-items:center; font-size:13px; font-weight:600; color:var(--text-2); }
+  .lvl-bars .track { height:8px; border-radius:99px; background:var(--surface-3); overflow:hidden; }
+  .lvl-bars .track i { display:block; height:100%; border-radius:99px; transition:width 1s; }
+  .lvl-bars .row span:last-child { font-family:var(--mono); color:var(--muted); text-align:right; }
+
+  .section-title { font-size:30px; font-weight:800; letter-spacing:-.03em; margin:70px 0 6px; }
+  .section-sub { color:var(--muted); margin:0 0 24px; font-size:16px; }
+
+  .map-panel { background:var(--surface); border:1px solid var(--border); border-radius:22px; box-shadow:var(--shadow); padding:10px; }
+  .map-info { display:flex; gap:14px; align-items:center; padding:12px 16px; border-top:1px solid var(--border); min-height:70px; }
+  .map-info .mi-ico { font-size:28px; }
+  .map-info b { display:block; }
+  .map-info span { color:var(--muted); font-size:14px; }
+  #bigmap .node { cursor:pointer; }
+  #bigmap .node:hover rect { stroke:var(--accent); fill:var(--accent-soft); }
+  #bigmap .node .chap { font-size:9.5px; fill:var(--accent); font-family:var(--mono); font-weight:700; }
+  #bigmap .plane { font-size:11px; letter-spacing:.09em; fill:var(--muted); font-weight:700; text-anchor:start; }
+
+  .level-block { margin-top:36px; }
+  .level-head { display:flex; align-items:center; gap:12px; margin-bottom:14px; flex-wrap:wrap; }
+  .level-head h3 { margin:0; font-size:20px; letter-spacing:-.02em; }
+  .level-head .line { flex:1; height:1px; background:var(--border); }
+  .chap-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(260px,1fr)); gap:14px; }
+  .chap-card { position:relative; display:flex; flex-direction:column; gap:8px; padding:20px; border-radius:18px; background:var(--surface); border:1px solid var(--border); color:var(--text); transition:all .25s; overflow:hidden; }
+  .chap-card:hover { text-decoration:none; transform:translateY(-4px); box-shadow:var(--shadow-lg); border-color:var(--accent); }
+  .chap-card .top { display:flex; align-items:center; justify-content:space-between; }
+  .chap-card .emo { font-size:28px; width:52px; height:52px; border-radius:14px; display:grid; place-items:center; background:var(--surface-2); border:1px solid var(--border); transition:.3s; }
+  .chap-card:hover .emo { transform:rotate(-8deg) scale(1.08); }
+  .chap-card .no { font-family:var(--mono); font-size:12px; color:var(--muted); font-weight:600; }
+  .chap-card h4 { margin:6px 0 0; font-size:17px; letter-spacing:-.01em; line-height:1.3; }
+  .chap-card p { margin:0; color:var(--muted); font-size:14px; line-height:1.5; flex:1; }
+  .chap-card .meta { display:flex; gap:8px; align-items:center; font-size:12px; color:var(--muted); margin-top:6px; flex-wrap:wrap; }
+  .chap-card.done { border-color:color-mix(in srgb, var(--green) 45%, var(--border)); }
+  .chap-card.done .emo { background:var(--green-soft); border-color:transparent; }
+  .how { display:grid; grid-template-columns:repeat(auto-fit,minmax(220px,1fr)); gap:14px; }
+  .paths { display:grid; grid-template-columns:repeat(auto-fit,minmax(260px,1fr)); gap:14px; }
+  .path { padding:18px 20px; border-radius:18px; border:1px solid var(--border); background:var(--surface); }
+  .path h4 { margin:0 0 6px; font-size:16px; }
+  .path p { margin:0 0 10px; color:var(--muted); font-size:14px; }
+  .path .seq { font-family:var(--mono); font-size:12.5px; color:var(--accent); line-height:1.8; }
+  footer.home-foot { text-align:center; color:var(--muted); font-size:14px; margin-top:80px; }
+  .reset-link { background:none; border:0; color:var(--muted); cursor:pointer; text-decoration:underline; font-size:13px; }
+</style>
+</head>
+<body>
+  <header class="home-top">
+    <a class="brand" href="index.html" style="text-decoration:none"><span class="brand-logo">◆</span> <span>ML &amp; AI Systems<br><small style="font-weight:500;color:var(--muted);font-size:12px">by Palak Deb Patra</small></span></a>
+    <div class="spacer"></div>
+    <button class="icon-btn theme-btn" id="themeBtn" aria-label="Toggle theme">🌙</button>
+  </header>
+
+  <div class="wrap">
+    <section class="home-hero">
+      <div class="reveal">
+        <span class="pill accent">🤖 52 interactive chapters · zero → frontier scale · 12 case studies</span>
+        <h1>Palak's ML &amp; AI <span class="grad">Systems Playlist</span></h1>
+        <p class="byline"><span class="av">PP</span> Written by <b>Palak Deb Patra</b></p>
+        <p class="lead">Machine learning as an <b>engineering discipline</b>, not a notebook. Every concept comes with live diagrams, trainers you can run in the page, simulators you can break, and quizzes to lock it in — from “what is a gradient” through transformers, distributed training and GPU serving, all the way to designing feed ranking, fraud detection and a 10,000-GPU training run.</p>
+        <div class="cta">
+          <a class="btn primary" id="ctaStart" href="01-what-is-an-ml-system.html">Start Chapter 1 →</a>
+          <a class="btn" href="#roadmap">View roadmap</a>
+          <a class="btn" href="mock-interview.html">🎤 Mock interview</a>
+        </div>
+      </div>
+      <div class="progress-card reveal">
+        <div class="ring-row">
+          <svg class="ring" viewBox="0 0 120 120">
+            <defs><linearGradient id="rg" x1="0" x2="1"><stop offset="0" stop-color="var(--accent)"/><stop offset="1" stop-color="var(--accent-2)"/></linearGradient></defs>
+            <circle class="bg" cx="60" cy="60" r="50"/>
+            <circle class="fg" id="ringFg" cx="60" cy="60" r="50" stroke-dasharray="314.16" stroke-dashoffset="314.16"/>
+            <text x="60" y="62" id="ringTxt">0%</text>
+          </svg>
+          <div>
+            <div style="font-weight:800;font-size:20px;letter-spacing:-.02em">Your progress</div>
+            <div class="muted small" id="progTxt">0 of 52 chapters complete</div>
+            <div class="small" style="margin-top:8px" id="nextUp"></div>
+          </div>
+        </div>
+        <div class="lvl-bars" id="lvlBars"></div>
+      </div>
+    </section>
+
+    <h2 class="section-title reveal">The big picture</h2>
+    <p class="section-sub reveal">This is what a production ML/AI system actually looks like: an <b>offline plane</b> that turns data into models, and an <b>online plane</b> that turns models into predictions — with evaluation and monitoring closing the loop. By the end of the course you'll understand every box. <b>Click any component</b> to jump to its chapter.</p>
+    <div class="map-panel reveal">
+      <div class="svg-scroll">
+      <svg id="bigmap" class="diagram" viewBox="0 0 1120 600">
+        <defs>
+          <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="arrow-head"/></marker>
+        </defs>
+
+        <text x="24" y="28" class="plane">OFFLINE — DATA &amp; TRAINING PLANE</text>
+        <line x1="20" y1="38" x2="1100" y2="38" stroke="var(--border)" stroke-dasharray="2 6"/>
+
+        <!-- offline edges -->
+        <path id="e-src-pipe" class="edge" d="M150,90 L205,90" marker-end="url(#ah)"/>
+        <path id="e-pipe-fs"  class="edge" d="M335,90 L390,90" marker-end="url(#ah)"/>
+        <path id="e-fs-train" class="edge" d="M520,90 L575,90" marker-end="url(#ah)"/>
+        <path id="e-train-eval" class="edge" d="M705,90 L760,90" marker-end="url(#ah)"/>
+        <path id="e-eval-reg" class="edge" d="M890,90 L945,90" marker-end="url(#ah)"/>
+        <path id="e-pipe-lake" class="edge dash" d="M270,120 L270,175" marker-end="url(#ah)"/>
+        <path id="e-lake-label" class="edge dash" d="M400,205 L455,205" marker-end="url(#ah)"/>
+        <path id="e-label-train" class="edge dash" d="M585,180 L585,125" marker-end="url(#ah)"/>
+        <path id="e-lake-ft" class="edge dash" d="M270,235 L270,290 L735,290 L735,125" marker-end="url(#ah)"/>
+
+        <!-- offline nodes -->
+        <g class="node" data-ch="3" data-t="Data sources" data-d="Logs, events, images, documents, sensors and human labels — where every model begins." transform="translate(30,60)"><rect width="120" height="60" rx="12"/><text x="60" y="24">🧱 Data sources</text><text x="60" y="44" class="chap">CH 3 · 4</text></g>
+        <g class="node" data-ch="28" data-t="Data pipelines" data-d="Batch and streaming jobs that clean, join, validate and land data for training and serving." transform="translate(205,60)"><rect width="130" height="60" rx="12"/><text x="65" y="24">🌊 Pipelines</text><text x="65" y="44" class="chap">CH 28</text></g>
+        <g class="node" data-ch="29" data-t="Feature store" data-d="Point-in-time-correct features shared by training and serving — the cure for training/serving skew." transform="translate(390,60)"><rect width="130" height="60" rx="12"/><text x="65" y="24">🏪 Feature store</text><text x="65" y="44" class="chap">CH 29</text></g>
+        <g class="node" data-ch="23" data-t="Training cluster" data-d="GPUs running data, tensor and pipeline parallelism for hours or months at a time." transform="translate(575,60)"><rect width="130" height="60" rx="12"/><text x="65" y="24">🧵 Training</text><text x="65" y="44" class="chap">CH 9 · 23–25</text></g>
+        <g class="node" data-ch="7" data-t="Evaluation" data-d="Offline metrics, benchmark suites, LLM evals and regression gates that decide what ships." transform="translate(760,60)"><rect width="130" height="60" rx="12"/><text x="65" y="24">🎯 Evaluation</text><text x="65" y="44" class="chap">CH 7 · 35</text></g>
+        <g class="node" data-ch="31" data-t="Model registry" data-d="Versioned model artifacts with lineage, metrics and approvals — the handoff to production." transform="translate(945,60)"><rect width="130" height="60" rx="12"/><text x="65" y="24">🔬 Registry</text><text x="65" y="44" class="chap">CH 31 · 32</text></g>
+        <g class="node" data-ch="28" data-t="Lakehouse / warehouse" data-d="Versioned tables of raw and derived data — the substrate for training sets and analytics." transform="translate(205,175)"><rect width="130" height="60" rx="12"/><text x="65" y="24">🗄️ Lakehouse</text><text x="65" y="44" class="chap">CH 28</text></g>
+        <g class="node" data-ch="18" data-t="Labeling &amp; feedback" data-d="Human labels, preference data and RLHF/DPO datasets — plus the feedback your product generates." transform="translate(455,175)"><rect width="130" height="60" rx="12"/><text x="65" y="24">🏷️ Labeling</text><text x="65" y="44" class="chap">CH 3 · 18</text></g>
+        <g class="node" data-ch="17" data-t="Fine-tuning" data-d="LoRA, QLoRA and full fine-tunes that adapt a base model to your task and voice." transform="translate(670,175)"><rect width="130" height="60" rx="12"/><text x="65" y="24">🪡 Fine-tuning</text><text x="65" y="44" class="chap">CH 16–18</text></g>
+
+        <text x="24" y="335" class="plane">ONLINE — SERVING PLANE</text>
+        <line x1="20" y1="345" x2="1100" y2="345" stroke="var(--border)" stroke-dasharray="2 6"/>
+
+        <!-- online edges -->
+        <path id="e-reg-serve" class="edge dash" d="M1010,125 L1010,300 L640,300 L640,370" marker-end="url(#ah)"/>
+        <path id="e-cli-gw" class="edge" d="M150,400 L205,400" marker-end="url(#ah)"/>
+        <path id="e-gw-serve" class="edge" d="M335,400 L575,400" marker-end="url(#ah)"/>
+        <path id="e-serve-vec" class="edge" d="M705,385 L760,340 L820,340" marker-end="url(#ah)"/>
+        <path id="e-serve-tool" class="edge" d="M705,415 L760,470 L820,470" marker-end="url(#ah)"/>
+        <path id="e-gw-cache" class="edge dash" d="M270,430 L270,490" marker-end="url(#ah)"/>
+        <path id="e-serve-mon" class="edge dash" d="M640,430 L640,530 L455,530" marker-end="url(#ah)"/>
+        <path id="e-mon-train" class="edge dash" d="M390,545 L60,545 L60,125" marker-end="url(#ah)"/>
+
+        <!-- online nodes -->
+        <g class="node" data-ch="1" data-t="Clients" data-d="Apps, websites, batch jobs and other services asking a model for a prediction or a token stream." transform="translate(30,370)"><rect width="120" height="60" rx="12"/><text x="60" y="24">📱 Clients</text><text x="60" y="44" class="chap">CH 1</text></g>
+        <g class="node" data-ch="39" data-t="Model gateway" data-d="Auth, quotas, routing between models, fallbacks, prompt caching and per-tenant cost accounting." transform="translate(205,370)"><rect width="130" height="60" rx="12"/><text x="65" y="24">🏢 Gateway</text><text x="65" y="44" class="chap">CH 39 · 38</text></g>
+        <g class="node" data-ch="26" data-t="Inference fleet" data-d="GPU servers doing prefill and decode with continuous batching and a paged KV cache." transform="translate(575,370)"><rect width="130" height="60" rx="12"/><text x="65" y="24">🚀 Inference</text><text x="65" y="44" class="chap">CH 26 · 27</text></g>
+        <g class="node" data-ch="20" data-t="Vector index" data-d="ANN index over embeddings — the retrieval half of every RAG and recommendation system." transform="translate(820,310)"><rect width="130" height="60" rx="12"/><text x="65" y="24">🧲 Vector DB</text><text x="65" y="44" class="chap">CH 20 · 21</text></g>
+        <g class="node" data-ch="22" data-t="Tools &amp; agents" data-d="Function calling, sandboxed execution and multi-step agent loops over your systems." transform="translate(820,440)"><rect width="130" height="60" rx="12"/><text x="65" y="24">🤖 Tools / agents</text><text x="65" y="44" class="chap">CH 22</text></g>
+        <g class="node" data-ch="19" data-t="Prompt &amp; context layer" data-d="Templates, retrieved context, tool schemas and caching — the input half of LLM quality." transform="translate(205,490)"><rect width="130" height="55" rx="12"/><text x="65" y="22">💬 Context layer</text><text x="65" y="41" class="chap">CH 19 · 21</text></g>
+        <g class="node" data-ch="34" data-t="Monitoring &amp; drift" data-d="Latency, quality, drift, cost and delayed labels — the signal that tells you to retrain." transform="translate(325,500)"><rect width="130" height="55" rx="12" style="stroke-dasharray:5 4"/><text x="65" y="22">📡 Monitoring</text><text x="65" y="41" class="chap">CH 34 · 33</text></g>
+        <g class="node" data-ch="36" data-t="Safety &amp; guardrails" data-d="Input/output filtering, prompt-injection defence, policy checks and abuse throttles." transform="translate(975,370)"><rect width="125" height="60" rx="12"/><text x="62" y="24">🛡️ Guardrails</text><text x="62" y="44" class="chap">CH 36 · 37</text></g>
+      </svg>
+      </div>
+      <div class="map-info" id="mapInfo"><span class="mi-ico">👆</span><div><b>Hover or click a component</b><span>Data is flowing through both planes live.</span></div></div>
+    </div>
+
+    <h2 class="section-title reveal">How this course works</h2>
+    <p class="section-sub reveal">Every chapter follows the same rhythm: build the intuition, see it move, then make it production-grade.</p>
+    <div class="how">
+      <div class="card feature reveal"><div class="f-ico">🎯</div><h4>Intuition first</h4><p>Each idea starts with a plain-language analogy and a picture before any notation appears.</p></div>
+      <div class="card feature reveal"><div class="f-ico" style="background:var(--accent-2-soft)">🎬</div><h4>Step-through flows</h4><p>Animated walkthroughs you advance one step at a time — backprop, attention, all-reduce, a decode loop.</p></div>
+      <div class="card feature reveal"><div class="f-ico" style="background:var(--green-soft)">🕹️</div><h4>Train it, break it</h4><p>Real trainers and simulators in the page: fit a model, blow up the learning rate, kill a GPU, drift the data.</p></div>
+      <div class="card feature reveal"><div class="f-ico" style="background:var(--pink-soft)">🧪</div><h4>Quiz &amp; interview tips</h4><p>Five questions per chapter, a “common mistakes” box, and how the topic shows up in ML design interviews.</p></div>
+    </div>
+
+    <h2 class="section-title reveal">Pick a path</h2>
+    <p class="section-sub reveal">Going in order is best. But if you're here for one thing, these are the shortest honest routes.</p>
+    <div class="paths">
+      <div class="path reveal"><h4>🧑‍🎓 Complete beginner</h4><p>You've never trained a model. Start at zero and don't skip the maths chapter — it's visual, not symbolic.</p><div class="seq">1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 → 9</div></div>
+      <div class="path reveal"><h4>🤖 LLM engineer</h4><p>You want to build with large models: prompting, RAG, agents, fine-tuning and serving them cheaply.</p><div class="seq">14 → 15 → 19 → 20 → 21 → 22 → 17 → 26 → 27 → 45</div></div>
+      <div class="path reveal"><h4>🏗️ ML platform / MLOps</h4><p>You own the pipelines, the registry and the pager. Data plumbing, rollout, monitoring, cost.</p><div class="seq">28 → 29 → 31 → 32 → 33 → 34 → 38 → 39</div></div>
+      <div class="path reveal"><h4>🎤 Interview in two weeks</h4><p>Breadth plus the structure to present it. Do one case study a day after chapter 40.</p><div class="seq">7 → 26 → 30 → 34 → 40 → 41 → 43 → 45 → 46</div></div>
+    </div>
+
+    <h2 class="section-title reveal">Study tools</h2>
+    <p class="section-sub reveal">Reading is the easy part. These are for making it stick — and for the week before an interview.</p>
+    <div class="how">
+      <a class="card feature reveal" href="flashcards.html" style="color:var(--text)"><div class="f-ico">🃏</div><h4>Flashcards</h4><p>Every quiz question in the course as a self-scheduling deck. Cards you miss come back sooner; cards you know disappear for weeks.</p></a>
+      <a class="card feature reveal" href="mock-interview.html" style="color:var(--text)"><div class="f-ico" style="background:var(--pink-soft)">🎤</div><h4>Mock interview</h4><p>Draw one of 34 ML design problems, run the timer with phase prompts, then score yourself against an ML-specific rubric.</p></a>
+      <a class="card feature reveal" href="glossary.html" style="color:var(--text)"><div class="f-ico" style="background:var(--green-soft)">📖</div><h4>Glossary</h4><p>Every term the course uses, one line each, linked to the chapter that explains it properly.</p></a>
+      <button class="card feature reveal search-btn" style="text-align:left;display:block;color:var(--text);font:inherit"><div class="f-ico" style="background:var(--accent-2-soft)">🔎</div><h4>Search everything</h4><p>Press <kbd class="kbd">Ctrl</kbd>+<kbd class="kbd">K</kbd> on any page to jump to any concept, section or simulator.</p></button>
+    </div>
+
+    <h2 class="section-title reveal" id="roadmap">Course roadmap</h2>
+    <p class="section-sub reveal">Go in order — later chapters build on earlier ones. Your progress is saved in this browser.</p>
+    <div id="levels"></div>
+
+    <footer class="home-foot">
+      <b>Palak Deb Patra's ML &amp; AI Systems Playlist</b> ◆ built for learning, one gradient and one GPU at a time.<br>
+      <span class="small">© 2026 Palak Deb Patra</span><br>
+      <button class="reset-link" id="resetBtn">Reset my progress</button>
+    </footer>
+  </div>
+
+<script src="assets/app.js"></script>
+<script>
+(function(){
+  const { CHAPTERS, LEVELS, LS, $, $$ } = ML;
+  // theme button
+  const tb = $('#themeBtn');
+  const cur = () => document.documentElement.getAttribute('data-theme') || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
+  tb.textContent = cur() === 'dark' ? '☀️' : '🌙';
+  tb.onclick = () => { const n = cur() === 'dark' ? 'light' : 'dark'; document.documentElement.setAttribute('data-theme', n); LS.set('ml-theme', n); tb.textContent = n === 'dark' ? '☀️' : '🌙'; };
+
+  const done = new Set(LS.get('ml-done', []));
+  const quiz = LS.get('ml-quiz', {});
+
+  // progress ring
+  const pct = done.size / CHAPTERS.length;
+  setTimeout(() => { $('#ringFg').style.strokeDashoffset = 314.16 * (1 - pct); }, 200);
+  $('#ringTxt').textContent = Math.round(pct * 100) + '%';
+  $('#progTxt').textContent = `${done.size} of ${CHAPTERS.length} chapters complete`;
+  const next = CHAPTERS.find(c => !done.has(c.n));
+  if (next) {
+    $('#nextUp').innerHTML = `Up next: <a href="${next.file}"><b>${next.icon} ${next.title}</b></a>`;
+    if (done.size) { $('#ctaStart').href = next.file; $('#ctaStart').textContent = `Continue: Chapter ${next.n} →`; }
+  } else { $('#nextUp').innerHTML = '🏆 <b>Course complete!</b> Amazing work.'; }
+
+  const levels = LEVELS;
+  $('#lvlBars').innerHTML = levels.map(([l,c]) => {
+    const all = CHAPTERS.filter(x => x.level === l); const d = all.filter(x => done.has(x.n)).length;
+    return `<div class="row"><span>${l}</span><div class="track"><i style="width:${d/all.length*100}%;background:${c}"></i></div><span>${d}/${all.length}</span></div>`;
+  }).join('');
+
+  // roadmap cards
+  const desc = Object.fromEntries(LEVELS.map(([l, , d]) => [l, d]));
+  $('#levels').innerHTML = levels.map(([l,c]) => `
+    <div class="level-block reveal">
+      <div class="level-head"><span class="pill" style="background:color-mix(in srgb, ${c} 14%, transparent);color:${c};border-color:transparent">${l}</span><h3>${desc[l]}</h3><div class="line"></div></div>
+      <div class="chap-grid">${CHAPTERS.filter(x=>x.level===l).map(ch => `
+        <a class="chap-card ${done.has(ch.n)?'done':''}" href="${ch.file}">
+          <div class="top"><span class="emo">${ch.icon}</span><span class="no">CHAPTER ${String(ch.n).padStart(2,'0')}</span></div>
+          <h4>${ch.title}</h4>
+          <p>${ch.blurb}</p>
+          <div class="meta"><span>⏱ ${ch.mins} min</span>${done.has(ch.n)?'<span class="pill green">✓ Done</span>':''}${quiz[ch.n]!=null?`<span class="pill cyan">Quiz ${Math.round(quiz[ch.n]*100)}%</span>`:''}</div>
+        </a>`).join('')}</div>
+    </div>`).join('');
+  $$('#levels .reveal').forEach(e => setTimeout(() => e.classList.add('in'), 100));
+
+  // big map interactions
+  const map = $('#bigmap'), info = $('#mapInfo');
+  $$('.node', map).forEach(n => {
+    const ch = CHAPTERS.find(c => c.n === +n.dataset.ch);
+    n.addEventListener('mouseenter', () => {
+      info.innerHTML = `<span class="mi-ico">${ch.icon}</span><div><b>${n.dataset.t} → Chapter ${ch.n}: ${ch.title}</b><span>${n.dataset.d}</span></div>`;
+    });
+    n.addEventListener('click', () => location.href = ch.file);
+  });
+  const routes = [
+    ['e-src-pipe','e-pipe-fs','e-fs-train','e-train-eval','e-eval-reg'],
+    ['e-src-pipe','e-pipe-lake','e-lake-label','e-label-train'],
+    ['e-src-pipe','e-pipe-lake','e-lake-ft'],
+    ['e-reg-serve'],
+    ['e-cli-gw','e-gw-serve','e-serve-vec'],
+    ['e-cli-gw','e-gw-serve','e-serve-tool'],
+    ['e-cli-gw','e-gw-cache'],
+    ['e-cli-gw','e-gw-serve','e-serve-mon','e-mon-train'],
+  ];
+  const colors = ['var(--accent)','var(--accent-2)','var(--green)','var(--pink)','var(--amber)'];
+  let running = false;
+  async function fire() {
+    const r = routes[Math.floor(Math.random()*routes.length)], col = colors[Math.floor(Math.random()*colors.length)];
+    for (const id of r) await ML.packetAlong(map, $('#'+id, map), { dur: 420, color: col, r: 5 });
+  }
+  let timer;
+  ML.whenVisible(map, () => { if (!running) { running = true; timer = setInterval(fire, 650); } }, () => { running = false; clearInterval(timer); });
+
+  $('#resetBtn').onclick = () => { if (confirm('Reset all course progress and quiz scores?')) { LS.set('ml-done', []); LS.set('ml-quiz', {}); location.reload(); } };
+})();
+</script>
+</body>
+</html>

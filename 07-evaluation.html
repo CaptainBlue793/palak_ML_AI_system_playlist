@@ -1,0 +1,414 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Evaluation, Metrics &amp; Validation</title>
+<link rel="stylesheet" href="assets/style.css">
+<script>try{var t=JSON.parse(localStorage.getItem('ml-theme'));if(t)document.documentElement.setAttribute('data-theme',t)}catch(e){}</script>
+<style>
+  .dist-svg, .curve-svg, .cal-svg { width:100%; }
+  .dist-svg .neg { fill:var(--accent-2); opacity:.55; }
+  .dist-svg .pos { fill:var(--red); opacity:.6; }
+  .dist-svg .thr { stroke:var(--text); stroke-width:2.5; stroke-dasharray:5 4; }
+  .dist-svg text, .curve-svg text, .cal-svg text { font-size:10.5px; fill:var(--muted); font-family:var(--mono); }
+  .curve-svg .ln { fill:none; stroke:var(--accent); stroke-width:2.6; }
+  .curve-svg .ref { stroke:var(--border-strong); stroke-dasharray:4 4; }
+  .curve-svg .op { fill:var(--pink); }
+  .cal-svg .bar { fill:var(--accent); opacity:.8; }
+  .cal-svg .ideal { stroke:var(--green); stroke-width:2; stroke-dasharray:5 4; }
+  .cm { display:grid; grid-template-columns:auto 1fr 1fr; gap:6px; font-size:13px; }
+  .cm div { padding:10px; border-radius:10px; text-align:center; }
+  .cm .hd { background:none; font-weight:700; color:var(--muted); font-size:11.5px; display:grid; place-items:center; }
+  .cm .tp { background:var(--green-soft); color:var(--green); font-weight:700; }
+  .cm .tn { background:var(--accent-soft); color:var(--accent); font-weight:700; }
+  .cm .fp { background:var(--amber-soft); color:var(--amber); font-weight:700; }
+  .cm .fn { background:var(--red-soft); color:var(--red); font-weight:700; }
+  .cm b { display:block; font-size:20px; font-family:var(--mono); }
+  .slice-tbl td.bad { color:var(--red); font-weight:700; }
+  .slice-tbl td.good { color:var(--green); font-weight:700; }
+</style>
+</head>
+<body data-chapter="7">
+<main class="content">
+
+  <section class="hero">
+    <div class="eyebrow"><span class="pill accent">Chapter 7</span><span class="pill green">Beginner</span><span class="pill">⏱ 45 min</span></div>
+    <h1>Evaluation, Metrics <span class="grad">&amp; Validation</span></h1>
+    <p class="lead">Training is easy to get working and hard to get wrong quietly. Evaluation is the opposite: it looks trivial, and almost every serious ML failure traces back to measuring the wrong thing, on the wrong data, at the wrong threshold.</p>
+    <ul class="objectives">
+      <li>Pick a metric from the decision the model drives</li>
+      <li>Read confusion matrices, ROC and PR curves — and know when each lies</li>
+      <li>Set a threshold from costs, not from 0.5</li>
+      <li>Check calibration before feeding probabilities into money</li>
+      <li>Evaluate slices, quantify uncertainty, and run honest error analysis</li>
+    </ul>
+  </section>
+
+  <h2>Validation: the discipline of not fooling yourself</h2>
+  <p>Three datasets, three jobs. <b>Train</b> fits parameters. <b>Validation</b> chooses everything else — hyperparameters, architectures, thresholds, whether to ship. <b>Test</b> gives one honest number, and every time you look at it and change something, it becomes a little more like a validation set.</p>
+
+  <div class="grid c3">
+    <div class="card feature reveal"><div class="f-ico">📚</div><h4>k-fold CV</h4><p>Split into k parts, train k times, average. Uses all the data for both training and evaluation. Best when data is scarce and rows are independent.</p></div>
+    <div class="card feature reveal"><div class="f-ico" style="background:var(--accent-2-soft)">📅</div><h4>Rolling-origin CV</h4><p>For time series: train on weeks 1–4, test week 5; train 1–5, test 6; and so on. The only honest CV when the future is what you predict.</p></div>
+    <div class="card feature reveal"><div class="f-ico" style="background:var(--green-soft)">👥</div><h4>Grouped CV</h4><p>Keep all rows of an entity (user, patient, seller) inside one fold, or you're measuring memorisation.</p></div>
+  </div>
+
+  <div class="callout warn">
+    <div class="ico">🎰</div>
+    <div class="body"><div class="title">Multiple comparisons: how teams overfit the validation set</div>
+      <p>Try 200 model variants and pick the best validation score, and you've partly selected for luck — expect a drop on test. Mitigate by keeping a genuinely untouched test set, preferring simpler models when scores are within noise, and reporting a confidence interval rather than a point estimate.</p></div>
+  </div>
+
+  <h2>Classification: it all starts with four numbers</h2>
+  <p>Every classification metric is a rearrangement of the confusion matrix. Move the threshold below and watch all of them move together — there is no setting that improves everything.</p>
+
+  <div class="panel">
+    <div class="panel-head"><div class="dots"><i></i><i></i><i></i></div><span class="p-title">Threshold explorer — 10,000 transactions, 2% fraudulent</span><span class="p-tag">Interactive</span></div>
+    <div class="panel-body">
+      <div class="svg-scroll"><svg id="distSvg" class="diagram dist-svg" viewBox="0 0 640 190"></svg></div>
+      <div class="range-row"><label for="thr">Decision threshold</label><input type="range" id="thr" min="0.02" max="0.98" step="0.01" value="0.5"><output id="thrV"></output></div>
+      <div class="seg" id="sepSeg" style="margin-bottom:12px"><button data-v="weak">Weak model</button><button data-v="good" class="active">Decent model</button><button data-v="strong">Strong model</button></div>
+
+      <div class="split" style="grid-template-columns:minmax(0,1fr) minmax(0,1.1fr)">
+        <div class="cm">
+          <div class="hd"></div><div class="hd">predicted fraud</div><div class="hd">predicted legit</div>
+          <div class="hd">actually&nbsp;fraud</div><div class="tp"><b id="cTP">–</b>true positive</div><div class="fn"><b id="cFN">–</b>false negative<br><span class="small">fraud we paid for</span></div>
+          <div class="hd">actually&nbsp;legit</div><div class="fp"><b id="cFP">–</b>false positive<br><span class="small">customer blocked</span></div><div class="tn"><b id="cTN">–</b>true negative</div>
+        </div>
+        <div class="stats" style="grid-template-columns:1fr 1fr">
+          <div class="stat acc"><div class="k">Precision</div><div class="v" id="mPrec">–</div></div>
+          <div class="stat good"><div class="k">Recall (TPR)</div><div class="v" id="mRec">–</div></div>
+          <div class="stat"><div class="k">F1</div><div class="v" id="mF1">–</div></div>
+          <div class="stat warn"><div class="k">Accuracy</div><div class="v" id="mAcc">–</div></div>
+        </div>
+      </div>
+
+      <div class="callout" style="margin-top:12px"><div class="ico">💷</div><div class="body"><div class="title">Cost view — £500 per missed fraud, £8 per blocked customer</div>
+        <p style="margin:0" id="costTxt">–</p></div></div>
+
+      <div class="split" style="margin-top:14px">
+        <div><div class="small muted" style="font-weight:700;margin-bottom:4px">ROC curve</div><svg id="rocSvg" class="diagram curve-svg" viewBox="0 0 260 220"></svg></div>
+        <div><div class="small muted" style="font-weight:700;margin-bottom:4px">Precision–recall curve</div><svg id="prSvg" class="diagram curve-svg" viewBox="0 0 260 220"></svg></div>
+      </div>
+      <p class="small muted" style="margin-top:8px" id="curveNote"></p>
+    </div>
+  </div>
+
+  <div class="table-wrap">
+    <table class="t">
+      <thead><tr><th>Metric</th><th>Formula</th><th>Answers</th><th>Use when</th></tr></thead>
+      <tbody>
+        <tr><td><b>Precision</b></td><td>TP / (TP + FP)</td><td>“When we flag, how often are we right?”</td><td>False alarms are expensive (human review, blocking users)</td></tr>
+        <tr><td><b>Recall</b></td><td>TP / (TP + FN)</td><td>“What share of the real cases did we catch?”</td><td>Misses are expensive (disease, fraud, safety)</td></tr>
+        <tr><td><b>F1</b></td><td>harmonic mean</td><td>A single number balancing both</td><td>Comparing models quickly — never for setting policy</td></tr>
+        <tr><td><b>ROC-AUC</b></td><td>area under TPR vs FPR</td><td>“Ranks a random positive above a random negative how often?”</td><td>Balanced-ish classes; threshold-free comparison</td></tr>
+        <tr><td><b>PR-AUC</b></td><td>area under precision vs recall</td><td>Performance on the rare class</td><td><b>Imbalanced problems</b> — the honest choice</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="callout danger">
+    <div class="ico">📉</div>
+    <div class="body"><div class="title">Why ROC-AUC flatters imbalanced models</div>
+      <p>The false-positive rate divides by the huge negative count, so 5,000 false positives out of 980,000 legitimate transactions is an FPR of 0.5% — invisible on an ROC curve. Precision divides by the number of <i>flags</i>, so those same 5,000 next to 300 true catches mean precision of 6%: your review team drowns. With a rare positive class, report PR-AUC and precision at the recall you actually operate at.</p></div>
+  </div>
+
+  <h2>Thresholds come from costs, not conventions</h2>
+  <p>0.5 is the default only because it's the middle. The right threshold minimises expected cost:</p>
+  <pre class="code">flag if  P(positive) × cost_of_miss  &gt;  (1 − P(positive)) × cost_of_false_alarm
+
+<span class="c"># fraud: £500 miss, £8 false alarm  →  flag above p ≈ 0.016</span>
+<span class="c"># spam:  £0.05 miss, £5 false alarm (lost email) →  flag above p ≈ 0.99</span></pre>
+  <p>In practice you often invert the question: “we can review 2,000 cases a day — what threshold gives us the best recall at that volume?” That's <b>recall at fixed review capacity</b>, and it's what operations teams actually care about.</p>
+
+  <h2>Calibration: are the probabilities real?</h2>
+  <p>A model is <strong>calibrated</strong> if, among all cases it scored 0.30, about 30% are positive. Ranking metrics don't care; any decision involving money, thresholds or downstream arithmetic cares enormously.</p>
+
+  <div class="panel">
+    <div class="panel-head"><div class="dots"><i></i><i></i><i></i></div><span class="p-title">Reliability diagram</span><span class="p-tag">Interactive</span></div>
+    <div class="panel-body">
+      <div class="split" style="grid-template-columns:minmax(0,1fr) minmax(0,1fr);align-items:center">
+        <div class="svg-scroll"><svg id="calSvg" class="diagram cal-svg" viewBox="0 0 300 250"></svg></div>
+        <div>
+          <div class="seg" id="calSeg"><button data-v="good" class="active">Calibrated</button><button data-v="over">Overconfident</button><button data-v="under">Underconfident</button><button data-v="resamp">After resampling</button></div>
+          <div class="stats" style="grid-template-columns:1fr;margin-top:10px">
+            <div class="stat acc"><div class="k">Expected calibration error</div><div class="v" id="ece">–</div></div>
+          </div>
+          <p class="small" id="calNote" style="margin-top:10px"></p>
+        </div>
+      </div>
+      <p class="small muted">Fixes: <b>Platt scaling</b> (fit a logistic regression on validation scores), <b>isotonic regression</b> (non-parametric, needs more data), or <b>temperature scaling</b> for neural nets — divide logits by a single learned T. All are fitted on a held-out set, never on training data.</p>
+    </div>
+  </div>
+
+  <div class="callout warn">
+    <div class="ico">⚖️</div>
+    <div class="body"><div class="title">Resampling breaks calibration</div>
+      <p>If you oversampled positives from 1% to 50% to help training, the model now believes the world is 50% positive and its outputs are wildly too high. Either undo the shift analytically (adjust the intercept by <code>log(w)</code>) or recalibrate on a held-out set with the <b>true</b> base rate. This bites people constantly in fraud and ads.</p></div>
+  </div>
+
+  <h2>Metrics for the other problem shapes</h2>
+  <div class="table-wrap">
+    <table class="t">
+      <thead><tr><th>Task</th><th>Metrics</th><th>Watch out for</th></tr></thead>
+      <tbody>
+        <tr><td><b>Regression</b></td><td>MAE, RMSE, MAPE, R²</td><td>RMSE is outlier-sensitive; MAPE explodes near zero and punishes over-prediction asymmetrically</td></tr>
+        <tr><td><b>Ranking / retrieval</b></td><td>Recall@k, MRR, NDCG@k, MAP</td><td>Position matters; NDCG needs graded relevance; k must match the real UI (Ch 30, 42)</td></tr>
+        <tr><td><b>Multi-class</b></td><td>Macro-F1 (treats classes equally), micro-F1 (treats examples equally)</td><td>Choosing the wrong average hides failure on small classes</td></tr>
+        <tr><td><b>Detection / segmentation</b></td><td>mAP at IoU thresholds, Dice</td><td>Metric is sensitive to box/mask conventions (Ch 12)</td></tr>
+        <tr><td><b>Generation</b></td><td>Perplexity, BLEU/ROUGE, win-rate vs a baseline, rubric grading</td><td>Overlap metrics barely correlate with quality — see Chapter 35</td></tr>
+        <tr><td><b>Probabilistic forecast</b></td><td>Log loss, Brier score, pinball loss for quantiles</td><td>Proper scoring rules reward honest uncertainty, not confident guesses</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h2>Averages hide everything interesting</h2>
+  <p>A 4-point aggregate gain can contain a 20-point regression for new users. <strong>Slice</strong> your evaluation by every dimension that matters commercially or ethically, and set alerts on the worst slice — not the mean.</p>
+
+  <div class="table-wrap">
+    <table class="t slice-tbl">
+      <thead><tr><th>Slice</th><th>Volume</th><th>Old model</th><th>New model</th><th>Δ</th></tr></thead>
+      <tbody>
+        <tr><td>Overall</td><td>100%</td><td>0.812</td><td>0.849</td><td class="good">+0.037</td></tr>
+        <tr><td>Returning users</td><td>78%</td><td>0.835</td><td>0.881</td><td class="good">+0.046</td></tr>
+        <tr><td>New users (&lt;7 days)</td><td>14%</td><td>0.744</td><td>0.689</td><td class="bad">−0.055</td></tr>
+        <tr><td>Mobile web</td><td>31%</td><td>0.801</td><td>0.842</td><td class="good">+0.041</td></tr>
+        <tr><td>Non-English locales</td><td>9%</td><td>0.769</td><td>0.702</td><td class="bad">−0.067</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="small muted">This model is a clear win on average and a serious regression for exactly the users you most want to keep. Ship it only with a fallback for those slices — and put both rows in the launch review.</p>
+
+  <h2>Is the difference real?</h2>
+  <p>Model A scores 0.843, model B scores 0.847. Before you celebrate, ask whether that gap survives resampling. Two cheap tools:</p>
+
+  <div class="split">
+    <div class="card"><h4 class="mt0">🔁 Bootstrap CI</h4><p class="small mb0">Resample your test set with replacement 1,000 times, recompute the metric each time, and report the 2.5th–97.5th percentiles. If the intervals overlap heavily, the models are tied.</p></div>
+    <div class="card"><h4 class="mt0">🪙 Paired test</h4><p class="small mb0">Compare models on the <b>same</b> examples and test the differences (McNemar for classification, paired bootstrap otherwise). Pairing removes example difficulty as a source of noise and needs far less data.</p></div>
+  </div>
+
+  <div class="callout tip">
+    <div class="ico">🔬</div>
+    <div class="body"><div class="title">Error analysis beats one more metric</div>
+      <p>Take 100 errors, read them, and put each into a bucket. You will typically find that 40% are label noise, 25% are one systematic failure mode, and 35% are genuinely hard. That tells you exactly what to do next — relabel, add a feature, or accept the ceiling — which no aggregate number ever will.</p></div>
+  </div>
+
+  <div class="callout danger"><div class="ico">⚠️</div><div class="body"><div class="title">Common mistakes</div>
+    <ul class="mb0">
+      <li><b>Reporting accuracy on imbalanced data.</b> The majority-class baseline is already 99%; the metric carries no information.</li>
+      <li><b>Tuning the threshold on the test set.</b> Thresholds are a hyperparameter — choose them on validation.</li>
+      <li><b>Comparing models at different thresholds.</b> Compare curves, or compare at a matched operating point (same recall or same review volume).</li>
+      <li><b>Ignoring calibration when the score feeds a decision rule.</b> A miscalibrated 0.9 and a calibrated 0.9 lead to different, expensive actions.</li>
+      <li><b>Evaluating only on the average.</b> Slice by user tenure, locale, device and time, or the regression will find you in production.</li>
+      <li><b>Letting the test set rot.</b> Reuse it fifty times and it is no longer a test set — refresh it periodically from new data.</li>
+    </ul></div></div>
+
+  <div class="callout interview"><div class="ico">🎤</div><div class="body"><div class="title">Interview drill</div>
+    <p class="small" style="margin:10px 0 0"><b>Warm-up:</b> Your model has 0.98 ROC-AUC on fraud detection. The ops team says it's useless. Explain how both can be true.</p>
+    <details class="ans"><summary>How a strong answer sounds</summary><div>With a 0.2% base rate, ROC-AUC is dominated by the enormous negative class: a tiny false-positive rate still means thousands of alerts per day. At the threshold they operate, precision might be 4%, so reviewers see 24 legitimate cases for every real fraud and stop trusting the queue. The right framing is precision at their review capacity — “with 500 reviews a day, we catch X% of fraud at Y% precision” — and PR-AUC as the headline offline metric. Then tune the threshold on expected cost, not on 0.5.</div></details>
+    <p class="small" style="margin:10px 0 0"><b>Deeper:</b> How would you decide whether a 0.4% offline improvement is worth shipping?</p>
+    <details class="ans"><summary>How a strong answer sounds</summary><div>First, is it real? Paired bootstrap on the same test examples with a confidence interval; if it straddles zero, it's noise. Second, is it real <i>where it matters</i>? Check the slices and the operating point rather than the aggregate curve. Third, what does it cost? A 0.4% gain from a model that triples serving cost or adds 40 ms of latency is usually a loss. Finally, the offline number is only a prediction of the online one — so the decision is whether to spend an A/B slot on it, and the size of the expected effect determines how long that test must run to detect it.</div></details>
+  </div></div>
+
+  <div class="takeaways">
+    <h3>🧠 Key takeaways</h3>
+    <ul>
+      <li>Pick metrics from the decision and its costs; accuracy is almost never the right headline.</li>
+      <li>On imbalanced problems use PR-AUC and precision at an operable recall, not ROC-AUC.</li>
+      <li>Thresholds are chosen from expected cost or review capacity, on validation data.</li>
+      <li>Calibrate before any probability feeds money, and re-calibrate after resampling.</li>
+      <li>Slice everything, quantify uncertainty, and read 100 errors before tuning anything else.</li>
+    </ul>
+  </div>
+
+  <div class="quiz-wrap">
+    <h2>Check your understanding</h2>
+    <div class="quiz-score"></div>
+
+    <div class="quiz" data-answer="2">
+      <p class="q">Disease affects 1% of patients. Your classifier reports 99% accuracy. What is the most useful next question?</p>
+      <div class="opts">
+        <button class="opt">What was the training time?</button>
+        <button class="opt">What is the ROC-AUC?</button>
+        <button class="opt">What are precision and recall on the positive class?</button>
+        <button class="opt">How many parameters does it have?</button>
+      </div>
+      <div class="explain">99% is the always-negative baseline. Only the positive-class metrics reveal whether it detects anything at all.</div>
+    </div>
+
+    <div class="quiz" data-answer="1">
+      <p class="q">You lower the decision threshold from 0.5 to 0.2. What happens?</p>
+      <div class="opts">
+        <button class="opt">Precision rises, recall falls</button>
+        <button class="opt">Recall rises, precision usually falls</button>
+        <button class="opt">Both rise</button>
+        <button class="opt">Neither changes — the model is fixed</button>
+      </div>
+      <div class="explain">A lower bar flags more cases, catching more true positives (higher recall) and more false ones (lower precision). The model is unchanged; only the operating point moves.</div>
+    </div>
+
+    <div class="quiz" data-answer="3">
+      <p class="q">A model's scores rank perfectly but every probability is roughly double the true rate. Which metric is unaffected?</p>
+      <div class="opts">
+        <button class="opt">Log loss</button>
+        <button class="opt">Brier score</button>
+        <button class="opt">Expected calibration error</button>
+        <button class="opt">ROC-AUC</button>
+      </div>
+      <div class="explain">AUC depends only on the ordering, so any monotone distortion leaves it untouched. That's precisely why AUC alone cannot tell you the probabilities are safe to act on.</div>
+    </div>
+
+    <div class="quiz" data-answer="0">
+      <p class="q">You oversampled positives from 1% to 50% during training. What must you do before using the probabilities for a money decision?</p>
+      <div class="opts">
+        <button class="opt">Recalibrate on data with the true base rate</button>
+        <button class="opt">Retrain with a bigger model</button>
+        <button class="opt">Switch from log loss to hinge loss</button>
+        <button class="opt">Nothing — resampling only affects training speed</button>
+      </div>
+      <div class="explain">The model learned a world where positives are 50% likely, so its outputs are massively inflated. Adjust the intercept analytically or fit a calibration map on a held-out set with the real prevalence.</div>
+    </div>
+
+    <div class="quiz" data-answer="2">
+      <p class="q">Model B beats model A by 0.003 AUC on a 5,000-row test set. What's the right response?</p>
+      <div class="opts">
+        <button class="opt">Ship B — it's better</button>
+        <button class="opt">Average A and B</button>
+        <button class="opt">Compute a paired bootstrap confidence interval on the difference</button>
+        <button class="opt">Re-tune B's threshold on the test set</button>
+      </div>
+      <div class="explain">On 5,000 rows a 0.003 gap is well within noise. Pair the comparison on identical examples and look at the interval before spending an experiment slot.</div>
+    </div>
+  </div>
+</main>
+<script src="assets/app.js"></script>
+<script>
+(function(){
+  const { $, $$, clamp, fmt } = ML;
+
+  /* ================= score distributions ================= */
+  const N_NEG = 9800, N_POS = 200;
+  const SEP = { weak: 0.9, good: 1.9, strong: 3.2 };
+  let negS = [], posS = [];
+  function gen() {
+    const k = $('#sepSeg').dataset.value || 'good', d = SEP[k];
+    const rnd = () => (Math.random() + Math.random() + Math.random() + Math.random() - 2) / 1.6;
+    negS = []; posS = [];
+    for (let i = 0; i < 1200; i++) negS.push(clamp(sigmoid(rnd() * 1.1 - d / 2), 0.001, 0.999));
+    for (let i = 0; i < 400; i++) posS.push(clamp(sigmoid(rnd() * 1.1 + d / 2), 0.001, 0.999));
+  }
+  const sigmoid = (z) => 1 / (1 + Math.exp(-z));
+
+  function counts(t) {
+    const posRate = posS.filter(s => s >= t).length / posS.length;
+    const negRate = negS.filter(s => s >= t).length / negS.length;
+    const TP = Math.round(posRate * N_POS), FN = N_POS - TP;
+    const FP = Math.round(negRate * N_NEG), TN = N_NEG - FP;
+    return { TP, FN, FP, TN };
+  }
+
+  function drawDist(t) {
+    const B = 40, hn = new Array(B).fill(0), hp = new Array(B).fill(0);
+    negS.forEach(s => hn[clamp(Math.floor(s * B), 0, B - 1)]++);
+    posS.forEach(s => hp[clamp(Math.floor(s * B), 0, B - 1)]++);
+    const mx = Math.max(...hn, ...hp);
+    let g = '';
+    for (let i = 0; i < B; i++) {
+      const x = 30 + i * (580 / B), w = 580 / B - 2;
+      g += `<rect class="neg" x="${x}" y="${160 - hn[i] / mx * 130}" width="${w}" height="${hn[i] / mx * 130}"/>`;
+      g += `<rect class="pos" x="${x}" y="${160 - hp[i] / mx * 130}" width="${w}" height="${hp[i] / mx * 130}"/>`;
+    }
+    const tx = 30 + t * 580;
+    g += `<line class="thr" x1="${tx}" y1="12" x2="${tx}" y2="165"/><text x="${clamp(tx - 26, 4, 560)}" y="10">threshold</text>`;
+    g += `<line stroke="var(--border-strong)" x1="30" y1="160" x2="610" y2="160"/><text x="30" y="176">score 0</text><text x="575" y="176">1</text>`;
+    g += `<text x="330" y="24" style="fill:var(--red)">■ fraud</text><text x="400" y="24" style="fill:var(--accent-2)">■ legit</text>`;
+    $('#distSvg').innerHTML = g;
+  }
+
+  function drawCurves(t) {
+    const pts = [];
+    for (let k = 0; k <= 100; k++) {
+      const th = k / 100;
+      const c = counts(th);
+      pts.push({ th, tpr: c.TP / N_POS, fpr: c.FP / N_NEG, prec: c.TP + c.FP ? c.TP / (c.TP + c.FP) : 1, rec: c.TP / N_POS });
+    }
+    const cur = counts(t);
+    const curTPR = cur.TP / N_POS, curFPR = cur.FP / N_NEG;
+    const curPrec = cur.TP + cur.FP ? cur.TP / (cur.TP + cur.FP) : 1;
+
+    const X = (v) => 36 + v * 200, Y = (v) => 190 - v * 168;
+    const roc = pts.map(p => `${X(p.fpr).toFixed(1)},${Y(p.tpr).toFixed(1)}`).join(' L');
+    let auc = 0;
+    for (let i = 1; i < pts.length; i++) auc += Math.abs(pts[i - 1].fpr - pts[i].fpr) * (pts[i].tpr + pts[i - 1].tpr) / 2;
+    $('#rocSvg').innerHTML =
+      `<line class="ref" x1="${X(0)}" y1="${Y(0)}" x2="${X(1)}" y2="${Y(1)}"/>` +
+      `<path class="ln" d="M${roc}"/><circle class="op" cx="${X(curFPR)}" cy="${Y(curTPR)}" r="5"/>` +
+      `<line stroke="var(--border-strong)" x1="36" y1="190" x2="245" y2="190"/><line stroke="var(--border-strong)" x1="36" y1="18" x2="36" y2="190"/>` +
+      `<text x="150" y="206">false positive rate</text><text x="4" y="14">TPR</text><text x="120" y="40" style="fill:var(--accent);font-weight:700">AUC ${auc.toFixed(3)}</text>`;
+
+    const pr = pts.filter(p => p.rec > 0).map(p => `${X(p.rec).toFixed(1)},${Y(p.prec).toFixed(1)}`).join(' L');
+    let ap = 0;
+    const s = pts.slice().sort((a, b) => a.rec - b.rec);
+    for (let i = 1; i < s.length; i++) ap += (s[i].rec - s[i - 1].rec) * s[i].prec;
+    $('#prSvg').innerHTML =
+      `<line class="ref" x1="${X(0)}" y1="${Y(N_POS / (N_POS + N_NEG))}" x2="${X(1)}" y2="${Y(N_POS / (N_POS + N_NEG))}"/>` +
+      `<path class="ln" d="M${pr}"/><circle class="op" cx="${X(curTPR)}" cy="${Y(curPrec)}" r="5"/>` +
+      `<line stroke="var(--border-strong)" x1="36" y1="190" x2="245" y2="190"/><line stroke="var(--border-strong)" x1="36" y1="18" x2="36" y2="190"/>` +
+      `<text x="170" y="206">recall</text><text x="4" y="14">precision</text><text x="120" y="40" style="fill:var(--accent);font-weight:700">PR-AUC ${ap.toFixed(3)}</text>` +
+      `<text x="40" y="${Y(N_POS / (N_POS + N_NEG)) - 5}">random = 2%</text>`;
+    $('#curveNote').innerHTML = `The pink dot is your current threshold on both curves. Notice the ROC curve looks excellent (AUC ${auc.toFixed(3)}) while precision at the same point is <b>${(curPrec * 100).toFixed(1)}%</b> — the same model, two very different impressions.`;
+  }
+
+  function update() {
+    const t = +$('#thr').value;
+    $('#thrV').textContent = t.toFixed(2);
+    const c = counts(t);
+    $('#cTP').textContent = c.TP; $('#cFN').textContent = c.FN;
+    $('#cFP').textContent = fmt(c.FP, 0); $('#cTN').textContent = fmt(c.TN, 0);
+    const prec = c.TP + c.FP ? c.TP / (c.TP + c.FP) : 0, rec = c.TP / N_POS;
+    $('#mPrec').textContent = (prec * 100).toFixed(1) + '%';
+    $('#mRec').textContent = (rec * 100).toFixed(1) + '%';
+    $('#mF1').textContent = prec + rec ? (2 * prec * rec / (prec + rec)).toFixed(3) : '0';
+    $('#mAcc').textContent = ((c.TP + c.TN) / (N_POS + N_NEG) * 100).toFixed(2) + '%';
+    const cost = c.FN * 500 + c.FP * 8;
+    const best = (() => { let b = { c: Infinity, t: 0 }; for (let k = 1; k < 99; k++) { const cc = counts(k / 100); const v = cc.FN * 500 + cc.FP * 8; if (v < b.c) b = { c: v, t: k / 100 }; } return b; })();
+    $('#costTxt').innerHTML = `At this threshold you lose <b>£${fmt(cost, 0)}</b> per 10,000 transactions ` +
+      `(${c.FN} missed frauds × £500 + ${fmt(c.FP, 0)} blocked customers × £8). ` +
+      `The cost-optimal threshold here is <b>${best.t.toFixed(2)}</b> at <b>£${fmt(best.c, 0)}</b> — ` +
+      (Math.abs(best.t - t) < 0.03 ? 'you are essentially there. ✅' : `note how far it is from the default 0.5.`);
+    drawDist(t); drawCurves(t);
+  }
+  $('#thr').addEventListener('input', update);
+  $('#sepSeg').addEventListener('segchange', () => { gen(); update(); });
+  gen(); update();
+
+  /* ================= calibration ================= */
+  const CAL = {
+    good: { f: (p) => p, note: '<b>Well calibrated.</b> Bars sit on the diagonal: among items scored 0.3, roughly 30% are positive. Probabilities can be multiplied by costs and trusted.' },
+    over: { f: (p) => clamp(p ** 0.45, 0, 1), note: '<b>Overconfident.</b> Typical of large neural nets trained to very low loss: it says 0.9 when the truth is 0.7. Temperature scaling on a validation set fixes most of this with one parameter.' },
+    under: { f: (p) => clamp(p ** 1.9, 0, 1), note: '<b>Underconfident.</b> Common after heavy regularization or label smoothing. Rankings are fine, but any threshold tuned on these numbers will be systematically too aggressive.' },
+    resamp: { f: (p) => clamp(p / (p + (1 - p) * 20), 0, 1), note: '<b>Trained on resampled data.</b> Positives were oversampled 20×, so every probability is inflated. Correct the prior or recalibrate on data with the true base rate before using these for decisions.' },
+  };
+  function drawCal() {
+    const k = $('#calSeg').dataset.value || 'good', f = CAL[k].f;
+    const X = (v) => 40 + v * 230, Y = (v) => 210 - v * 185;
+    let g = `<line class="ideal" x1="${X(0)}" y1="${Y(0)}" x2="${X(1)}" y2="${Y(1)}"/>`;
+    let ece = 0;
+    for (let i = 0; i < 10; i++) {
+      const mid = (i + 0.5) / 10, actual = clamp(f(mid), 0, 1);
+      g += `<rect class="bar" x="${X(i / 10) + 2}" y="${Y(actual)}" width="${230 / 10 - 4}" height="${210 - Y(actual)}" rx="2"/>`;
+      ece += Math.abs(actual - mid) / 10;
+    }
+    g += `<line stroke="var(--border-strong)" x1="40" y1="210" x2="280" y2="210"/><line stroke="var(--border-strong)" x1="40" y1="18" x2="40" y2="210"/>` +
+      `<text x="105" y="228">predicted probability</text><text x="2" y="14">observed rate</text>`;
+    $('#calSvg').innerHTML = g;
+    $('#ece').textContent = ece.toFixed(3);
+    $('#calNote').innerHTML = CAL[k].note;
+  }
+  $('#calSeg').addEventListener('segchange', drawCal);
+  drawCal();
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,353 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Privacy, Governance &amp; Responsible AI</title>
+<link rel="stylesheet" href="assets/style.css">
+<script>try{var t=JSON.parse(localStorage.getItem('ml-theme'));if(t)document.documentElement.setAttribute('data-theme',t)}catch(e){}</script>
+<style>
+  .fair { display:grid; gap:8px }
+  .fair .grp { display:grid; grid-template-columns:110px 1fr 84px; gap:10px; align-items:center; font-size:13px }
+  .fair .tk { height:18px; border-radius:6px; background:var(--surface-3); overflow:hidden; display:flex }
+  .fair .tk i { display:block; height:100% }
+  .fair .v { font-family:var(--mono); text-align:right; color:var(--muted); font-size:12px }
+  .dp-svg { width:100%; height:190px }
+  .dp-svg .ln { fill:none; stroke-width:2.6 }
+  .dp-svg text { font-size:10.5px; fill:var(--muted); font-family:var(--mono) }
+  .tiers { display:grid; gap:8px }
+  .tiers .r { display:grid; grid-template-columns:130px 1fr; gap:12px; padding:11px 13px; border-radius:12px; border:1px solid var(--border); background:var(--surface-2); font-size:13.5px }
+  .tiers .r b { font-family:var(--mono) }
+  .tiers .r.ban { border-color:var(--red); background:var(--red-soft) }
+  .tiers .r.high { border-color:var(--amber); background:var(--amber-soft) }
+  .checklist .r { display:flex; gap:10px; align-items:flex-start; padding:9px 11px; border-radius:10px; background:var(--surface-2); border:1px solid var(--border); font-size:13.5px; margin-bottom:6px; cursor:pointer }
+  .checklist .r.on { border-color:var(--green); background:var(--green-soft) }
+</style>
+</head>
+<body data-chapter="37">
+<main class="content">
+
+  <section class="hero">
+    <div class="eyebrow"><span class="pill accent">Chapter 37</span><span class="pill amber">Expert</span><span class="pill">⏱ 45 min</span></div>
+    <h1>Privacy, Governance <span class="grad">&amp; Responsible AI</span></h1>
+    <p class="lead">A model trained on personal data is a new copy of that data in a form you cannot grep. Fairness metrics you'd assume are compatible are provably not. And a growing body of regulation now asks for documentation you can only produce if you started collecting it a year ago.</p>
+    <ul class="objectives">
+      <li>Handle personal data through the ML lifecycle, including deletion</li>
+      <li>Explain differential privacy and federated learning, and their costs</li>
+      <li>Measure fairness — and know why you can't satisfy every definition at once</li>
+      <li>Produce the documentation regulators and auditors ask for</li>
+      <li>Run a governance process that doesn't paralyse delivery</li>
+    </ul>
+  </section>
+
+  <h2>Personal data through the lifecycle</h2>
+  <div class="table-wrap">
+    <table class="t">
+      <thead><tr><th>Stage</th><th>Obligation</th><th>Practical implementation</th></tr></thead>
+      <tbody>
+        <tr><td><b>Collection</b></td><td>Lawful basis, purpose limitation</td><td>Record why each field is collected and which model may use it</td></tr>
+        <tr><td><b>Minimisation</b></td><td>Only what you need</td><td>Drop direct identifiers; ask whether a feature earns its privacy cost</td></tr>
+        <tr><td><b>Storage</b></td><td>Encryption, access control, retention limits</td><td>Pseudonymise at ingest; keep the mapping in a separate, tightly-controlled store</td></tr>
+        <tr><td><b>Training</b></td><td>Purpose compatibility, minimisation</td><td>Train on pseudonymised data; deduplicate to limit memorisation</td></tr>
+        <tr><td><b>Serving</b></td><td>Logging discipline</td><td>Don't log raw prompts containing personal data by default; redact and sample</td></tr>
+        <tr><td><b>Deletion</b></td><td>Erasure rights</td><td>Delete from stores and pipelines; document the model position (below)</td></tr>
+        <tr><td><b>Transfer</b></td><td>Residency and cross-border rules</td><td>Region-pinned training and inference; know where every provider runs</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="callout warn">
+    <div class="ico">🗑️</div>
+    <div class="body"><div class="title">“Delete my data” and the model</div>
+      <p>You can delete rows from a warehouse in seconds. Removing a person's influence from trained weights is another matter: exact unlearning generally means retraining. The workable position, which you should decide and document <i>before</i> the request arrives: delete from all stores and pipelines immediately; exclude from all future training; record the model versions that were trained on the data; retrain on a defined cadence so the exposure has a known lifetime. Deduplication and privacy-preserving training reduce how much any single person's data affects the weights in the first place.</p></div>
+  </div>
+
+  <h2>Memorisation is measurable</h2>
+  <p>Large models can reproduce training data verbatim — more so for text that appeared many times or is highly distinctive (keys, addresses, rare names). Two practical controls:</p>
+
+  <div class="split">
+    <div class="card"><h4 class="mt0">🔁 Deduplicate aggressively</h4><p class="small mb0">Duplication is the strongest predictor of memorisation. Near-duplicate removal (Chapter 16) reduces both compute waste and privacy exposure — the same operation solves two problems.</p></div>
+    <div class="card"><h4 class="mt0">🐤 Plant canaries</h4><p class="small mb0">Insert unique synthetic secrets at known frequencies, then try to extract them after training. This turns “could it memorise?” into a number you can track across model versions and report.</p></div>
+  </div>
+
+  <h2>Differential privacy</h2>
+  <p>DP gives a mathematical guarantee: the output is nearly the same whether or not any single individual was in the dataset. In training, DP-SGD clips per-example gradients and adds calibrated noise. The privacy budget ε quantifies the guarantee — smaller is stronger — and it is paid for in accuracy.</p>
+
+  <div class="panel">
+    <div class="panel-head"><div class="dots"><i></i><i></i><i></i></div><span class="p-title">The privacy/utility trade</span><span class="p-tag">Interactive</span></div>
+    <div class="panel-body">
+      <div class="svg-scroll"><svg id="dpSvg" class="diagram dp-svg" viewBox="0 0 640 190"></svg></div>
+      <div class="range-row"><label for="dpEps">Privacy budget ε</label><input type="range" id="dpEps" min="-1" max="1.6" step="0.05" value="0.5"><output id="dpEpsV"></output></div>
+      <div class="stats">
+        <div class="stat acc"><div class="k">Privacy strength</div><div class="v" id="dpPriv" style="font-size:16px">–</div></div>
+        <div class="stat good"><div class="k">Utility retained</div><div class="v" id="dpUtil" style="font-size:18px">–</div></div>
+        <div class="stat warn"><div class="k">Extra data needed</div><div class="v" id="dpData" style="font-size:18px">–</div></div>
+      </div>
+      <div class="callout" id="dpInfo" style="margin-top:12px"><div class="ico">🔐</div><div class="body"><p style="margin:0"></p></div></div>
+      <p class="small muted">Federated learning is a complementary tool: raw data never leaves the device, only updates do. It is not private by itself — updates leak information — so it is usually combined with secure aggregation and DP.</p>
+    </div>
+  </div>
+
+  <h2>Fairness, and why you can't have it all</h2>
+  <p>Three reasonable-sounding definitions, all of which someone will ask for:</p>
+
+  <div class="grid c3">
+    <div class="card feature reveal"><div class="f-ico">⚖️</div><h4>Demographic parity</h4><p>Equal positive rates across groups. “Approve the same share of each group.”</p></div>
+    <div class="card feature reveal"><div class="f-ico" style="background:var(--accent-2-soft)">🎯</div><h4>Equalised odds</h4><p>Equal true-positive and false-positive rates. “Equally accurate for everyone.”</p></div>
+    <div class="card feature reveal"><div class="f-ico" style="background:var(--green-soft)">📏</div><h4>Calibration by group</h4><p>A score of 0.7 means 70% for every group. “The number means the same thing.”</p></div>
+  </div>
+
+  <div class="callout danger">
+    <div class="ico">🧮</div>
+    <div class="body"><div class="title">The impossibility result</div>
+      <p>When base rates genuinely differ between groups, <b>you cannot satisfy calibration and equalised odds simultaneously</b> (except in degenerate cases). This is arithmetic, not a modelling failure — the same result that drove the COMPAS recidivism debate, where both sides were correctly citing different, mutually incompatible definitions. The engineering consequence: you must <i>choose</i> a fairness criterion, justify it in terms of the harm you're preventing, document the choice, and measure it continuously.</p></div>
+  </div>
+
+  <div class="panel">
+    <div class="panel-head"><div class="dots"><i></i><i></i><i></i></div><span class="p-title">Threshold choice and group outcomes</span><span class="p-tag">Interactive</span></div>
+    <div class="panel-body">
+      <div class="seg" id="fairSeg"><button data-v="single" class="active">One threshold for all</button><button data-v="parity">Equal approval rates</button><button data-v="odds">Equal error rates</button></div>
+      <div class="fair" id="fairBars" style="margin-top:12px"></div>
+      <div class="stats" style="margin-top:12px">
+        <div class="stat acc"><div class="k">Approval-rate gap</div><div class="v" id="fGapA" style="font-size:18px">–</div></div>
+        <div class="stat"><div class="k">False-positive-rate gap</div><div class="v" id="fGapF" style="font-size:18px">–</div></div>
+        <div class="stat good"><div class="k">Calibrated?</div><div class="v" id="fCal" style="font-size:16px">–</div></div>
+      </div>
+      <div class="callout" id="fairInfo" style="margin-top:12px"><div class="ico">⚖️</div><div class="body"><p style="margin:0"></p></div></div>
+      <p class="small muted">Note also: removing the protected attribute does <b>not</b> make a model fair. Postcode, device, name and purchase history are proxies, and the model will find them. Measure outcomes by group — which means you have to collect or infer group membership carefully and lawfully.</p>
+    </div>
+  </div>
+
+  <h2>Explainability</h2>
+  <div class="table-wrap">
+    <table class="t">
+      <thead><tr><th>Method</th><th>Answers</th><th>Caveat</th></tr></thead>
+      <tbody>
+        <tr><td><b>Global importance</b></td><td>Which features the model relies on overall</td><td>Correlated features share credit unpredictably (Chapter 6)</td></tr>
+        <tr><td><b>SHAP / LIME</b></td><td>Which features drove <i>this</i> prediction</td><td>Explains the model, not the world; expensive at scale</td></tr>
+        <tr><td><b>Counterfactual</b></td><td>“Approved if income were £2k higher” — actionable for the person</td><td>Often the most useful for an affected individual, and the hardest to generate honestly</td></tr>
+        <tr><td><b>Example-based</b></td><td>Similar cases and their outcomes</td><td>Intuitive; can leak information about other people</td></tr>
+        <tr><td><b>Rule extraction</b></td><td>A simple surrogate approximating the model</td><td>The surrogate is not the model; don't present it as one</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="callout tip">
+    <div class="ico">🗣️</div>
+    <div class="body"><div class="title">Explanations have an audience</div>
+      <p>A regulator wants documented process and evidence. A support agent wants a one-line reason they can say out loud. An affected customer wants to know what to change. An engineer wants to debug. These are four different artefacts, and shipping a SHAP plot to a customer satisfies none of them.</p></div>
+  </div>
+
+  <h2>Regulation you'll actually meet</h2>
+  <div class="tiers">
+    <div class="r ban"><b>Prohibited</b><span>Social scoring by public authorities, manipulative systems exploiting vulnerabilities, and certain biometric categorisation. Not a compliance exercise — you don't build these.</span></div>
+    <div class="r high"><b>High risk</b><span>Employment, credit, education, essential services, critical infrastructure, law enforcement. Requires risk management, data governance, technical documentation, logging, human oversight, accuracy and robustness evidence, and conformity assessment. This is where most enterprise ML lands.</span></div>
+    <div class="r"><b>Transparency</b><span>Chatbots must disclose they're AI; synthetic media must be labelled; deepfakes disclosed. Cheap to comply with if designed in, awkward to retrofit.</span></div>
+    <div class="r"><b>Minimal</b><span>Spam filters, recommendations, most internal tooling. Voluntary codes of practice — but sector rules (financial model risk management, medical device regulation, employment law) may still apply.</span></div>
+  </div>
+  <p class="small muted" style="margin-top:10px">Sector regulation usually bites before AI-specific regulation does: model risk management in banking, medical device rules for clinical tools, employment law for hiring tools. Ask “what regulates this <i>decision</i>?” before asking “what regulates AI?”.</p>
+
+  <h2>Governance that doesn't stop delivery</h2>
+  <div class="panel">
+    <div class="panel-head"><div class="dots"><i></i><i></i><i></i></div><span class="p-title">Pre-deployment checklist</span><span class="p-tag">Interactive</span></div>
+    <div class="panel-body">
+      <div class="checklist" id="govList"></div>
+      <div class="stats" style="margin-top:10px">
+        <div class="stat acc"><div class="k">Readiness</div><div class="v" id="govScore">–</div></div>
+        <div class="stat good"><div class="k">Verdict</div><div class="v" id="govVerdict" style="font-size:15px">–</div></div>
+      </div>
+      <div class="callout" id="govInfo" style="margin-top:12px"><div class="ico">📋</div><div class="body"><p style="margin:0"></p></div></div>
+    </div>
+  </div>
+
+  <div class="callout tip">
+    <div class="ico">⚙️</div>
+    <div class="body"><div class="title">Make governance a pipeline stage, not a committee</div>
+      <p>Most of this checklist is producible automatically from artefacts you already have: the model card from the registry (Chapter 31), slice metrics from evaluation, lineage from the pipeline, monitoring configuration from the deployment. Teams that generate governance evidence as a build artefact ship weekly and pass audits; teams that write documents by hand before each release do neither.</p></div>
+  </div>
+
+  <div class="callout danger"><div class="ico">⚠️</div><div class="body"><div class="title">Common mistakes</div>
+    <ul class="mb0">
+      <li><b>Dropping the protected attribute and declaring fairness.</b> Proxies remain; you've only lost the ability to measure.</li>
+      <li><b>Promising a fairness metric without checking compatibility</b> with the others you also promised.</li>
+      <li><b>Logging full prompts with personal data by default.</b> The logs become the largest privacy liability in the system.</li>
+      <li><b>No deletion story for models.</b> The request will arrive, and “we can't” is not an answer you want to give first.</li>
+      <li><b>Governance as a launch-day document.</b> If the evidence isn't generated by the pipeline, it will be invented from memory.</li>
+      <li><b>Assuming a vendor's model absolves you.</b> You remain the deployer, and the obligations attach to the decision you make.</li>
+    </ul></div></div>
+
+  <div class="callout interview"><div class="ico">🎤</div><div class="body"><div class="title">Interview drill</div>
+    <p class="small" style="margin:10px 0 0"><b>Warm-up:</b> A user exercises their right to erasure. What happens to your model?</p>
+    <details class="ans"><summary>How a strong answer sounds</summary><div>Immediately: delete from all stores, caches, feature stores, logs and backups per the documented process, and exclude the records from all future training sets — which requires that training sets are built from a filtered view rather than a frozen copy nobody can trace. For models already trained, exact unlearning generally means retraining, so the practical position — decided and documented in advance — is to record which model versions used the data, retrain on a defined cadence so exposure has a known lifetime, and rely on deduplication and privacy-preserving training to limit any individual's influence in the first place. If the data was genuinely high-risk, retraining sooner is the honest answer. What you must not do is discover this position during the request.</div></details>
+    <p class="small" style="margin:10px 0 0"><b>Deeper:</b> Your credit model is calibrated but has different false-positive rates across groups. Legal asks you to fix it. What do you say?</p>
+    <details class="ans"><summary>How a strong answer sounds</summary><div>That both properties can't hold when base rates differ — it's an arithmetic impossibility, not a bug — so the organisation has to choose which harm it is minimising and record that choice with its justification. I'd quantify the trade concretely: show approval rates, error rates and calibration by group under each option, and translate them into people affected. Equalising error rates means the score no longer means the same thing across groups, which has its own legal implications; keeping calibration means accepting the error-rate gap and mitigating the harm elsewhere — human review for borderline cases in the disadvantaged group, better data for that population, or a different decision policy. I'd also check whether the gap is driven by a feature acting as a proxy, and whether the label itself is biased, because that's a data problem masquerading as a fairness trade-off. Then document the decision, the evidence and the monitoring in the model card.</div></details>
+  </div></div>
+
+  <div class="takeaways">
+    <h3>🧠 Key takeaways</h3>
+    <ul>
+      <li>Personal data obligations follow through training and serving; decide the model-deletion position in advance.</li>
+      <li>Deduplication and canaries make memorisation measurable; DP and federated learning trade accuracy for guarantees.</li>
+      <li>Fairness definitions are mutually incompatible when base rates differ — choose, justify, document, monitor.</li>
+      <li>Removing the protected attribute hides the problem rather than fixing it.</li>
+      <li>Generate governance evidence from the pipeline so compliance and delivery speed aren't opposed.</li>
+    </ul>
+  </div>
+
+  <div class="quiz-wrap">
+    <h2>Check your understanding</h2>
+    <div class="quiz-score"></div>
+
+    <div class="quiz" data-answer="2">
+      <p class="q">You remove the protected attribute from the feature set. What have you achieved?</p>
+      <div class="opts">
+        <button class="opt">A provably fair model</button>
+        <button class="opt">Compliance with anti-discrimination law</button>
+        <button class="opt">Little — proxies remain, and you can no longer measure disparities</button>
+        <button class="opt">Demographic parity</button>
+      </div>
+      <div class="explain">Postcode, device, purchase history and name all correlate with protected attributes. You need the attribute to <i>measure</i> outcomes, even if the model doesn't use it as an input.</div>
+    </div>
+
+    <div class="quiz" data-answer="1">
+      <p class="q">Base rates differ between two groups. Which pair of fairness criteria is impossible to satisfy simultaneously?</p>
+      <div class="opts">
+        <button class="opt">Demographic parity and equal accuracy</button>
+        <button class="opt">Calibration by group and equalised odds</button>
+        <button class="opt">Calibration and demographic parity</button>
+        <button class="opt">All of them can be satisfied together</button>
+      </div>
+      <div class="explain">A formal impossibility result: with unequal base rates you can have calibrated scores or equal error rates, not both. The choice must be made and justified explicitly.</div>
+    </div>
+
+    <div class="quiz" data-answer="0">
+      <p class="q">What does a smaller ε mean in differential privacy?</p>
+      <div class="opts">
+        <button class="opt">Stronger privacy guarantee and more accuracy loss</button>
+        <button class="opt">Weaker privacy and better accuracy</button>
+        <button class="opt">Faster training</button>
+        <button class="opt">More training data required only</button>
+      </div>
+      <div class="explain">ε bounds how much any single individual can influence the output. Tighter bound, more noise, lower utility — usually recovered by training on more data.</div>
+    </div>
+
+    <div class="quiz" data-answer="3">
+      <p class="q">Which factor most increases the chance a model memorises a specific training string?</p>
+      <div class="opts">
+        <button class="opt">Short training runs</button>
+        <button class="opt">Small batch sizes</button>
+        <button class="opt">Low learning rate</button>
+        <button class="opt">The string appearing many times in the corpus</button>
+      </div>
+      <div class="explain">Duplication is the strongest known predictor. Near-duplicate removal reduces both compute waste and privacy exposure at once.</div>
+    </div>
+
+    <div class="quiz" data-answer="1">
+      <p class="q">Under risk-tiered AI regulation, which use is most likely “high risk”?</p>
+      <div class="opts">
+        <button class="opt">A product recommendation feed</button>
+        <button class="opt">A model that screens job applicants</button>
+        <button class="opt">A spam filter</button>
+        <button class="opt">An internal code assistant</button>
+      </div>
+      <div class="explain">Employment decisions affect people's access to livelihood, so they carry documentation, oversight and robustness obligations. Ask what regulates the <i>decision</i>, not the technology.</div>
+    </div>
+  </div>
+</main>
+<script src="assets/app.js"></script>
+<script>
+(function(){
+  const { $, $$, clamp } = ML;
+
+  /* ================= differential privacy ================= */
+  function dp() {
+    const eps = Math.pow(10, +$('#dpEps').value);
+    $('#dpEpsV').textContent = 'ε = ' + eps.toFixed(2);
+    const util = clamp(1 - 0.42 / (1 + eps * 1.6), 0, 1);
+    const X = (e) => 42 + (Math.log10(e) + 1) / 2.6 * 580, Y = (u) => 155 - u * 130;
+    let d = '';
+    for (let e = 0.1; e <= 40; e *= 1.05) d += (d ? 'L' : 'M') + X(e).toFixed(1) + ',' + Y(clamp(1 - 0.42 / (1 + e * 1.6), 0, 1)).toFixed(1) + ' ';
+    $('#dpSvg').innerHTML =
+      `<line stroke="var(--border-strong)" x1="42" y1="155" x2="628" y2="155"/><line stroke="var(--border-strong)" x1="42" y1="10" x2="42" y2="155"/>` +
+      `<path class="ln" style="stroke:var(--accent)" d="${d}"/>` +
+      `<circle cx="${X(eps)}" cy="${Y(util)}" r="6" fill="var(--pink)"/>` +
+      `<text x="270" y="176">privacy budget ε (log scale) →  weaker privacy</text><text x="2" y="14">utility</text>` +
+      [0.1, 0.5, 1, 4, 10, 40].map(e => `<text x="${X(e) - 8}" y="170">${e}</text>`).join('');
+    $('#dpPriv').textContent = eps < 1 ? '🔒 strong' : eps < 4 ? '🔐 moderate' : eps < 12 ? '⚠️ weak' : '🚩 nominal';
+    $('#dpUtil').textContent = (util * 100).toFixed(1) + '%';
+    $('#dpData').textContent = (1 / Math.max(0.05, util - 0.55) * 0.9).toFixed(1) + '×';
+    $('#dpInfo p').innerHTML = eps < 1
+      ? `<b>ε &lt; 1 is a genuinely strong guarantee</b> — close to “this model would look the same without any individual”. It costs real accuracy, and the usual remedy is more data: DP-SGD's noise is amortised over larger datasets, so privacy and scale are complements.`
+      : eps < 8
+        ? `<b>ε ≈ ${eps.toFixed(1)}</b> is the range most deployed systems use. The guarantee is meaningful but not airtight; state it explicitly in your documentation rather than claiming “differentially private” without a number — the number <i>is</i> the claim.`
+        : `<b>ε above ~10 is close to decorative.</b> You pay the engineering cost of DP-SGD and gain little formal protection. If you're here, either reduce ε and accept the utility cost, or be honest that your protection is procedural (access control, minimisation, deletion) rather than mathematical.`;
+  }
+  $('#dpEps').addEventListener('input', dp);
+  dp();
+
+  /* ================= fairness ================= */
+  const GROUPS = [
+    { n: 'Group A', base: 0.34, size: 7000 },
+    { n: 'Group B', base: 0.21, size: 3000 },
+  ];
+  function fair() {
+    const mode = $('#fairSeg').dataset.value || 'single';
+    // simple model: score ~ base rate + noise; threshold decides approval
+    const res = GROUPS.map(g => {
+      let thr = 0.5;
+      if (mode === 'parity') thr = g.base > 0.3 ? 0.56 : 0.40;
+      if (mode === 'odds') thr = g.base > 0.3 ? 0.50 : 0.455;
+      const approve = clamp(g.base * 1.8 - (thr - 0.4) * 1.6, 0.02, 0.95);
+      const tpr = clamp(0.80 - (thr - 0.4) * 1.1, 0.2, 0.98);
+      const fpr = clamp(0.19 - (thr - 0.5) * 0.9 + (g.base - 0.28) * 0.35, 0.01, 0.6);
+      return { ...g, thr, approve, tpr, fpr };
+    });
+    $('#fairBars').innerHTML = res.map(r =>
+      `<div class="grp"><span>${r.n}</span><div class="tk"><i style="width:${(r.approve * 100).toFixed(1)}%;background:var(--accent)"></i><i style="width:${(r.fpr * 100).toFixed(1)}%;background:var(--red)"></i></div><span class="v">thr ${r.thr.toFixed(2)}</span></div>`).join('') +
+      `<div class="small muted" style="margin-top:4px">teal = approval rate · red = false-positive rate</div>`;
+    const gapA = Math.abs(res[0].approve - res[1].approve), gapF = Math.abs(res[0].fpr - res[1].fpr);
+    $('#fGapA').textContent = (gapA * 100).toFixed(1) + ' pts';
+    $('#fGapF').textContent = (gapF * 100).toFixed(1) + ' pts';
+    $('#fCal').textContent = mode === 'single' ? '✅ yes' : '❌ no — different thresholds';
+    const notes = {
+      single: `<b>One threshold for everyone.</b> The score means the same thing for both groups (calibration holds), but because the underlying base rates differ, approval rates and error rates differ too. Many people call this fair; many others call it the opposite, and both are pointing at real properties.`,
+      parity: `<b>Equal approval rates</b> achieved by using different thresholds per group. Demographic parity now holds — and the score no longer means the same thing depending on which group you are in, which has its own legal and ethical problems. Note this is also explicitly unlawful in some jurisdictions and required in others.`,
+      odds: `<b>Equalised error rates.</b> False-positive and true-positive rates are matched, so the model is “equally accurate” for both groups — at the cost of calibration and of different approval rates. This is the choice that best matches “equal risk of being wronged”, and it is incompatible with the first option by arithmetic, not by implementation.`,
+    };
+    $('#fairInfo p').innerHTML = notes[mode] + ` <b>There is no setting of this control that makes all three gaps zero</b> — that is the impossibility result, on screen.`;
+  }
+  $('#fairSeg').addEventListener('segchange', fair);
+  fair();
+
+  /* ================= governance checklist ================= */
+  const GOV = [
+    { id: 'purpose', t: 'Documented purpose, intended use and explicit out-of-scope uses', on: true, w: 2 },
+    { id: 'legal', t: 'Lawful basis for the data, and licence/provenance for every training source', on: false, w: 3 },
+    { id: 'dpia', t: 'Risk assessment covering affected people and plausible harms', on: false, w: 2 },
+    { id: 'slices', t: 'Performance measured by group/slice, not just in aggregate', on: true, w: 3 },
+    { id: 'human', t: 'Human oversight defined: who can override, and how they are alerted', on: false, w: 2 },
+    { id: 'card', t: 'Model card with limitations, metrics and monitoring plan', on: true, w: 2 },
+    { id: 'lineage', t: 'Lineage: data → run → model version → deployment (Chapter 31)', on: true, w: 2 },
+    { id: 'monitor', t: 'Ongoing monitoring including fairness and drift, with owners', on: false, w: 2 },
+    { id: 'appeal', t: 'Route for an affected person to contest or appeal a decision', on: false, w: 3 },
+    { id: 'rollback', t: 'Tested rollback and an incident process', on: true, w: 1 },
+  ];
+  function gov() {
+    $('#govList').innerHTML = GOV.map(g =>
+      `<div class="r ${g.on ? 'on' : ''}" data-g="${g.id}"><span>${g.on ? '✅' : '⬜'}</span><span>${g.t}</span></div>`).join('');
+    $$('#govList .r').forEach(el => el.onclick = () => { const g = GOV.find(x => x.id === el.dataset.g); g.on = !g.on; gov(); });
+    const score = GOV.filter(g => g.on).reduce((s, g) => s + g.w, 0);
+    const total = GOV.reduce((s, g) => s + g.w, 0);
+    $('#govScore').textContent = score + ' / ' + total;
+    const missing = GOV.filter(g => !g.on).sort((a, b) => b.w - a.w);
+    const verdict = score === total ? '✅ ready' : score > total * 0.75 ? '⚠️ gaps' : '❌ not ready';
+    $('#govVerdict').textContent = verdict;
+    $('#govInfo p').innerHTML = missing.length
+      ? `Click items to toggle them. The highest-weight gaps are: <b>${missing.slice(0, 2).map(m => m.t.split(',')[0]).join('</b> and <b>')}</b>. For a high-risk use case, missing lawful basis or an appeal route is a launch blocker rather than a to-do — and most of the rest can be generated automatically from the registry and evaluation pipeline.`
+      : `✅ <b>Complete.</b> Every item here is producible from artefacts you already have if the pipeline is set up to emit them — which is what makes the difference between governance that costs a week per release and governance that costs nothing.`;
+  }
+  gov();
+})();
+</script>
+</body>
+</html>

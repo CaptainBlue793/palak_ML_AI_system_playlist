@@ -1,0 +1,315 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Case Study: Voice Assistant (ASR + TTS)</title>
+<link rel="stylesheet" href="assets/style.css">
+<script>try{var t=JSON.parse(localStorage.getItem('ml-theme'));if(t)document.documentElement.setAttribute('data-theme',t)}catch(e){}</script>
+<style>
+  .req { display:grid; grid-template-columns:repeat(auto-fit,minmax(160px,1fr)); gap:8px }
+  .req > div { padding:10px 12px; border-radius:12px; background:var(--surface-2); border:1px solid var(--border) }
+  .req b { display:block; font-size:11px; color:var(--muted); text-transform:uppercase; letter-spacing:.05em }
+  .req span { font-family:var(--mono); font-size:17px; font-weight:800 }
+  .voiceviz text { font-size:10px; fill:var(--text-2); font-family:var(--font); font-weight:600 }
+  .voiceviz .sub { font-size:8.5px; fill:var(--muted); font-family:var(--mono); font-weight:400 }
+  .tl { width:100%; height:200px }
+  .tl text { font-size:10px; fill:var(--muted); font-family:var(--mono) }
+  .ep { display:grid; gap:8px }
+  .ep .r { display:grid; grid-template-columns:160px 1fr; gap:12px; padding:11px 13px; border-radius:12px; background:var(--surface-2); border:1px solid var(--border); font-size:13.5px }
+  .ep .r b { font-family:var(--mono); color:var(--accent) }
+</style>
+</head>
+<body data-chapter="49">
+<main class="content">
+
+  <section class="hero">
+    <div class="eyebrow"><span class="pill accent">Chapter 49</span><span class="pill pink">Case Study</span><span class="pill">⏱ 50 min</span></div>
+    <h1>Case Study: <span class="grad">Voice Assistant</span></h1>
+    <p class="lead">A spoken assistant that has to feel like a conversation. Humans start replying about 200 ms after the other person stops talking, and they interrupt constantly. That single fact — not model quality — dictates the entire architecture: everything streams, everything is cancellable, and the hardest component is the one that decides when you have finished your sentence.</p>
+    <ul class="objectives">
+      <li>Budget an end-to-end turn against human conversational timing</li>
+      <li>Stream ASR, generation and speech synthesis so stages overlap</li>
+      <li>Solve endpointing — the decision that makes or breaks the feel</li>
+      <li>Support barge-in with echo cancellation and total cancellation</li>
+      <li>Evaluate a system where word error rate hides the failures that matter</li>
+    </ul>
+  </section>
+
+  <h2>1 · Requirements</h2>
+  <div class="req">
+    <div><b>Daily users</b><span>4M</span></div>
+    <div><b>Turns/day</b><span>90M</span></div>
+    <div><b>Peak concurrent calls</b><span>~60k</span></div>
+    <div><b>Response latency</b><span>&lt; 700 ms p50</span></div>
+    <div><b>Barge-in stop</b><span>&lt; 150 ms</span></div>
+    <div><b>Languages</b><span>12</span></div>
+  </div>
+  <p class="small muted" style="margin-top:10px"><b>In scope:</b> the audio path, ASR, endpointing, generation, TTS, barge-in, evaluation, cost. <b>Out of scope:</b> wake-word detection on device, telephony carrier integration, the skills and tool catalogue itself (Chapter 22).</p>
+
+  <div class="callout tip">
+    <div class="ico">🎯</div>
+    <div class="body"><div class="title">Metrics</div>
+      <p><b>Primary:</b> task completion per conversation — did the user get what they asked for without repeating themselves. <b>Conversational quality:</b> response latency at p50 and p95, false-endpoint rate (cut the user off), late-endpoint rate (awkward pause), barge-in success, and the repeat rate, which is the single best proxy for "it misheard me". <b>Component quality:</b> word error rate overall <em>and</em> on entities, TTS naturalness ratings, wake-to-first-word latency. <b>Guardrails:</b> cost per conversation minute, dropped-audio rate.</p></div>
+  </div>
+
+  <div class="callout warn">
+    <div class="ico">🗣️</div>
+    <div class="body"><div class="title">The number that sets the architecture</div>
+      <p>In human conversation the gap between one person finishing and the next starting averages around 200 ms, and gaps beyond about a second read as hesitation or as the system being broken. That budget must cover endpoint detection, the last of the transcription, the model's first words, and speech synthesis — for a pipeline that in its naive form takes several seconds. Every technique in this chapter exists to overlap stages that a batch design would run in sequence.</p></div>
+  </div>
+
+  <h2>2 · One turn, end to end</h2>
+  <div class="panel">
+    <div class="panel-head"><div class="dots"><i></i><i></i><i></i></div><span class="p-title">From microphone to spoken reply</span><span class="p-tag">Step-through</span></div>
+    <div class="panel-body svg-scroll">
+      <svg id="vSvg" class="diagram voiceviz" viewBox="0 0 900 310">
+        <defs><marker id="vc49" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" class="arrow-head"/></marker></defs>
+        <path id="v-e1" class="edge dimmable" d="M110,55 L160,55" marker-end="url(#vc49)"/>
+        <path id="v-e2" class="edge dimmable" d="M280,55 L330,55" marker-end="url(#vc49)"/>
+        <path id="v-e3" class="edge dimmable" d="M450,55 L500,55" marker-end="url(#vc49)"/>
+        <path id="v-e4" class="edge dimmable" d="M620,55 L670,55" marker-end="url(#vc49)"/>
+        <path id="v-e5" class="edge dimmable" d="M745,80 L745,150" marker-end="url(#vc49)"/>
+        <path id="v-e6" class="edge dimmable" d="M660,175 L65,175 L65,80" marker-end="url(#vc49)"/>
+        <path id="v-ep" class="edge dimmable dash" d="M390,80 L390,245" marker-end="url(#vc49)"/>
+        <path id="v-barge" class="edge dimmable dash" d="M170,245 L170,80" marker-end="url(#vc49)"/>
+        <g id="v-mic" class="node dimmable" transform="translate(20,30)"><rect width="90" height="50" rx="11"/><text x="45" y="22" text-anchor="middle">Device</text><text x="45" y="38" text-anchor="middle" class="sub">AEC · VAD · opus</text></g>
+        <g id="v-asr" class="node dimmable" transform="translate(160,30)"><rect width="120" height="50" rx="11"/><text x="60" y="22" text-anchor="middle">Streaming ASR</text><text x="60" y="38" text-anchor="middle" class="sub">partials every 120 ms</text></g>
+        <g id="v-end" class="node dimmable" transform="translate(330,30)"><rect width="120" height="50" rx="11"/><text x="60" y="22" text-anchor="middle">Endpointer</text><text x="60" y="38" text-anchor="middle" class="sub">acoustic + semantic</text></g>
+        <g id="v-llm" class="node dimmable" transform="translate(500,30)"><rect width="120" height="50" rx="11"/><text x="60" y="22" text-anchor="middle">Dialogue model</text><text x="60" y="38" text-anchor="middle" class="sub">streaming · tools</text></g>
+        <g id="v-tts" class="node dimmable" transform="translate(670,30)"><rect width="150" height="50" rx="11"/><text x="75" y="22" text-anchor="middle">Streaming TTS</text><text x="75" y="38" text-anchor="middle" class="sub">chunk by clause</text></g>
+        <g id="v-play" class="node dimmable" transform="translate(660,150)"><rect width="170" height="50" rx="11"/><text x="85" y="22" text-anchor="middle">Playback</text><text x="85" y="38" text-anchor="middle" class="sub">jitter buffer</text></g>
+        <g id="v-int" class="node dimmable" transform="translate(90,245)"><rect width="160" height="46" rx="11"/><text x="80" y="20" text-anchor="middle">Barge-in monitor</text><text x="80" y="36" text-anchor="middle" class="sub">cancel everything</text></g>
+        <g id="v-ctx" class="node dimmable" transform="translate(310,245)"><rect width="170" height="46" rx="11"/><text x="85" y="20" text-anchor="middle">Session state</text><text x="85" y="36" text-anchor="middle" class="sub">history · slots · device</text></g>
+      </svg>
+    </div>
+    <div class="stepper" data-diagram="vSvg">
+      <ol class="steps">
+        <li data-title="Capture on device" data-on="v-mic">Acoustic echo cancellation first — without it the assistant hears its own voice and interrupts itself. Then voice activity detection to avoid streaming silence, and a low-bitrate codec. Audio leaves in 20 ms frames over a persistent connection; a request-response API cannot express a conversation.</li>
+        <li data-title="Streaming recognition" data-on="v-mic v-asr v-e1" data-packet="v-mic>v-asr">A streaming ASR model emits partial hypotheses every ~120 ms and revises them as more audio arrives. Partials are what make the rest possible: the dialogue model can begin reading the sentence before the user has finished saying it.</li>
+        <li data-title="Decide the user has finished" data-on="v-asr v-end v-e2 v-ctx v-ep" data-packet="v-asr>v-end" data-color="var(--amber)">The hardest component in the system. A pause is not the same as an ending — people pause mid-sentence to think, and stop abruptly when they are done. Combine acoustic silence with a semantic judgement of whether the transcript so far is a complete request, and adapt the threshold to context and to the speaker.</li>
+        <li data-title="Start generating early" data-on="v-end v-llm v-e3" data-packet="v-end>v-llm" data-color="var(--accent-2)">Speculative start: on a likely endpoint, begin prefill against the partial transcript. If the user carries on, cancel and restart — wasted compute is much cheaper than a slow reply. Once the endpoint is confirmed, only the last few tokens need prefilling, so first output arrives in tens of milliseconds rather than hundreds.</li>
+        <li data-title="Speak the first clause immediately" data-on="v-llm v-tts v-e4" data-packet="v-llm>v-tts" data-color="var(--green)">Do not wait for the full answer. Chunk the token stream at clause boundaries and synthesise each chunk as it completes. The first spoken word leaves while the model is still deciding how the sentence ends — this is the largest single latency win in the pipeline, and it is entirely a pipelining trick.</li>
+        <li data-title="Play with a small jitter buffer" data-on="v-tts v-play v-e5 v-mic v-e6" data-packet="v-tts>v-play">Audio must never gap mid-word, so a small buffer absorbs network variance. Too large and you have simply moved the latency to the end; too small and the reply stutters, which users find far worse than a slightly later start.</li>
+        <li data-title="Handle the interruption" data-on="v-int v-barge v-play" data-packet="v-int>v-asr" data-color="var(--pink)">When the user speaks over the reply, stop playback within ~150 ms, cancel generation and synthesis, and — crucially — record how much of the reply was actually heard. The conversation history must reflect what the user experienced, not what the model produced.</li>
+        <li data-title="Carry the state forward" data-on="v-ctx">Transcript, resolved entities, tool results, device context and what was actually spoken. Voice sessions are long and heavily anaphoric — "that one", "the second thing" — so session state does more work here than in a text product.</li>
+      </ol>
+    </div>
+  </div>
+
+  <h2>3 · Deep dive: spending the 700 ms</h2>
+  <div class="panel">
+    <div class="panel-head"><div class="dots"><i></i><i></i><i></i></div><span class="p-title">Response latency by architecture</span><span class="p-tag">Interactive</span></div>
+    <div class="panel-body">
+      <div class="seg" id="vSeg"><button data-v="batch" class="active">Batch pipeline</button><button data-v="stream">Streaming ASR + TTS</button><button data-v="spec">+ speculative start</button><button data-v="s2s">Speech-to-speech model</button></div>
+      <div class="svg-scroll"><svg id="tlSvg" class="diagram tl" viewBox="0 0 640 200"></svg></div>
+      <div class="stats">
+        <div class="stat acc"><div class="k">Time to first sound</div><div class="v" id="vLat" style="font-size:18px">–</div></div>
+        <div class="stat good"><div class="k">Feels like</div><div class="v" id="vFeel" style="font-size:15px">–</div></div>
+        <div class="stat warn"><div class="k">Wasted compute</div><div class="v" id="vWaste" style="font-size:18px">–</div></div>
+        <div class="stat bad"><div class="k">Cost per minute</div><div class="v" id="vCost" style="font-size:18px">–</div></div>
+      </div>
+      <div class="callout" id="vInfo" style="margin-top:12px"><div class="ico">⏱️</div><div class="body"><p style="margin:0"></p></div></div>
+    </div>
+  </div>
+
+  <h2>4 · Deep dive: endpointing</h2>
+  <p>Every other component has a benchmark. This one is judged entirely by feel, and it fails in two directions that require opposite fixes.</p>
+  <div class="ep">
+    <div class="r"><b>Too eager</b><span>The assistant interrupts mid-sentence. Users pick this up immediately, start speaking faster and more defensively, and the experience degrades further. Most common with fixed silence thresholds under 500 ms, and with speakers who pause to think — which correlates with age, accent and cognitive load, so a global threshold is quietly unfair.</span></div>
+    <div class="r"><b>Too slow</b><span>An awkward gap after every request. Less alarming than being cut off, but it is the difference between a conversation and a kiosk, and it compounds across a multi-turn session.</span></div>
+    <div class="r"><b>Acoustic signal</b><span>Silence duration, energy envelope, and prosody — a falling pitch contour is a strong completion cue, a rising one usually is not. Cheap, fast, language-dependent.</span></div>
+    <div class="r"><b>Semantic signal</b><span>Is the transcript so far a complete request? “Set a timer for” is obviously unfinished; “set a timer for ten minutes” is obviously done. A small classifier over the running partial transcript, which is why partials matter beyond display.</span></div>
+    <div class="r"><b>Context</b><span>After a question from the assistant, wait longer — the user is composing an answer. In a dictation mode, wait much longer. Mid-list (“add milk, eggs…”) the comma prosody says more is coming.</span></div>
+    <div class="r"><b>The escape hatch</b><span>Speculative start makes eager endpointing cheap to be wrong about: begin generating, and cancel if the user continues. This converts an accuracy problem into a compute problem, and compute is the easier one to buy.</span></div>
+  </div>
+
+  <div class="callout tip">
+    <div class="ico">🔊</div>
+    <div class="body"><div class="title">Barge-in is a distributed cancellation problem</div>
+      <p>When the user speaks over the assistant, four things must stop nearly at once: playback, synthesis, token generation, and any tool call in flight. Playback is local and easy. The rest are on a server that may be several hops away, so the cancel signal has to travel the same fast path as the audio, and the generation scheduler has to honour it — an abandoned stream that keeps decoding costs money and, worse, can deliver audio after the user has moved on.</p>
+      <p>Then there is the subtle part: the conversation history must record <em>what the user heard</em>, not what was generated. If the assistant produced three sentences and the user interrupted after four words, the model's next turn must be conditioned on those four words. Get this wrong and the assistant refers confidently to information it appeared to give but never actually spoke — one of the strangest-feeling bugs in a voice product, and one that no component test catches.</p></div>
+  </div>
+
+  <h2>5 · Evaluating a voice system</h2>
+  <div class="table-wrap">
+    <table class="t">
+      <thead><tr><th>Layer</th><th>Measure</th><th>What it misses</th></tr></thead>
+      <tbody>
+        <tr><td>ASR</td><td>Word error rate by language, accent, noise condition</td><td>Averages hide the failures that matter — one wrong contact name ruins the turn while ten wrong filler words do not</td></tr>
+        <tr><td>ASR, entities</td><td>Error rate on names, numbers, addresses, app names</td><td>The metric that actually predicts task failure; always measure it separately</td></tr>
+        <tr><td>Endpointing</td><td>False-cut rate, median added delay</td><td>Only meaningful sliced by speaker and context; a global threshold is unfair to slower speakers</td></tr>
+        <tr><td>Dialogue</td><td>Task completion, tool-call correctness</td><td>Text evaluations transfer poorly — spoken requests are shorter, messier and more anaphoric</td></tr>
+        <tr><td>TTS</td><td>Naturalness ratings, pronunciation of names and numbers</td><td>Averages hide the catastrophes: a mispronounced user name is remembered long after a hundred good sentences</td></tr>
+        <tr><td>End to end</td><td>Repeat rate, abandonment, task completion per conversation</td><td>The only numbers that capture the pipeline's interactions — and the only ones worth shipping on</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="small muted" style="margin-top:8px">Evaluate on real acoustic conditions: a kitchen with a radio on, a car at speed, a phone on speaker across a room. Clean-audio benchmarks are where voice systems look finished and field recordings are where they turn out not to be.</p>
+
+  <h2>6 · Capacity and cost</h2>
+  <div class="table-wrap">
+    <table class="t">
+      <thead><tr><th>Quantity</th><th>Estimate</th><th>Notes</th></tr></thead>
+      <tbody>
+        <tr><td>Audio ingested</td><td>~250k hours/day</td><td>90M turns averaging ~10 s of user speech</td></tr>
+        <tr><td>ASR compute</td><td>~900 GPUs</td><td>Streaming models are small; batching across sessions is what makes it affordable</td></tr>
+        <tr><td>Dialogue model</td><td>~1,400 GPUs</td><td>Short prompts, short answers — spoken replies are far shorter than written ones</td></tr>
+        <tr><td>TTS</td><td>~700 GPUs</td><td>Neural vocoding, chunked; the quality-per-millisecond trade is steep</td></tr>
+        <tr><td>Speculative starts wasted</td><td>~18% of prefills</td><td>The price of eager endpointing, and it is worth paying</td></tr>
+        <tr><td>Cost per conversation minute</td><td>~£0.008</td><td>Roughly split ASR 25%, dialogue 45%, TTS 30%</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h2>7 · What breaks</h2>
+  <div class="table-wrap">
+    <table class="t">
+      <thead><tr><th>Failure</th><th>Symptom</th><th>Response</th></tr></thead>
+      <tbody>
+        <tr><td>Echo cancellation degrades</td><td>Assistant interrupts itself; barge-in fires constantly</td><td>Monitor self-barge rate per device model; it is an audio bug, not a model bug</td></tr>
+        <tr><td>Endpointer tuned on staff speech</td><td>Cuts off slower speakers and some accents</td><td>Slice endpointing metrics by speaker cohort; adapt thresholds per user</td></tr>
+        <tr><td>Cancel signal not honoured</td><td>Audio plays after the user moved on; cost rises</td><td>Propagate cancellation to the generation scheduler; alert on orphaned streams</td></tr>
+        <tr><td>Jitter buffer too small</td><td>Stuttering replies on mobile networks</td><td>Adaptive buffering; prefer a slightly later start to a broken one</td></tr>
+        <tr><td>History records unheard speech</td><td>Assistant refers to things it never actually said</td><td>Truncate history at the interruption point, always</td></tr>
+        <tr><td>Entity recognition regresses</td><td>Task failures rise while WER looks flat</td><td>Track entity error rate as its own release gate</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="callout interview"><div class="ico">🎤</div><div class="body"><div class="title">Interview drill</div>
+    <p class="small" style="margin:10px 0 0"><b>Follow-up:</b> “Users say it interrupts them. Your endpointer's false-cut rate is 2% and hasn't changed. Explain.”</p>
+    <details class="ans"><summary>How a strong answer sounds</summary><div>Two percent as an average almost certainly hides a distribution. I would slice it: by speaker — some people pause mid-sentence far more, and that correlates with age, accent and speaking a non-native language, so a global silence threshold cuts off some cohorts several times more often; by context — after the assistant asks a question the user is composing, so the same threshold is too aggressive; by acoustic condition, since background noise changes what the voice activity detector sees; and by utterance type, because lists and dictation need much longer waits. I would also check whether "interrupts me" is really an endpointing complaint at all: failing echo cancellation makes the assistant barge in on itself, and a mis-tuned barge-in threshold makes background speech stop playback, both of which users describe the same way. The fix is per-cohort and per-context thresholds with an adaptive component, plus speculative start so that being eager is cheap to get wrong — and I would replace the global rate with a dashboard sliced by cohort, since the average was the thing hiding this.</div></details>
+    <p class="small" style="margin:10px 0 0"><b>Follow-up:</b> “Would a single speech-to-speech model remove all of this complexity?”</p>
+    <details class="ans"><summary>How a strong answer sounds</summary><div>It removes some of it and moves the rest. Going straight from audio to audio drops two serialisation points and can preserve tone, emotion and overlapping speech that a transcript throws away, and the latency is genuinely better. What it does not remove: endpointing and barge-in still exist, because they are properties of conversation rather than of the pipeline; you still need cancellation; and you lose the transcript as a debugging, logging and evaluation surface, which is a real operational cost — with a cascade I can tell whether a failure was mishearing or misunderstanding, and with an end-to-end model I often cannot. It is also harder to attach tools, to enforce policy on the text before it is spoken, and to support twelve languages at uneven data volumes. In practice I would run it where its strengths pay — casual conversational turns, low-latency chit-chat — and keep the cascade for anything involving tool calls, entities or compliance, which is the same tiering answer as in the other case studies.</div></details>
+  </div></div>
+
+  <div class="takeaways">
+    <h3>🧠 Key takeaways</h3>
+    <ul>
+      <li>Human turn-taking timing sets the budget; every stage must stream so that stages overlap rather than queue.</li>
+      <li>Synthesising the first clause while the model is still generating is the largest single latency win available.</li>
+      <li>Endpointing is the hardest component, needs acoustic plus semantic signals, and must be measured per cohort — averages hide unfairness.</li>
+      <li>Speculative start converts an endpointing accuracy problem into a compute problem, which is the easier one to buy your way out of.</li>
+      <li>Barge-in is distributed cancellation, and the history must record what the user actually heard.</li>
+    </ul>
+  </div>
+
+  <div class="quiz-wrap">
+    <h2>Check your understanding</h2>
+    <div class="quiz-score"></div>
+
+    <div class="quiz" data-answer="1">
+      <p class="q">Why synthesise speech clause by clause instead of waiting for the full response?</p>
+      <div class="opts">
+        <button class="opt">It improves pronunciation accuracy</button>
+        <button class="opt">The first words can be spoken while the model is still generating the rest, overlapping two stages that would otherwise run in sequence</button>
+        <button class="opt">It reduces total GPU cost</button>
+        <button class="opt">It is required for barge-in</button>
+      </div>
+      <div class="explain">Pure pipelining. Nothing about the answer changes; the user simply hears it seconds earlier, which is the difference between a conversation and a kiosk.</div>
+    </div>
+
+    <div class="quiz" data-answer="2">
+      <p class="q">Why is a fixed silence threshold a poor endpointer?</p>
+      <div class="opts">
+        <button class="opt">Silence cannot be detected reliably</button>
+        <button class="opt">It requires too much compute</button>
+        <button class="opt">Pausing to think is not the same as finishing, and how much people pause varies by speaker and context — so one threshold is both too eager and too slow</button>
+        <button class="opt">It only works for one language</button>
+      </div>
+      <div class="explain">Combine acoustic silence with a semantic judgement of whether the request is complete, and adapt by context and speaker. A global threshold is quietly unfair to slower speakers.</div>
+    </div>
+
+    <div class="quiz" data-answer="0">
+      <p class="q">What does speculative start buy you?</p>
+      <div class="opts">
+        <button class="opt">It makes an eager endpoint cheap to be wrong about — generation begins early and is cancelled if the user continues</button>
+        <button class="opt">It removes the need for streaming ASR</button>
+        <button class="opt">It lowers word error rate</button>
+        <button class="opt">It eliminates the jitter buffer</button>
+      </div>
+      <div class="explain">Around 18% of prefills are wasted, and that is a good trade: compute is easier to buy than endpointing accuracy.</div>
+    </div>
+
+    <div class="quiz" data-answer="3">
+      <p class="q">After a barge-in, what must the conversation history contain?</p>
+      <div class="opts">
+        <button class="opt">The full generated response, for completeness</button>
+        <button class="opt">Nothing from the interrupted turn</button>
+        <button class="opt">The response plus an interruption marker</button>
+        <button class="opt">Only the part the user actually heard before interrupting</button>
+      </div>
+      <div class="explain">Otherwise the assistant refers confidently to information it never spoke — a bug that feels uncanny to users and that no component test catches.</div>
+    </div>
+
+    <div class="quiz" data-answer="2">
+      <p class="q">Why track entity error rate separately from word error rate?</p>
+      <div class="opts">
+        <button class="opt">Entities are harder to tokenize</button>
+        <button class="opt">It is cheaper to compute</button>
+        <button class="opt">One wrong name or number fails the whole task, while many wrong filler words change nothing — and the average hides that</button>
+        <button class="opt">Because WER cannot be measured per language</button>
+      </div>
+      <div class="explain">Task success depends on names, numbers and addresses. Entity error rate predicts it; overall WER can improve while task completion falls.</div>
+    </div>
+  </div>
+</main>
+<script src="assets/app.js"></script>
+<script>
+(function(){
+  const { $ } = ML;
+
+  // each stage: [label, start ms, duration ms, colour]
+  const MODES = {
+    batch: {
+      total: 2950, waste: '0%', cost: 0.011, feel: '🚩 a kiosk',
+      stages: [['record until silence', 0, 800, 'var(--muted)'], ['ASR (full utterance)', 800, 520, 'var(--accent-2)'], ['generate full answer', 1320, 1180, 'var(--amber)'], ['synthesise all audio', 2500, 450, 'var(--pink)']],
+      note: `🚩 <b>Batch pipeline.</b> Each stage waits for the one before it to finish. Over two seconds of silence after the user stops talking — ten times the conversational budget, and users respond by repeating themselves, which starts the turn over. Every component here could be state of the art and the product would still feel broken.`,
+    },
+    stream: {
+      total: 1180, waste: '0%', cost: 0.010, feel: '⚠️ noticeably slow',
+      stages: [['record + stream ASR', 0, 800, 'var(--accent-2)'], ['endpoint decision', 800, 260, 'var(--amber)'], ['prefill + first tokens', 1060, 90, 'var(--green)'], ['first clause spoken', 1150, 30, 'var(--pink)']],
+      note: `⚠️ <b>Streaming ASR and TTS.</b> Transcription now happens <em>while</em> the user speaks, and speech starts at the first clause boundary rather than at the end of the answer. Response time drops from 2.15 s to about 380 ms after the user stops — the two big pipelining wins, and they cost nothing but engineering. What remains is dominated by the endpoint decision.`,
+    },
+    spec: {
+      total: 960, waste: '18%', cost: 0.012, feel: '✅ conversational',
+      stages: [['record + stream ASR', 0, 800, 'var(--accent-2)'], ['speculative prefill', 690, 180, 'var(--green)'], ['endpoint confirmed', 870, 60, 'var(--amber)'], ['first clause spoken', 930, 30, 'var(--pink)']],
+      note: `✅ <b>Speculative start.</b> Prefill begins on the <em>likely</em> endpoint, overlapping the endpoint decision itself. When the guess is right — about 82% of the time — only the final tokens need prefilling and the reply starts around 160 ms after the user stops, which is inside human turn-taking range. When it is wrong, the work is discarded. Slightly higher cost, decisively better feel.`,
+    },
+    s2s: {
+      total: 890, waste: '15%', cost: 0.019, feel: '✅ conversational',
+      stages: [['audio in, continuous', 0, 800, 'var(--accent-2)'], ['endpoint + generate', 720, 130, 'var(--green)'], ['audio out', 850, 40, 'var(--pink)']],
+      note: `✅ <b>Speech to speech.</b> One model consumes audio and emits audio, removing two serialisation points and preserving tone and emphasis that a transcript discards. Latency is the best of the four. The costs are operational rather than architectural: no transcript to debug, log, evaluate or apply text policy to; harder tool integration; and uneven quality across twelve languages. Endpointing and barge-in do not go away — they are properties of conversation, not of the pipeline.`,
+    },
+  };
+
+  function draw() {
+    const m = MODES[$('#vSeg').dataset.value || 'batch'];
+    const scale = 560 / 3000;
+    const x0 = 40;
+    let out = '';
+    m.stages.forEach((s, i) => {
+      const y = 22 + i * 34;
+      const x = x0 + s[1] * scale, w = Math.max(3, s[2] * scale);
+      out += `<rect x="${x.toFixed(1)}" y="${y}" width="${w.toFixed(1)}" height="22" rx="6" fill="${s[3]}" opacity=".85"/>`;
+      out += `<text x="${(x + w + 8).toFixed(1)}" y="${y + 16}" style="fill:var(--text-2);font-size:9.5px">${s[0]}</text>`;
+    });
+    const ex = x0 + 800 * scale;
+    out += `<line x1="${ex.toFixed(1)}" y1="14" x2="${ex.toFixed(1)}" y2="168" stroke="var(--red)" stroke-dasharray="4 4"/>`;
+    out += `<text x="${(ex + 6).toFixed(1)}" y="180" style="fill:var(--red);font-size:9px">user stops speaking</text>`;
+    const gap = m.total - 800;
+    out += `<text x="40" y="180" style="fill:var(--text-2);font-weight:700;font-size:12px">${gap} ms of silence before the reply</text>`;
+    $('#tlSvg').innerHTML = out;
+    $('#vLat').textContent = gap + ' ms';
+    $('#vFeel').textContent = m.feel;
+    $('#vWaste').textContent = m.waste;
+    $('#vCost').textContent = '£' + m.cost.toFixed(3);
+    $('#vInfo p').innerHTML = m.note;
+  }
+  $('#vSeg').addEventListener('segchange', draw);
+  draw();
+})();
+</script>
+</body>
+</html>

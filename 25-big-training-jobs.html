@@ -1,0 +1,363 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Running Big Training Jobs</title>
+<link rel="stylesheet" href="assets/style.css">
+<script>try{var t=JSON.parse(localStorage.getItem('ml-theme'));if(t)document.documentElement.setAttribute('data-theme',t)}catch(e){}</script>
+<style>
+  .ckpt-svg, .run-svg { width:100% }
+  .ckpt-svg { height:220px }
+  .ckpt-svg .ln { fill:none; stroke:var(--accent); stroke-width:2.8 }
+  .ckpt-svg .mark { stroke:var(--pink); stroke-dasharray:4 4; stroke-width:1.5 }
+  .ckpt-svg text, .run-svg text { font-size:10.5px; fill:var(--muted); font-family:var(--mono) }
+  .run-svg { height:260px }
+  .run-svg .loss { fill:none; stroke:var(--accent); stroke-width:2.2 }
+  .run-svg .evt { stroke-width:2 }
+  .timeline-log { font-family:var(--mono); font-size:12px; max-height:200px; overflow:auto; background:var(--surface-2); border:1px solid var(--border); border-radius:12px; padding:10px }
+  .timeline-log div { padding:2px 0; border-bottom:1px dashed var(--border) }
+  .timeline-log .ok { color:var(--green) } .timeline-log .warn { color:var(--amber) } .timeline-log .err { color:var(--red) } .timeline-log .info { color:var(--muted) }
+  .dash { display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:8px }
+  .dash > div { padding:10px 12px; border-radius:12px; border:1px solid var(--border); background:var(--surface-2) }
+  .dash b { display:block; font-size:11px; color:var(--muted); text-transform:uppercase; letter-spacing:.05em }
+  .dash span { font-family:var(--mono); font-size:19px; font-weight:800 }
+  .dash .good span { color:var(--green) } .dash .bad span { color:var(--red) } .dash .warn span { color:var(--amber) }
+</style>
+</head>
+<body data-chapter="25">
+<main class="content">
+
+  <section class="hero">
+    <div class="eyebrow"><span class="pill accent">Chapter 25</span><span class="pill">Advanced</span><span class="pill">⏱ 45 min</span></div>
+    <h1>Running Big <span class="grad">Training Jobs</span></h1>
+    <p class="lead">A month-long run on a thousand GPUs is an operations problem wearing a research hat. Hardware will fail, the loss will spike at 3am, and the difference between a successful run and a wasted million is checkpoint hygiene, monitoring and a rehearsed playbook.</p>
+    <ul class="objectives">
+      <li>Choose a checkpoint interval from failure rate and checkpoint cost</li>
+      <li>Recognise the standard failure modes and their signatures</li>
+      <li>Respond to a loss spike without destroying the run</li>
+      <li>Build the dashboard that tells you a run is healthy</li>
+      <li>Make a run resumable, elastic and reproducible enough</li>
+    </ul>
+  </section>
+
+  <h2>At scale, failure is the steady state</h2>
+  <p>If one GPU fails on average every 50,000 hours, a 1,024-GPU job sees a failure roughly <b>every two days</b> — and that's before network flaps, storage hiccups, thermal events and the job that hangs because one rank took a different branch. The design goal is not to avoid failures; it is to make them cheap.</p>
+
+  <div class="table-wrap">
+    <table class="t">
+      <thead><tr><th>Failure</th><th>Signature</th><th>Response</th></tr></thead>
+      <tbody>
+        <tr><td><b>Node/GPU hardware fault</b></td><td>Xid errors, ECC counts, a rank vanishes</td><td>Cordon the node, restart from checkpoint on a spare, file it</td></tr>
+        <tr><td><b>NCCL hang</b></td><td>All ranks alive, zero progress, collective timeout</td><td>Set collective timeouts; dump per-rank stack traces; look for rank-dependent control flow</td></tr>
+        <tr><td><b>Straggler</b></td><td>Step time up 20–40%, one rank always last</td><td>Find it by per-rank step timing; drain the node — one slow GPU taxes all of them</td></tr>
+        <tr><td><b>Silent data corruption</b></td><td>Loss diverges on one rank; gradient norm anomalies</td><td>Checksum checkpoints, compare rank losses, run hardware diagnostics</td></tr>
+        <tr><td><b>Loss spike</b></td><td>Loss jumps 2–10×, often with a gradient-norm spike first</td><td>See the playbook below — do not just restart and hope</td></tr>
+        <tr><td><b>Storage full / slow</b></td><td>Checkpoint write times climbing</td><td>Retention policy, async writes, separate checkpoint tier</td></tr>
+        <tr><td><b>Data loader stall</b></td><td>MFU sags, GPU gaps, no error</td><td>Prefetch depth, shard count, resumable iterator state</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h2>How often should you checkpoint?</h2>
+  <p>Checkpoint too rarely and a failure costs hours of recomputation. Checkpoint too often and you spend the run writing to disk. There's an optimum, and it's worth computing rather than guessing.</p>
+
+  <div class="panel">
+    <div class="panel-head"><div class="dots"><i></i><i></i><i></i></div><span class="p-title">Checkpoint interval optimizer</span><span class="p-tag">Interactive</span></div>
+    <div class="panel-body">
+      <div class="range-row"><label for="ckMtbf">Mean time between failures (hours)</label><input type="range" id="ckMtbf" min="1" max="200" step="1" value="36"><output id="ckMtbfV"></output></div>
+      <div class="range-row"><label for="ckCost">Checkpoint write time (minutes)</label><input type="range" id="ckCost" min="0.5" max="30" step="0.5" value="4"><output id="ckCostV"></output></div>
+      <div class="range-row"><label for="ckRestart">Restart overhead (minutes)</label><input type="range" id="ckRestart" min="1" max="60" step="1" value="12"><output id="ckRestartV"></output></div>
+      <div class="range-row"><label for="ckInt">Your checkpoint interval (minutes)</label><input type="range" id="ckInt" min="5" max="600" step="5" value="60"><output id="ckIntV"></output></div>
+      <div class="svg-scroll"><svg id="ckSvg" class="diagram ckpt-svg" viewBox="0 0 640 220"></svg></div>
+      <div class="stats">
+        <div class="stat acc"><div class="k">Optimal interval</div><div class="v" id="ckOpt" style="font-size:18px">–</div></div>
+        <div class="stat"><div class="k">Time lost at your setting</div><div class="v" id="ckLoss" style="font-size:18px">–</div></div>
+        <div class="stat good"><div class="k">Effective throughput</div><div class="v" id="ckEff" style="font-size:18px">–</div></div>
+        <div class="stat warn"><div class="k">Cost of the gap (30-day run)</div><div class="v" id="ckMoney" style="font-size:18px">–</div></div>
+      </div>
+      <div class="callout" id="ckInfo" style="margin-top:12px"><div class="ico">💾</div><div class="body"><p style="margin:0"></p></div></div>
+      <p class="small muted">Young's approximation: optimal interval ≈ √(2 × checkpoint_cost × MTBF). Asynchronous checkpointing — copy the state to host memory, then write to storage in the background — reduces the effective write cost to near zero and shifts the optimum much lower.</p>
+    </div>
+  </div>
+
+  <div class="callout tip">
+    <div class="ico">📦</div>
+    <div class="body"><div class="title">What must be in a checkpoint</div>
+      <p>Model weights <b>and</b> optimizer state, the LR scheduler step, the RNG states for every rank, the data-loader position (which shard, which offset), the step count, and the config plus code commit. Miss the data position and “resume” silently re-trains on the same tokens. Miss the RNG state and your run is no longer reproducible from that point. Write to a temporary path and rename atomically, keep the last few plus periodic milestones, and verify a restore in the first hour — an untested checkpoint is a hope, not a backup.</p></div>
+  </div>
+
+  <h2>The loss-spike playbook</h2>
+  <p>Large runs spike. The wrong reaction — restarting from the same state with the same data — usually reproduces the spike and burns hours.</p>
+
+  <div class="timeline">
+    <div class="ti reveal"><h4>1 · Look at the gradient norm first</h4><p>A spike in gradient norm almost always precedes the loss spike. If clipping is on and the norm still jumped an order of magnitude, the batch or the state is the problem, not the schedule.</p></div>
+    <div class="ti reveal"><h4>2 · Identify the batch</h4><p>Log the data shard and offsets per step. Replay the suspect batch alone against the pre-spike checkpoint: if it reproduces, you've found corrupted or pathological data (repeated tokens, a giant base64 blob, broken encoding).</p></div>
+    <div class="ti reveal"><h4>3 · Roll back and skip</h4><p>Restore the checkpoint from before the spike and skip or reshuffle the offending batches. This is the standard fix and it works far more often than anything cleverer.</p></div>
+    <div class="ti reveal"><h4>4 · If it recurs, adjust the run</h4><p>Lower the peak LR slightly, tighten gradient clipping, raise Adam's ε, or extend warmup. Frontier-run write-ups describe exactly these interventions — the process is empirical, not mystical.</p></div>
+    <div class="ti reveal"><h4>5 · Record it</h4><p>Write the intervention into the run log: step, symptom, action, outcome. Six weeks later nobody remembers why the LR changed at step 41,000, and the log is the only reason the result is reproducible.</p></div>
+  </div>
+
+  <h2>Babysitting a run</h2>
+  <div class="panel">
+    <div class="panel-head"><div class="dots"><i></i><i></i><i></i></div><span class="p-title">Run simulator — 14 days on 512 GPUs</span><span class="p-tag">Interactive</span></div>
+    <div class="panel-body">
+      <div class="chip-row" id="runChips"></div>
+      <div class="controls" style="margin-top:10px"><button class="btn sm primary" id="runGo">▶ Simulate the run</button></div>
+      <div class="svg-scroll"><svg id="runSvg" class="diagram run-svg" viewBox="0 0 640 260"></svg></div>
+      <div class="dash" id="runDash" style="margin-top:12px"></div>
+      <div class="timeline-log" id="runLog" style="margin-top:12px"></div>
+    </div>
+  </div>
+
+  <h2>The dashboard that matters</h2>
+  <div class="table-wrap">
+    <table class="t">
+      <thead><tr><th>Metric</th><th>Healthy</th><th>What a deviation means</th></tr></thead>
+      <tbody>
+        <tr><td>Training loss</td><td>Smooth, decreasing</td><td>Spikes → data or stability; plateau → LR schedule or capacity</td></tr>
+        <tr><td>Gradient norm</td><td>Stable band</td><td>Growing → instability coming; collapsing → dead units or vanishing signal</td></tr>
+        <tr><td>Tokens/second &amp; MFU</td><td>Flat</td><td>Sagging → straggler, data loader, thermal throttling</td></tr>
+        <tr><td>Per-rank step time</td><td>Tight distribution</td><td>One slow rank taxes all of them — find and drain it</td></tr>
+        <tr><td>Held-out loss + small eval suite</td><td>Improving</td><td>Train falls, eval doesn't → data repetition or leakage</td></tr>
+        <tr><td>GPU memory, temperature, ECC</td><td>Steady</td><td>Rising memory → leak/fragmentation; ECC climbing → node about to fail</td></tr>
+        <tr><td>Checkpoint write time</td><td>Constant</td><td>Climbing → storage saturation, the quiet precursor of a stall</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="callout warn">
+    <div class="ico">🔁</div>
+    <div class="body"><div class="title">Determinism: aim for “same conclusions”, not bit-identical</div>
+      <p>Bit-exact reproducibility at scale requires deterministic kernels, fixed collective algorithms, identical hardware and a fixed data order — and it costs throughput. What you actually need is: the same config and seed produce a run that reaches the same quality, and any checkpoint can be resumed to continue identically <i>from that point</i>. Log seeds, library versions, the container digest and the code commit with every checkpoint so a result can be re-created later.</p></div>
+  </div>
+
+  <h2>Data at scale</h2>
+  <div class="grid c3">
+    <div class="card feature reveal"><div class="f-ico">📚</div><h4>Pre-tokenize into shards</h4><p>Tokenizing on the fly wastes CPU every epoch. Write packed, pre-tokenized shards of a few hundred MB, sequentially readable.</p></div>
+    <div class="card feature reveal"><div class="f-ico" style="background:var(--accent-2-soft)">🔀</div><h4>Shuffle at two levels</h4><p>Shuffle shard order per epoch and maintain a shuffle buffer within a shard. Fully random access over a multi-terabyte corpus is not affordable.</p></div>
+    <div class="card feature reveal"><div class="f-ico" style="background:var(--green-soft)">↩️</div><h4>Make the iterator resumable</h4><p>Save (shard id, offset, epoch, seed) in the checkpoint. Otherwise a resume re-reads the same tokens — a quiet source of memorisation and wasted compute.</p></div>
+  </div>
+
+  <div class="callout danger"><div class="ico">⚠️</div><div class="body"><div class="title">Common mistakes</div>
+    <ul class="mb0">
+      <li><b>Never testing a restore.</b> Restore from a checkpoint in the first hour of the run, not on the first failure at 3am.</li>
+      <li><b>Checkpointing the model but not the optimizer, scheduler, RNG or data position.</b> The resume is a new, worse run.</li>
+      <li><b>Restarting a spiked run from the same state and data.</b> It spikes again; roll back further and skip the batches.</li>
+      <li><b>No per-rank metrics.</b> Averages hide the single straggler that is costing you 25% of the cluster.</li>
+      <li><b>Synchronous checkpointing at frontier scale.</b> Use async or sharded distributed checkpointing; otherwise the whole cluster waits on storage.</li>
+      <li><b>No run log.</b> Interventions unrecorded means results unreproducible and lessons unlearned.</li>
+    </ul></div></div>
+
+  <div class="callout interview"><div class="ico">🎤</div><div class="body"><div class="title">Interview drill</div>
+    <p class="small" style="margin:10px 0 0"><b>Warm-up:</b> Failures every 12 hours, checkpoints take 6 minutes. How often do you checkpoint, and why?</p>
+    <details class="ans"><summary>How a strong answer sounds</summary><div>Young's approximation gives √(2 × 0.1 h × 12 h) ≈ 1.5 hours, so roughly every 90 minutes — at that point the expected write overhead and the expected recomputation loss are balanced, and the total waste is a couple of percent. But I'd first try to make the write cheap: asynchronous, sharded checkpointing that copies state to host memory and writes in the background reduces the effective cost to near zero, which moves the optimum down to every 15–30 minutes and cuts the worst-case loss dramatically. I'd also verify a restore immediately and alert on rising write times, since storage saturation is what silently breaks this calculation.</div></details>
+    <p class="small" style="margin:10px 0 0"><b>Deeper:</b> Day 9 of a 14-day run, loss jumps from 2.1 to 6.8. Walk me through the next hour.</p>
+    <details class="ans"><summary>How a strong answer sounds</summary><div>First, stop the bleeding: pause or let it run only if the loss is recovering — a single-step spike that recovers may be survivable, a diverging one is not. Then evidence: look at the gradient-norm trace just before the spike, per-rank losses (one rank diverging suggests hardware or corrupted shards rather than a data batch), and the logged shard/offset for the affected steps. Replay the suspect batches against the last good checkpoint in a small side job. If it reproduces, roll back to before the spike, skip or reshuffle those batches, and resume. If it doesn't reproduce, suspect hardware — check ECC counters and Xid logs on the ranks involved, and restart on different nodes. If it recurs after a clean rollback, adjust the run: lower peak LR modestly, tighten clipping, raise Adam epsilon. Throughout, record the timeline in the run log, and don't make two changes at once — you'll never know which one worked.</div></details>
+  </div></div>
+
+  <div class="takeaways">
+    <h3>🧠 Key takeaways</h3>
+    <ul>
+      <li>At thousands of GPUs, failures are routine — engineer for cheap recovery, not for avoidance.</li>
+      <li>Optimal checkpoint interval ≈ √(2 × checkpoint cost × MTBF); async checkpointing moves it much lower.</li>
+      <li>A checkpoint must include optimizer, scheduler, RNG and data-loader position, and a restore must be tested.</li>
+      <li>Handle loss spikes by rolling back and skipping batches before changing hyperparameters.</li>
+      <li>Monitor per-rank step time, gradient norm, MFU and checkpoint write time — and keep a run log.</li>
+    </ul>
+  </div>
+
+  <div class="quiz-wrap">
+    <h2>Check your understanding</h2>
+    <div class="quiz-score"></div>
+
+    <div class="quiz" data-answer="2">
+      <p class="q">Your resume works but the model re-learns tokens it already saw. What was missing from the checkpoint?</p>
+      <div class="opts">
+        <button class="opt">The learning-rate scheduler state</button>
+        <button class="opt">The gradient buffers</button>
+        <button class="opt">The data-loader position (shard and offset)</button>
+        <button class="opt">The model config</button>
+      </div>
+      <div class="explain">Without the iterator position, the resume starts the data stream from the beginning. Training continues and looks fine while silently repeating data.</div>
+    </div>
+
+    <div class="quiz" data-answer="0">
+      <p class="q">All ranks are alive, GPU utilization is 100%, and no step has completed for 20 minutes. Most likely cause?</p>
+      <div class="opts">
+        <button class="opt">A collective hang — one rank is waiting on an operation another never issued</button>
+        <button class="opt">The learning rate is too low</button>
+        <button class="opt">Checkpoint writing</button>
+        <button class="opt">A vanishing gradient</button>
+      </div>
+      <div class="explain">Classic NCCL deadlock, usually from rank-dependent control flow (an early return, a conditional eval, a rank-specific exception). Set collective timeouts and dump per-rank stacks.</div>
+    </div>
+
+    <div class="quiz" data-answer="1">
+      <p class="q">MTBF is 24 hours and a checkpoint takes 6 minutes. Roughly what's the optimal interval?</p>
+      <div class="opts">
+        <button class="opt">~15 minutes</button>
+        <button class="opt">~2 hours</button>
+        <button class="opt">~8 hours</button>
+        <button class="opt">~24 hours</button>
+      </div>
+      <div class="explain">√(2 × 0.1 h × 24 h) ≈ 2.2 hours. Making the checkpoint asynchronous is usually a better move than tuning this number.</div>
+    </div>
+
+    <div class="quiz" data-answer="3">
+      <p class="q">The loss spikes at step 60k. What do you do first?</p>
+      <div class="opts">
+        <button class="opt">Lower the learning rate and continue</button>
+        <button class="opt">Restart from the same step</button>
+        <button class="opt">Switch optimizers</button>
+        <button class="opt">Check the gradient-norm trace and identify the batches involved</button>
+      </div>
+      <div class="explain">Diagnose before intervening. Gradient norm usually spikes first, and the logged shard/offset tells you whether a specific batch is responsible — in which case rolling back and skipping it is the cheapest correct fix.</div>
+    </div>
+
+    <div class="quiz" data-answer="2">
+      <p class="q">Step time increased 30% overnight with no code change. What do you check first?</p>
+      <div class="opts">
+        <button class="opt">The loss curve</button>
+        <button class="opt">The tokenizer</button>
+        <button class="opt">Per-rank step times, looking for a straggler</button>
+        <button class="opt">The random seed</button>
+      </div>
+      <div class="explain">Synchronous training runs at the speed of its slowest rank. A thermally throttled GPU or a degraded NIC on one node taxes the entire cluster — which is why per-rank timing belongs on the dashboard.</div>
+    </div>
+  </div>
+</main>
+<script src="assets/app.js"></script>
+<script>
+(function(){
+  const { $, $$, clamp, fmt } = ML;
+
+  /* ================= checkpoint interval ================= */
+  function ckpt() {
+    const mtbf = +$('#ckMtbf').value, cost = +$('#ckCost').value / 60, restart = +$('#ckRestart').value / 60;
+    const chosen = +$('#ckInt').value / 60;
+    $('#ckMtbfV').textContent = mtbf + ' h';
+    $('#ckCostV').textContent = (cost * 60).toFixed(1) + ' min';
+    $('#ckRestartV').textContent = (restart * 60).toFixed(0) + ' min';
+    $('#ckIntV').textContent = (chosen * 60).toFixed(0) + ' min';
+    // fraction of time wasted: writing + expected lost work + restart overhead
+    const waste = (I) => cost / I + (I / 2 + restart) / mtbf;
+    const opt = Math.sqrt(2 * cost * mtbf);
+    const X = (I) => 45 + Math.log10(I / 0.05) / Math.log10(24 / 0.05) * 575;
+    const Y = (w) => 185 - clamp(w, 0, 0.6) / 0.6 * 165;
+    let d = '';
+    for (let I = 0.05; I <= 24; I *= 1.06) d += (d ? 'L' : 'M') + X(I).toFixed(1) + ',' + Y(waste(I)).toFixed(1) + ' ';
+    $('#ckSvg').innerHTML =
+      `<line stroke="var(--border-strong)" x1="45" y1="185" x2="628" y2="185"/><line stroke="var(--border-strong)" x1="45" y1="10" x2="45" y2="185"/>` +
+      `<path class="ln" d="${d}"/>` +
+      `<line class="mark" x1="${X(opt)}" y1="10" x2="${X(opt)}" y2="185"/><text x="${clamp(X(opt) - 30, 48, 540)}" y="22" style="fill:var(--pink)">optimum</text>` +
+      `<circle cx="${X(chosen)}" cy="${Y(waste(chosen))}" r="6" fill="var(--accent-2)"/>` +
+      `<text x="250" y="205">checkpoint interval (log scale)</text><text x="2" y="14">% time wasted</text>` +
+      [0.1, 0.5, 1, 4, 12, 24].map(v => `<text x="${X(v) - 8}" y="199">${v < 1 ? v * 60 + 'm' : v + 'h'}</text>`).join('');
+    const w = waste(chosen), wo = waste(opt);
+    $('#ckOpt').textContent = opt < 1 ? (opt * 60).toFixed(0) + ' min' : opt.toFixed(1) + ' h';
+    $('#ckLoss').textContent = (w * 100).toFixed(1) + '%';
+    $('#ckEff').textContent = ((1 - w) * 100).toFixed(1) + '%';
+    $('#ckMoney').textContent = '$' + fmt((w - wo) * 30 * 24 * 512 * 2.5, 0);
+    $('#ckInfo p').innerHTML = Math.abs(chosen - opt) / opt < 0.35
+      ? `✅ Close to optimal: you lose about <b>${(w * 100).toFixed(1)}%</b> of the run to checkpoint writes and recomputation. The curve is flat near the bottom, so precision here doesn't matter much — being within 2× of the optimum is fine.`
+      : chosen > opt
+        ? `⚠️ <b>Checkpointing too rarely.</b> Each failure costs on average ${((chosen / 2 + restart) * 60).toFixed(0)} minutes of recomputation plus restart. Moving to ${opt < 1 ? (opt * 60).toFixed(0) + ' min' : opt.toFixed(1) + ' h'} would save roughly <b>$${fmt((w - wo) * 30 * 24 * 512 * 2.5, 0)}</b> on a 30-day 512-GPU run.`
+        : `⚠️ <b>Checkpointing too often.</b> You're spending ${(cost / chosen * 100).toFixed(1)}% of the run writing state. Either lengthen the interval or — better — make checkpointing asynchronous so the write happens off the critical path.`;
+  }
+  ['#ckMtbf', '#ckCost', '#ckRestart', '#ckInt'].forEach(id => $(id).addEventListener('input', ckpt));
+  ckpt();
+
+  /* ================= run simulator ================= */
+  const PRACT = [
+    { id: 'async', label: 'Async checkpointing (15 min)', on: true },
+    { id: 'spare', label: 'Hot spare nodes', on: true },
+    { id: 'health', label: 'Per-rank health checks', on: false },
+    { id: 'replay', label: 'Batch logging for replay', on: true },
+    { id: 'timeout', label: 'Collective timeouts', on: false },
+  ];
+  const on = (id) => PRACT.find(p => p.id === id).on;
+  function drawChips() {
+    $('#runChips').innerHTML = PRACT.map(p => `<button class="chip ${p.on ? 'on' : ''}" data-p="${p.id}">${p.on ? '✓' : '✗'} ${p.label}</button>`).join('');
+    $$('#runChips [data-p]').forEach(b => b.onclick = () => { const p = PRACT.find(x => x.id === b.dataset.p); p.on = !p.on; drawChips(); });
+  }
+  drawChips();
+
+  function simulate() {
+    const DAYS = 14, STEPS = 280;
+    const events = [];
+    let lost = 0, seed = 42;
+    const rnd = () => { seed = (seed * 1103515245 + 12345) % 2147483648; return seed / 2147483648; };
+    const ckptGap = on('async') ? 0.25 : 1.5;         // hours
+    const loss = [];
+    let L = 4.2, spikeAt = -1;
+    for (let i = 0; i < STEPS; i++) {
+      const day = i / STEPS * DAYS;
+      L = 4.2 * Math.pow(1 - i / STEPS * 0.62, 1.5) + 1.55 + (rnd() - 0.5) * 0.03;
+      if (i === 150) { spikeAt = i; }
+      if (spikeAt >= 0 && i >= spikeAt && i < spikeAt + 4) L += 2.6 * (1 - (i - spikeAt) / 4);
+      loss.push(L);
+    }
+    // failures
+    const nFail = 6;
+    for (let f = 0; f < nFail; f++) {
+      const day = 0.6 + rnd() * (DAYS - 1);
+      const kind = rnd();
+      if (kind < 0.45) {
+        const cost = ckptGap / 2 + (on('spare') ? 0.2 : 1.4);
+        lost += cost;
+        events.push([day, 'err', `GPU fault on node ${Math.floor(rnd() * 64)} — ${on('spare') ? 'rescheduled on a hot spare' : 'waited for capacity'}, lost ${(cost * 60).toFixed(0)} min`]);
+      } else if (kind < 0.65) {
+        const cost = on('timeout') ? 0.4 : 3.5;
+        lost += cost;
+        events.push([day, 'err', `NCCL collective hang — ${on('timeout') ? 'timeout fired, ranks dumped, restarted' : 'detected by a human hours later'}, lost ${(cost * 60).toFixed(0)} min`]);
+      } else if (kind < 0.85) {
+        const cost = on('health') ? 0.3 : 2.2;
+        lost += cost;
+        events.push([day, 'warn', `Straggler rank (thermal throttling) — ${on('health') ? 'auto-detected and drained' : 'noticed after step time drifted 30% for hours'}, lost ~${(cost * 60).toFixed(0)} min of throughput`]);
+      } else {
+        events.push([day, 'info', 'Storage latency spike during checkpoint write — completed, monitoring']);
+      }
+    }
+    const spikeDay = spikeAt / STEPS * DAYS;
+    const spikeCost = on('replay') ? ckptGap + 0.6 : 9;
+    lost += spikeCost;
+    events.push([spikeDay, 'err', `Loss spike (2.1 → 4.7). ${on('replay') ? 'Batch log identified a corrupted shard; rolled back, skipped it, resumed.' : 'No batch logging — restarted blind, spiked again, then bisected the data by hand.'} Lost ${spikeCost.toFixed(1)} h`]);
+    events.sort((a, b) => a[0] - b[0]);
+
+    // draw loss curve
+    const X = (d) => 45 + d / DAYS * 575, Y = (l) => 215 - (l - 1.4) / 3.6 * 195;
+    let d2 = '';
+    loss.forEach((l, i) => { d2 += (d2 ? 'L' : 'M') + X(i / STEPS * DAYS).toFixed(1) + ',' + clamp(Y(l), 10, 215).toFixed(1) + ' '; });
+    let marks = '';
+    events.forEach(([day, kind]) => {
+      const c = kind === 'err' ? 'var(--red)' : kind === 'warn' ? 'var(--amber)' : 'var(--muted)';
+      marks += `<line class="evt" x1="${X(day)}" y1="14" x2="${X(day)}" y2="215" stroke="${c}" stroke-dasharray="3 4" opacity=".7"/>`;
+    });
+    $('#runSvg').innerHTML =
+      `<line stroke="var(--border-strong)" x1="45" y1="215" x2="628" y2="215"/><line stroke="var(--border-strong)" x1="45" y1="10" x2="45" y2="215"/>` +
+      marks + `<path class="loss" d="${d2}"/>` +
+      `<text x="290" y="235">days</text><text x="2" y="14">loss</text>` +
+      `<text x="470" y="30" style="fill:var(--red)">dashed = incidents</text>`;
+
+    const planned = DAYS * 24;
+    const eff = (planned - lost) / planned;
+    $('#runDash').innerHTML = [
+      ['Planned', planned.toFixed(0) + ' h', ''],
+      ['Lost to incidents', lost.toFixed(1) + ' h', lost > 20 ? 'bad' : lost > 8 ? 'warn' : 'good'],
+      ['Effective throughput', (eff * 100).toFixed(1) + '%', eff > 0.93 ? 'good' : eff > 0.85 ? 'warn' : 'bad'],
+      ['Wasted GPU cost', '$' + fmt(lost * 512 * 2.5, 0), lost > 20 ? 'bad' : 'warn'],
+      ['Incidents', events.length, ''],
+    ].map(([k, v, c]) => `<div class="${c}"><b>${k}</b><span>${v}</span></div>`).join('');
+
+    const log = $('#runLog'); log.innerHTML = '';
+    events.forEach(([day, kind, msg]) =>
+      ML.log(log, `<span class="${kind}">day ${day.toFixed(1).padStart(4)} · ${msg}</span>`));
+    ML.log(log, `<span class="ok">run complete · ${(eff * 100).toFixed(1)}% effective throughput · ${lost.toFixed(1)} h lost</span>`);
+  }
+  $('#runGo').onclick = simulate;
+  simulate();
+})();
+</script>
+</body>
+</html>

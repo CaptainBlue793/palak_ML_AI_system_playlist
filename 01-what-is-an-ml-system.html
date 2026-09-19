@@ -1,0 +1,404 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>What Is an ML System?</title>
+<link rel="stylesheet" href="assets/style.css">
+<script>try{var t=JSON.parse(localStorage.getItem('ml-theme'));if(t)document.documentElement.setAttribute('data-theme',t)}catch(e){}</script>
+<style>
+  .rules-lab { display:grid; grid-template-columns:1fr 1fr; gap:14px; }
+  @media (max-width:800px){ .rules-lab{ grid-template-columns:1fr; } }
+  .rules-lab .col { border:1px solid var(--border); border-radius:14px; background:var(--surface-2); padding:14px; }
+  .rules-lab h5 { margin:0 0 8px; font-size:13px; text-transform:uppercase; letter-spacing:.06em; color:var(--muted); }
+  .rulelist { font-family:var(--mono); font-size:12.5px; line-height:1.7; color:var(--text-2); max-height:190px; overflow:auto; }
+  .rulelist b { color:var(--accent); }
+  .mail { padding:9px 11px; border-radius:10px; border:1px solid var(--border); background:var(--surface); margin-bottom:7px; font-size:13.5px; display:flex; gap:8px; align-items:flex-start; }
+  .mail .verdict { margin-left:auto; font-family:var(--mono); font-size:11px; padding:2px 7px; border-radius:99px; white-space:nowrap; }
+  .mail.hit .verdict { background:var(--red-soft); color:var(--red); }
+  .mail.miss .verdict { background:var(--amber-soft); color:var(--amber); }
+  .mail.ok .verdict { background:var(--green-soft); color:var(--green); }
+
+  .sort-item { display:flex; align-items:center; gap:12px; padding:12px 14px; border-radius:12px; border:1px solid var(--border); background:var(--surface-2); margin-bottom:8px; transition:.3s; flex-wrap:wrap; }
+  .sort-item .txt { flex:1; min-width:220px; font-size:15px; }
+  .sort-item.right { border-color:var(--green); background:var(--green-soft); }
+  .sort-item.wrongc { border-color:var(--red); background:var(--red-soft); }
+  .sort-item .why { width:100%; font-size:13.5px; color:var(--text-2); display:none; }
+  .sort-item.right .why, .sort-item.wrongc .why { display:block; }
+
+  .debt { display:grid; grid-template-columns:repeat(auto-fit,minmax(120px,1fr)); gap:8px; }
+  .debt div { border-radius:12px; padding:12px 10px; text-align:center; border:1px solid var(--border); background:var(--surface-2); font-size:13px; font-weight:600; }
+  .debt div.model { background:var(--accent-soft); border-color:var(--accent); color:var(--accent); }
+  .debt div small { display:block; font-weight:500; color:var(--muted); font-size:11.5px; margin-top:3px; }
+</style>
+</head>
+<body data-chapter="1">
+<main class="content">
+
+  <section class="hero">
+    <div class="eyebrow"><span class="pill accent">Chapter 1</span><span class="pill green">Beginner</span><span class="pill">⏱ 25 min</span></div>
+    <h1>What Is an <span class="grad">ML System?</span></h1>
+    <p class="lead">Before any maths, let's get the shape of the thing. A machine learning system is not a model — it is a pipeline of data, training, evaluation, serving and monitoring, wrapped around a model that is usually the smallest part of it.</p>
+    <ul class="objectives">
+      <li>Say precisely when learning beats writing rules — and when it doesn't</li>
+      <li>Name the three ingredients every ML system needs</li>
+      <li>Walk the full lifecycle from problem statement to retraining</li>
+      <li>Explain why ML systems fail differently from ordinary software</li>
+      <li>Use a repeatable framework for any ML design problem</li>
+    </ul>
+  </section>
+
+  <h2>Rules, or learning?</h2>
+  <p>Ordinary software is <strong>rules you write</strong>: if the cart total is over £50, shipping is free. Machine learning is <strong>rules the machine infers from examples</strong>: here are 200,000 emails labelled spam or not spam — work out the rule yourself.</p>
+  <p>That flip is only worth it when the rule is too complicated, too fuzzy, or too fast-moving for a person to write down. Try it below: add hand-written rules to a spam filter and watch how quickly they stop generalising.</p>
+
+  <div class="panel" id="rulesPanel">
+    <div class="panel-head"><div class="dots"><i></i><i></i><i></i></div><span class="p-title">Hand-written rules vs. a learned model</span><span class="p-tag">Interactive</span></div>
+    <div class="panel-body">
+      <div class="controls">
+        <button class="btn sm primary" data-rule="0">+ Rule: contains “free”</button>
+        <button class="btn sm" data-rule="1">+ Rule: contains “winner”</button>
+        <button class="btn sm" data-rule="2">+ Rule: ALL CAPS subject</button>
+        <button class="btn sm" data-rule="3">+ Rule: has 3+ links</button>
+        <button class="btn sm ghost" id="rulesReset">↺ Reset</button>
+        <button class="btn sm" id="rulesLearn">🧠 Train a model instead</button>
+      </div>
+      <div class="rules-lab" style="margin-top:12px">
+        <div class="col">
+          <h5>Your rule engine</h5>
+          <div class="rulelist" id="ruleList"><i class="muted">No rules yet — everything is delivered.</i></div>
+        </div>
+        <div class="col">
+          <h5>Inbox (10 messages, 5 really are spam)</h5>
+          <div id="inbox"></div>
+        </div>
+      </div>
+      <div class="stats" style="margin-top:12px">
+        <div class="stat good"><div class="k">Spam caught</div><div class="v" id="mCaught">0 <small>/ 5</small></div></div>
+        <div class="stat bad"><div class="k">Good mail blocked</div><div class="v" id="mFalse">0</div></div>
+        <div class="stat acc"><div class="k">Rules maintained</div><div class="v" id="mRules">0</div></div>
+      </div>
+      <div class="small muted" id="rulesNote" style="margin-top:10px">Add rules one at a time. Notice what happens to legitimate mail.</div>
+    </div>
+  </div>
+
+  <div class="callout tip">
+    <div class="ico">💡</div>
+    <div class="body"><div class="title">The honest test for “should this be ML?”</div>
+      <p>Use ML when <b>(1)</b> the pattern exists but nobody can write it down, <b>(2)</b> you have (or can get) labelled examples of it, <b>(3)</b> the pattern <i>changes</i>, so hand-written rules would rot, and <b>(4)</b> a wrong answer now and then is survivable. Miss any of those and rules are cheaper, faster and far easier to debug.</p></div>
+  </div>
+
+  <div class="panel">
+    <div class="panel-head"><div class="dots"><i></i><i></i><i></i></div><span class="p-title">Mini-game: ML or plain code?</span><span class="p-tag">Practice</span><span style="margin-left:auto" class="badge" id="sortScore">0 / 8</span></div>
+    <div class="panel-body" id="sortGame"></div>
+  </div>
+
+  <h2>The three ingredients</h2>
+  <p>Every supervised ML system — from a 10-line logistic regression to a trillion-parameter language model — is built from exactly three things.</p>
+
+  <div class="grid c3">
+    <div class="card feature reveal"><div class="f-ico">🧱</div><h4>Data</h4><p>Examples of the thing you want to predict, with the answer attached (<b>labels</b>). Almost all of your effort will live here.</p></div>
+    <div class="card feature reveal"><div class="f-ico" style="background:var(--accent-2-soft)">🧠</div><h4>Model</h4><p>A function with adjustable numbers (<b>parameters</b>) flexible enough to represent the pattern you're after.</p></div>
+    <div class="card feature reveal"><div class="f-ico" style="background:var(--green-soft)">🎯</div><h4>Objective</h4><p>A <b>loss function</b> that scores how wrong a prediction is, plus an optimizer that nudges the parameters to reduce it.</p></div>
+  </div>
+
+  <div class="callout analogy">
+    <div class="ico">🎸</div>
+    <div class="body"><div class="title">Analogy: learning guitar by ear</div>
+      <p>The <b>data</b> is the recording you're copying. The <b>model</b> is your hands and their thousands of possible positions. The <b>loss</b> is how wrong the note sounds. Practice is gradient descent: play, hear the error, move your fingers slightly in the direction that sounds better. Nobody hands you the rule “index finger on fret 3” — you infer it from feedback, which is exactly what training is.</p></div>
+  </div>
+
+  <h3>Four flavours of learning</h3>
+  <p>Click each card. Almost everything you'll meet in this course is supervised or self-supervised — the other two matter, but less often.</p>
+
+  <div class="grid c4">
+    <div class="flip reveal"><div class="flip-inner"><div class="face front"><div class="big">🏷️</div><h4>Supervised</h4><small>click to flip</small></div><div class="face back"><div><b>Learn from labelled pairs (x → y).</b> Spam/not spam, price prediction, will-this-user-click. The workhorse of production ML.</div></div></div></div>
+    <div class="flip reveal"><div class="flip-inner"><div class="face front"><div class="big">🧩</div><h4>Self-supervised</h4><small>click to flip</small></div><div class="face back"><div><b>Labels come free from the data itself.</b> “Predict the next token”, “fill in the masked patch”. This is how every large language model is pretrained.</div></div></div></div>
+    <div class="flip reveal"><div class="flip-inner"><div class="face front"><div class="big">🔍</div><h4>Unsupervised</h4><small>click to flip</small></div><div class="face back"><div><b>No labels at all — find structure.</b> Clustering users, anomaly detection, dimensionality reduction. Hard to evaluate, so used as a component rather than a product.</div></div></div></div>
+    <div class="flip reveal"><div class="flip-inner"><div class="face front"><div class="big">🎮</div><h4>Reinforcement</h4><small>click to flip</small></div><div class="face back"><div><b>Learn from rewards, not answers.</b> An agent acts, the world scores it. Behind game-playing, robotics and the RLHF step that makes chat models helpful (Chapter 18).</div></div></div></div>
+  </div>
+
+  <h2>The lifecycle: where the work actually goes</h2>
+  <p>People picture ML as “train a model”. In production it's a loop that never stops turning, and the model step is one box out of eight. Step through it:</p>
+
+  <div class="panel">
+    <div class="panel-head"><div class="dots"><i></i><i></i><i></i></div><span class="p-title">The ML lifecycle</span><span class="p-tag">Step-through</span></div>
+    <div class="panel-body svg-scroll">
+      <svg id="lcSvg" class="diagram" viewBox="0 0 900 300">
+        <defs><marker id="ah1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" class="arrow-head"/></marker></defs>
+        <path id="lc-e1" class="edge dimmable" d="M150,70 L200,70" marker-end="url(#ah1)"/>
+        <path id="lc-e2" class="edge dimmable" d="M330,70 L380,70" marker-end="url(#ah1)"/>
+        <path id="lc-e3" class="edge dimmable" d="M510,70 L560,70" marker-end="url(#ah1)"/>
+        <path id="lc-e4" class="edge dimmable" d="M690,70 L740,70" marker-end="url(#ah1)"/>
+        <path id="lc-e5" class="edge dimmable" d="M805,100 L805,160" marker-end="url(#ah1)"/>
+        <path id="lc-e6" class="edge dimmable" d="M740,190 L690,190" marker-end="url(#ah1)"/>
+        <path id="lc-e7" class="edge dimmable" d="M560,190 L510,190" marker-end="url(#ah1)"/>
+        <path id="lc-e8" class="edge dimmable dash" d="M380,190 L100,190 L100,100" marker-end="url(#ah1)"/>
+        <g id="lc-problem" class="node dimmable" transform="translate(30,45)"><rect width="120" height="50" rx="12"/><text x="60" y="22">🧭 Problem</text><text x="60" y="38" class="lbl">framing + metric</text></g>
+        <g id="lc-data" class="node dimmable" transform="translate(200,45)"><rect width="130" height="50" rx="12"/><text x="65" y="22">🧱 Data</text><text x="65" y="38" class="lbl">collect · label · split</text></g>
+        <g id="lc-feat" class="node dimmable" transform="translate(380,45)"><rect width="130" height="50" rx="12"/><text x="65" y="22">🧮 Features</text><text x="65" y="38" class="lbl">transform · encode</text></g>
+        <g id="lc-train" class="node dimmable" transform="translate(560,45)"><rect width="130" height="50" rx="12"/><text x="65" y="22">🧠 Train</text><text x="65" y="38" class="lbl">fit · tune</text></g>
+        <g id="lc-eval" class="node dimmable" transform="translate(740,45)"><rect width="130" height="55" rx="12"/><text x="65" y="22">🎯 Evaluate</text><text x="65" y="40" class="lbl">offline metrics</text></g>
+        <g id="lc-deploy" class="node dimmable" transform="translate(740,160)"><rect width="130" height="55" rx="12"/><text x="65" y="24">🚀 Deploy</text><text x="65" y="42" class="lbl">canary · rollback</text></g>
+        <g id="lc-serve" class="node dimmable" transform="translate(560,165)"><rect width="130" height="50" rx="12"/><text x="65" y="22">⚡ Serve</text><text x="65" y="38" class="lbl">predictions</text></g>
+        <g id="lc-monitor" class="node dimmable" transform="translate(380,165)"><rect width="130" height="50" rx="12"/><text x="65" y="22">📡 Monitor</text><text x="65" y="38" class="lbl">drift · quality</text></g>
+        <text x="240" y="230" class="lbl" style="font-size:11px">feedback, new labels and drift send you back around the loop</text>
+      </svg>
+    </div>
+    <div class="stepper" data-diagram="lcSvg">
+      <ol class="steps">
+        <li data-title="Frame the problem" data-on="lc-problem">Turn a business goal into a prediction task <i>and a metric</i>. “Reduce churn” becomes “predict P(user cancels in next 30 days)”, measured by PR-AUC offline and retained revenue online. Getting this wrong makes every later step worthless.</li>
+        <li data-title="Get the data" data-on="lc-problem lc-data lc-e1" data-packet="lc-problem>lc-data">Find or build a dataset with labels, decide how far back it is trustworthy, and split it into train/validation/test <b>before</b> you look at it. Chapter 3 is entirely about the ways this goes wrong.</li>
+        <li data-title="Build features" data-on="lc-data lc-feat lc-e2" data-packet="lc-data>lc-feat" data-color="var(--accent-2)">Turn raw rows, text, images or events into numbers a model can consume: encode categories, scale, aggregate over windows, embed. For deep models the network learns most of this — but not the part that reads from your production systems.</li>
+        <li data-title="Train" data-on="lc-feat lc-train lc-e3" data-packet="lc-feat>lc-train" data-color="var(--accent-2)">Fit parameters by minimising a loss, then tune the knobs you chose yourself (learning rate, depth, regularization). A first model should take hours, not weeks — you want a baseline to beat.</li>
+        <li data-title="Evaluate" data-on="lc-train lc-eval lc-e4" data-packet="lc-train>lc-eval" data-color="var(--green)">Score it on held-out data with a metric that matches the decision the model drives, plus slices (new users, each country, each device). An average that hides a broken segment is how models ship broken.</li>
+        <li data-title="Deploy" data-on="lc-eval lc-deploy lc-e5" data-packet="lc-eval>lc-deploy" data-color="var(--green)">Ship behind a flag: shadow traffic first, then a small canary, then a real A/B test. The offline metric only <i>predicts</i> the online one — Chapter 33 is about the gap between them.</li>
+        <li data-title="Serve" data-on="lc-deploy lc-serve lc-e6" data-packet="lc-deploy>lc-serve">Answer live requests inside a latency budget, at a cost per prediction you can afford, with a fallback for when the model is unavailable. This is a systems problem, and it's most of Level 3.</li>
+        <li data-title="Monitor and loop" data-on="lc-serve lc-monitor lc-e7 lc-e8" data-packet="lc-serve>lc-monitor,lc-monitor>lc-problem" data-color="var(--amber)">Watch inputs for drift, outputs for quality, and the world for the labels that eventually arrive. When behaviour shifts — and it will — you collect new data and go round again. An ML system is never “done”.</li>
+      </ol>
+    </div>
+  </div>
+
+  <h2>The model is the small box</h2>
+  <p>The famous <i>Hidden Technical Debt in Machine Learning Systems</i> paper (Google, 2015) made this point with one picture: in a real deployment, model code is a sliver of the surface area.</p>
+
+  <div class="debt">
+    <div>Data collection<small>pipelines, consent</small></div>
+    <div>Verification<small>schema, quality</small></div>
+    <div>Feature extraction<small>online + offline</small></div>
+    <div class="model">ML code<small>the model</small></div>
+    <div>Configuration<small>the silent killer</small></div>
+    <div>Serving infra<small>GPUs, autoscaling</small></div>
+    <div>Monitoring<small>drift, quality</small></div>
+    <div>Process tools<small>CI, registry</small></div>
+  </div>
+  <p class="small muted" style="margin-top:8px">Every box except the highlighted one is ordinary — if demanding — systems engineering. That is why this is a <i>systems</i> course.</p>
+
+  <h2>Why ML systems break differently</h2>
+  <p>You can apply everything you know about building services here, but four properties are genuinely new, and each one gets a chapter of its own later.</p>
+
+  <div class="table-wrap">
+    <table class="t">
+      <thead><tr><th>Property</th><th>What it means</th><th>What it costs you</th></tr></thead>
+      <tbody>
+        <tr><td><b>Data is a dependency</b></td><td>Behaviour is defined by a dataset, not only by code. Change the data, change the product.</td><td>You must version, test and monitor data like code (Ch 3, 28, 32)</td></tr>
+        <tr><td><b>Failure is silent</b></td><td>A broken feature doesn't throw — the model quietly gets 4% worse and nobody notices for a month.</td><td>Quality monitoring and drift detection are mandatory, not nice-to-have (Ch 34)</td></tr>
+        <tr><td><b>Answers are probabilistic</b></td><td>The same input can give different outputs; “correct” is a distribution, not a value.</td><td>Testing needs statistics; product needs a plan for being wrong (Ch 7, 35)</td></tr>
+        <tr><td><b>Feedback loops</b></td><td>Today's predictions shape tomorrow's training data — the model teaches itself its own habits.</td><td>Exploration, logging of what you <i>didn't</i> show, and bias audits (Ch 30, 37)</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="callout warn">
+    <div class="ico">🌀</div>
+    <div class="body"><div class="title">The feedback loop, concretely</div>
+      <p>A feed model ranks cat videos slightly higher. Users watch more cat videos. The next training set is full of cat-video watches. The model ranks them higher still. Three months later the product is a cat-video app and nobody decided that. Every recommender has this problem; Chapter 30 covers how to keep exploring.</p></div>
+  </div>
+
+  <h2>Offline metrics vs. the thing you care about</h2>
+  <p>Models are trained on a proxy. The product is measured on something else. Keeping those two connected — and being honest about the gap — is the core skill of an ML engineer.</p>
+
+  <div class="split">
+    <div class="card"><h4 class="mt0">📏 Model metric</h4><p class="small mb0">AUC, F1, perplexity, BLEU, recall@10. Computable offline, in seconds, on a fixed dataset. <b>Useful for iteration</b>, and a lie if you optimise it far enough.</p></div>
+    <div class="card"><h4 class="mt0">💷 Product metric</h4><p class="small mb0">Retention, revenue, fraud losses, tickets deflected, time saved. Measured online over days or weeks with an experiment. <b>The thing you actually promised</b> — and always noisier than you want.</p></div>
+  </div>
+
+  <div class="callout interview">
+    <div class="ico">🎤</div>
+    <div class="body"><div class="title">Interview tip</div>
+      <p>When asked to design an ML system, state both metrics in the first two minutes: “offline I'll track PR-AUC on held-out fraud; online the decision metric is chargeback loss per £1,000 processed, guard-railed on false-decline rate.” That single sentence separates people who have shipped models from people who have only trained them.</p></div>
+  </div>
+
+  <h2>A framework for any ML design problem</h2>
+  <p>Every case study in this course follows this sequence, and so should you in an interview or a design doc.</p>
+
+  <div class="timeline">
+    <div class="ti reveal"><h4>1. Clarify the task and the metric <span class="badge">~5 min</span></h4><p>What decision does the prediction drive? Who acts on it? Offline metric, online metric, and the constraint that must not regress.</p></div>
+    <div class="ti reveal"><h4>2. Data and labels <span class="badge">~7 min</span></h4><p>Where do examples come from, how are labels produced, how delayed are they, how much do you have, and what is the split strategy?</p></div>
+    <div class="ti reveal"><h4>3. Features and representation <span class="badge">~5 min</span></h4><p>What signal exists at prediction time — and only at prediction time? Categorical, sequential, text, embeddings.</p></div>
+    <div class="ti reveal"><h4>4. Model choice and baseline <span class="badge">~5 min</span></h4><p>Start with the simplest thing that could work (a heuristic, then GBDT, then deep). Say explicitly what you're comparing against.</p></div>
+    <div class="ti reveal"><h4>5. Training and evaluation plan <span class="badge">~8 min</span></h4><p>Compute budget, retraining cadence, validation design, slice metrics, and how you'll catch leakage.</p></div>
+    <div class="ti reveal"><h4>6. Serving design <span class="badge">~10 min</span></h4><p>Online vs batch, latency budget, hardware, caching, fallbacks, and the shape of the request path.</p></div>
+    <div class="ti reveal"><h4>7. Monitoring, rollout and iteration <span class="badge">~7 min</span></h4><p>Shadow → canary → A/B, drift alarms, feedback collection, and the retraining loop that keeps it alive.</p></div>
+  </div>
+
+  <div class="callout danger"><div class="ico">⚠️</div><div class="body"><div class="title">Common mistakes</div>
+    <ul class="mb0">
+      <li><b>Reaching for ML when three rules would do.</b> A learned model costs a pipeline, a training job, a serving stack and a monitoring story, forever. If a threshold solves 90% of it, ship the threshold and collect data.</li>
+      <li><b>Optimising a metric nobody asked for.</b> Accuracy on a 99%-negative dataset is 99% for a model that says “no” to everything. Pick the metric from the decision, not from the tutorial.</li>
+      <li><b>Treating deployment as the finish line.</b> The day a model ships is the day its data starts drifting. Budget for monitoring and retraining in the original plan, not as a follow-up ticket.</li>
+      <li><b>Ignoring the no-model baseline.</b> “Most popular item”, “yesterday's value”, “the rule the ops team already uses” — if you can't beat those, you have learned something valuable and cheap.</li>
+    </ul></div></div>
+
+  <div class="callout interview"><div class="ico">🎤</div><div class="body"><div class="title">Interview drill</div>
+    <p class="small" style="margin:10px 0 0"><b>Warm-up:</b> A product manager says “let's add AI to the checkout page.” What do you ask before agreeing?</p>
+    <details class="ans"><summary>How a strong answer sounds</summary><div>What decision should change, and what metric would move if it worked? Do we have logged examples of that decision with outcomes, and how delayed are the outcomes? What is the cost of a wrong prediction in each direction? What latency budget does checkout allow? And what is the simplest non-ML baseline — because if a rule gets most of the value, ML is a second-phase investment, not the first one.</div></details>
+    <p class="small" style="margin:10px 0 0"><b>Explain it simply:</b> Why is an ML system harder to maintain than a normal service with the same traffic?</p>
+    <details class="ans"><summary>How a strong answer sounds</summary><div>Because its behaviour depends on data, and data changes without anyone deploying. Ordinary services fail loudly and deterministically; ML systems degrade silently as the world drifts away from the training distribution, and the failure often shows up first in a business metric rather than an error rate. That means the maintenance surface includes pipelines, feature parity between training and serving, label collection, drift monitoring and a retraining path — none of which exist for a CRUD service.</div></details>
+  </div></div>
+
+  <div class="takeaways">
+    <h3>🧠 Key takeaways</h3>
+    <ul>
+      <li>Use ML when the pattern exists, is hard to write down, changes over time, and occasional errors are tolerable.</li>
+      <li>Every ML system is data + model + objective; the data is where the effort and the failures live.</li>
+      <li>The lifecycle is a loop — frame, data, features, train, evaluate, deploy, serve, monitor — not a straight line.</li>
+      <li>Model code is a sliver of a production ML system; the rest is data and systems engineering.</li>
+      <li>Always name an offline metric <i>and</i> the product metric it is a proxy for, plus the baseline you must beat.</li>
+    </ul>
+  </div>
+
+  <div class="quiz-wrap">
+    <h2>Check your understanding</h2>
+    <div class="quiz-score"></div>
+
+    <div class="quiz" data-answer="2">
+      <p class="q">Which problem is the <i>worst</i> fit for machine learning?</p>
+      <div class="opts">
+        <button class="opt">Detecting fraudulent card transactions</button>
+        <button class="opt">Ranking search results for a query</button>
+        <button class="opt">Calculating VAT on an invoice</button>
+        <button class="opt">Flagging toxic comments</button>
+      </div>
+      <div class="explain">VAT is a known, exact, legally specified rule. Learning it from examples would be slower, more expensive and occasionally wrong — for a rule you can write in one line.</div>
+    </div>
+
+    <div class="quiz" data-answer="1">
+      <p class="q">“Predict the next token in this text” is an example of which kind of learning?</p>
+      <div class="opts">
+        <button class="opt">Supervised learning with human labels</button>
+        <button class="opt">Self-supervised learning</button>
+        <button class="opt">Unsupervised learning</button>
+        <button class="opt">Reinforcement learning</button>
+      </div>
+      <div class="explain">The label (the next token) comes free from the raw data itself — no annotator needed. That is what makes internet-scale pretraining possible.</div>
+    </div>
+
+    <div class="quiz" data-answer="3">
+      <p class="q">Your churn model scores 0.91 AUC offline but the A/B test shows no change in retention. What is the most likely explanation?</p>
+      <div class="opts">
+        <button class="opt">The model is overfitting to the test set</button>
+        <button class="opt">AUC is the wrong library implementation</button>
+        <button class="opt">The model needs more parameters</button>
+        <button class="opt">Predicting churn well doesn't mean the intervention changes it</button>
+      </div>
+      <div class="explain">A perfect predictor of who will leave is useless if the discount you send them doesn't change their mind. The offline metric measures prediction; the product metric measures the decision the prediction drives.</div>
+    </div>
+
+    <div class="quiz" data-answer="0">
+      <p class="q">Which of these is a uniquely “ML” failure mode rather than an ordinary software bug?</p>
+      <div class="opts">
+        <button class="opt">A feature pipeline starts returning zeros and accuracy silently drops 4%</button>
+        <button class="opt">A null pointer exception in the serving handler</button>
+        <button class="opt">A misconfigured load balancer sending traffic to a dead host</button>
+        <button class="opt">A memory leak in the API server</button>
+      </div>
+      <div class="explain">Nothing errors, all requests return 200, and the only symptom is a slow-moving quality metric. That silent-degradation shape is why ML systems need data and quality monitoring, not just uptime monitoring.</div>
+    </div>
+
+    <div class="quiz" data-answer="2">
+      <p class="q">In an ML design interview, what should come first?</p>
+      <div class="opts">
+        <button class="opt">Choosing between a transformer and a GBDT</button>
+        <button class="opt">Sketching the GPU serving topology</button>
+        <button class="opt">Defining the prediction task, the metric and the baseline</button>
+        <button class="opt">Deciding the feature store technology</button>
+      </div>
+      <div class="explain">Every later decision — model, features, hardware — depends on what you are predicting, how success is measured and what you must beat. Starting with the model is guessing.</div>
+    </div>
+  </div>
+</main>
+<script src="assets/app.js"></script>
+<script>
+(function(){
+  const { $, $$ } = ML;
+
+  /* ---------------- rules vs learning lab ---------------- */
+  const MAIL = [
+    { t: 'FREE trial of our accounting software — click here', spam: true,  f: [1,0,0,1] },
+    { t: 'WINNER! Claim your prize before midnight', spam: true,  f: [0,1,1,1] },
+    { t: 'Invoice 4471 attached — payment due Friday', spam: false, f: [0,0,0,0] },
+    { t: 'Your free coffee is waiting at the office kitchen', spam: false, f: [1,0,0,0] },
+    { t: 'URGENT: account suspended, verify identity now', spam: true,  f: [0,0,1,1] },
+    { t: 'Standup moved to 10:30 — see calendar links', spam: false, f: [0,0,0,1] },
+    { t: 'Congratulations WINNER of our annual raffle', spam: true,  f: [0,1,0,0] },
+    { t: 'Team offsite: FREE lunch, 3 venue options linked', spam: false, f: [1,0,0,1] },
+    { t: 'Crypto doubling scheme — limited slots', spam: true,  f: [0,0,0,0] },
+    { t: 'Q3 results summary from the finance team', spam: false, f: [0,0,0,0] },
+  ];
+  const RULES = ['subject contains “free”', 'subject contains “winner”', 'subject is ALL CAPS', 'body has 3+ links'];
+  let active = [], learned = false;
+
+  function renderRules() {
+    const list = $('#ruleList');
+    if (learned) {
+      list.innerHTML = '<b>model.predict(x)</b><br><span class="muted">one learned function, 12,000 weights,<br>retrained nightly on new labels</span>';
+      return;
+    }
+    list.innerHTML = active.length
+      ? active.map((i, k) => `if (<b>${RULES[i]}</b>) → spam;`).map((s, k) => `${k + 1}. ${s}`).join('<br>')
+      : '<i class="muted">No rules yet — everything is delivered.</i>';
+  }
+  function score() {
+    let caught = 0, wrong = 0;
+    const box = $('#inbox');
+    box.innerHTML = '';
+    MAIL.forEach((m) => {
+      const flagged = learned ? m.spam : active.some((i) => m.f[i]);
+      if (flagged && m.spam) caught++;
+      if (flagged && !m.spam) wrong++;
+      const cls = flagged && m.spam ? 'hit' : flagged && !m.spam ? 'miss' : m.spam ? '' : 'ok';
+      const v = flagged ? (m.spam ? 'blocked ✔' : 'FALSE POSITIVE') : (m.spam ? 'spam got through' : 'delivered');
+      box.insertAdjacentHTML('beforeend', `<div class="mail ${cls}"><span>${m.t}</span><span class="verdict">${v}</span></div>`);
+    });
+    $('#mCaught').innerHTML = `${caught} <small>/ 5</small>`;
+    $('#mFalse').textContent = wrong;
+    $('#mRules').textContent = learned ? '1 model' : active.length;
+    const note = $('#rulesNote');
+    if (learned) note.innerHTML = '🧠 <b>The learned model catches all five and blocks nothing legitimate</b> — because it weighs dozens of weak signals together instead of firing on any single word. The cost: you now need labelled data, a training job, and monitoring for when spammers change tactics.';
+    else if (!active.length) note.textContent = 'Add rules one at a time. Notice what happens to legitimate mail.';
+    else if (wrong) note.innerHTML = `⚠️ Your rules now block <b>${wrong}</b> real message(s). Every rule you add to catch more spam also catches more real mail — and a human has to maintain all of them forever.`;
+    else note.innerHTML = `Caught ${caught} of 5 so far. Keep adding rules — spam still gets through, and the rules do not generalise to wording you have not seen.`;
+    renderRules();
+  }
+  $$('[data-rule]').forEach((b) => b.onclick = () => {
+    const i = +b.dataset.rule;
+    learned = false;
+    if (!active.includes(i)) active.push(i);
+    b.classList.add('active');
+    score();
+  });
+  $('#rulesReset').onclick = () => { active = []; learned = false; $$('[data-rule]').forEach(b => b.classList.remove('active')); score(); };
+  $('#rulesLearn').onclick = () => { learned = true; score(); ML.toast('Trained on 200,000 labelled emails'); };
+  score();
+
+  /* ---------------- ML or plain code? ---------------- */
+  const ITEMS = [
+    ['Compute the total price of a shopping cart', 'C', 'Exact, specified arithmetic. Learning it would add error to something that is currently perfect.'],
+    ['Decide which of 10,000 products to show on a home page', 'M', 'Personal, changes daily, no writable rule — classic ranking problem (Chapter 30).'],
+    ['Check whether a password meets the complexity policy', 'C', 'The policy is the rule. Code it.'],
+    ['Estimate how long a food delivery will take', 'M', 'Depends on dozens of interacting signals (courier, weather, restaurant load) that shift constantly.'],
+    ['Detect whether an uploaded image contains a knife', 'M', 'Perception. No feasible hand-written rule over pixels.'],
+    ['Route a support ticket to the right team from its text', 'M', 'Fuzzy language matching with plenty of labelled history — a textbook classification task.'],
+    ['Enforce a 30-day refund window', 'C', 'A date comparison, and a legal one. Determinism is a feature here.'],
+    ['Flag which of today’s 4M transactions to review for fraud', 'M', 'Adversarial, imbalanced and constantly changing — rules alone rot within weeks (Chapter 44).'],
+  ];
+  const game = $('#sortGame'); let s = 0, answered = 0;
+  ITEMS.forEach(([txt, ans, why]) => {
+    const row = document.createElement('div'); row.className = 'sort-item';
+    row.innerHTML = `<span class="txt">${txt}</span><div class="seg" style="flex:none"><button data-v="M">🧠 Machine learning</button><button data-v="C">⌨️ Plain code</button></div><div class="why"></div>`;
+    row.querySelectorAll('button').forEach(b => b.onclick = () => {
+      if (row.dataset.done) return; row.dataset.done = 1; answered++;
+      b.classList.add('active');
+      const ok = b.dataset.v === ans; if (ok) s++;
+      row.classList.add(ok ? 'right' : 'wrongc');
+      row.querySelector('.why').innerHTML = (ok ? '✅ Correct — ' : `❌ This one is <b>${ans === 'M' ? 'machine learning' : 'plain code'}</b> — `) + why;
+      $('#sortScore').textContent = `${s} / ${ITEMS.length}`;
+      if (answered === ITEMS.length) ML.toast(s === ITEMS.length ? 'Perfect judgement! 🎯' : `You got ${s}/${ITEMS.length}`);
+    });
+    game.appendChild(row);
+  });
+})();
+</script>
+</body>
+</html>

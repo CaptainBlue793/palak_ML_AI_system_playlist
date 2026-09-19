@@ -1,0 +1,325 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Evaluating LLM Systems</title>
+<link rel="stylesheet" href="assets/style.css">
+<script>try{var t=JSON.parse(localStorage.getItem('ml-theme'));if(t)document.documentElement.setAttribute('data-theme',t)}catch(e){}</script>
+<style>
+  .judge { display:grid; gap:8px }
+  .judge .r { display:grid; grid-template-columns:180px 1fr 80px; gap:10px; align-items:center; font-size:13px }
+  .judge .tk { height:16px; border-radius:6px; background:var(--surface-3); overflow:hidden }
+  .judge .tk i { display:block; height:100%; transition:width .35s }
+  .judge .v { font-family:var(--mono); text-align:right; color:var(--muted) }
+  .rubric2 { font-family:var(--mono); font-size:12.5px; line-height:1.65; background:var(--surface-2); border:1px solid var(--border); border-radius:12px; padding:12px 14px; white-space:pre-wrap }
+  .sizetbl td.n { font-family:var(--mono); text-align:right }
+  .grader-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(200px,1fr)); gap:10px }
+  .grader-grid > div { padding:12px 14px; border-radius:12px; border:1px solid var(--border); background:var(--surface-2); font-size:13px }
+  .grader-grid b { display:block; margin-bottom:4px }
+</style>
+</head>
+<body data-chapter="35">
+<main class="content">
+
+  <section class="hero">
+    <div class="eyebrow"><span class="pill accent">Chapter 35</span><span class="pill amber">Expert</span><span class="pill">⏱ 45 min</span></div>
+    <h1>Evaluating <span class="grad">LLM Systems</span></h1>
+    <p class="lead">With a classifier you compute accuracy. With a generative system there is no single right answer, humans are slow and expensive, benchmarks are contaminated, and the model you use as a judge has opinions of its own. Evaluation is the hardest engineering problem in applied LLM work — and the one that decides whether you can ship confidently.</p>
+    <ul class="objectives">
+      <li>Build a golden set from real traffic that actually discriminates</li>
+      <li>Pick the cheapest grader that measures what you care about</li>
+      <li>Use LLM judges without inheriting their biases</li>
+      <li>Size an eval set and know when a difference is real</li>
+      <li>Run regression evals in CI and keep them honest over time</li>
+    </ul>
+  </section>
+
+  <h2>Three layers of evaluation</h2>
+  <div class="grid c3">
+    <div class="card feature reveal"><div class="f-ico">🏆</div><h4>Capability benchmarks</h4><p>MMLU, GSM8K, HumanEval, arena rankings. Useful for choosing a base model, almost useless for your task — and frequently contaminated (Chapter 16).</p></div>
+    <div class="card feature reveal"><div class="f-ico" style="background:var(--accent-2-soft)">🎯</div><h4>Task evals</h4><p>Your golden set, your rubric, your prompts. This is the number you make decisions with, and nobody can build it for you.</p></div>
+    <div class="card feature reveal"><div class="f-ico" style="background:var(--green-soft)">📡</div><h4>Production evaluation</h4><p>Continuous sampled grading of live traffic, plus implicit signals: thumbs, escalations, retries, edits. The only measurement of the system users actually meet.</p></div>
+  </div>
+
+  <div class="callout warn">
+    <div class="ico">📉</div>
+    <div class="body"><div class="title">A public benchmark score is not a product decision</div>
+      <p>Two models three points apart on a leaderboard routinely swap places on a specific task, and contamination makes headline numbers unreliable in the direction that flatters. Use benchmarks to shortlist; use your own evals to choose. If you have no task eval, you are shipping on vibes — and vibes are systematically biased toward whatever you looked at most recently.</p></div>
+  </div>
+
+  <h2>Building a golden set</h2>
+  <div class="table-wrap">
+    <table class="t">
+      <thead><tr><th>Property</th><th>Target</th><th>Why</th></tr></thead>
+      <tbody>
+        <tr><td><b>Source</b></td><td>Real production queries, sampled across time and segments</td><td>Synthetic questions are systematically easier and better-formed than real ones</td></tr>
+        <tr><td><b>Size</b></td><td>150–500 to start; grow with usage</td><td>Enough to detect the differences you care about (see below)</td></tr>
+        <tr><td><b>Difficulty mix</b></td><td>~50% typical, 30% hard, 20% adversarial/unanswerable</td><td>An eval of only easy cases saturates and stops discriminating</td></tr>
+        <tr><td><b>Coverage</b></td><td>Every capability and language you claim to support</td><td>Otherwise a regression lands exactly where you weren't looking</td></tr>
+        <tr><td><b>Labels</b></td><td>Reference answers or rubric criteria, written by someone who knows the domain</td><td>The eval is only as good as the judgement encoded in it</td></tr>
+        <tr><td><b>Freshness</b></td><td>Add new failures continuously; retire saturated items</td><td>Today's bug report is tomorrow's regression test</td></tr>
+        <tr><td><b>Privacy</b></td><td>Held privately, never published</td><td>A public eval becomes training data and stops measuring anything</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="callout tip">
+    <div class="ico">🐛</div>
+    <div class="body"><div class="title">Every bug report becomes an eval case</div>
+      <p>This single habit compounds faster than any tooling. A user complains, you reproduce it, you add the case with the expected behaviour — and it can never silently return. After six months you have an eval set shaped exactly like your product's real failure modes, which no benchmark can give you.</p></div>
+  </div>
+
+  <h2>Choosing a grader</h2>
+  <div class="grader-grid">
+    <div><b>✅ Programmatic</b>Exact match, regex, JSON-schema validity, unit tests, SQL execution, retrieval-support check. Free, deterministic, unambiguous. <b>Use wherever possible</b> — more tasks admit it than people assume.</div>
+    <div><b>📏 Reference-based</b>Overlap with a gold answer (ROUGE/BLEU), or embedding similarity. Cheap, weak: correlates poorly with quality for open-ended text.</div>
+    <div><b>🧑‍⚖️ LLM judge (rubric)</b>Score against explicit criteria with reasons. Cheap, fast, scales — and biased in known ways you must control for.</div>
+    <div><b>⚖️ LLM judge (pairwise)</b>“Which response is better, A or B?” More reliable than absolute scoring, and directly gives a win rate against the incumbent.</div>
+    <div><b>👥 Human</b>The ground truth for subjective quality. Slow, expensive, and inconsistent unless you invest in guidelines and measure agreement (Chapter 3).</div>
+    <div><b>📈 Implicit production signals</b>Thumbs, copies, edits, escalations, retries, session abandonment. Free and abundant; biased and lagging, but excellent as an alarm.</div>
+  </div>
+
+  <div class="rubric2" style="margin-top:14px">You are grading a customer-support answer against the retrieved sources.
+
+Score each dimension 0–2 and give one sentence of justification:
+  grounded    every factual claim is supported by a cited source
+  complete    addresses all parts of the customer's question
+  actionable  the customer can do something with it
+  concise     no padding, no restating the question
+  safe        no promises about refunds/policy beyond the sources
+
+Then output JSON only:
+{"grounded":n,"complete":n,"actionable":n,"concise":n,"safe":n,"why":"..."}
+
+Grade the ANSWER against the SOURCES only. Do not use outside knowledge.
+Ignore writing style, length and formatting unless a criterion mentions them.</div>
+  <p class="small muted" style="margin-top:8px">Specific criteria with a fixed output schema beat “rate this 1–10”. The explicit instruction to ignore length is there because judges reward verbosity unless told not to.</p>
+
+  <h2>LLM judges have biases — measure them</h2>
+  <div class="panel">
+    <div class="panel-head"><div class="dots"><i></i><i></i><i></i></div><span class="p-title">Judge bias explorer</span><span class="p-tag">Interactive</span></div>
+    <div class="panel-body">
+      <div class="chip-row" id="jChips"></div>
+      <div class="judge" id="jBars" style="margin-top:12px"></div>
+      <div class="stats" style="margin-top:12px">
+        <div class="stat acc"><div class="k">Measured win rate for A</div><div class="v" id="jWin" style="font-size:18px">–</div></div>
+        <div class="stat"><div class="k">True win rate</div><div class="v" id="jTrue" style="font-size:18px">50.0%</div></div>
+        <div class="stat bad"><div class="k">Bias</div><div class="v" id="jBias" style="font-size:18px">–</div></div>
+        <div class="stat good"><div class="k">Agreement with humans</div><div class="v" id="jAgree" style="font-size:18px">–</div></div>
+      </div>
+      <div class="callout" id="jInfo" style="margin-top:12px"><div class="ico">⚖️</div><div class="body"><p style="margin:0"></p></div></div>
+    </div>
+  </div>
+
+  <div class="callout tip">
+    <div class="ico">🔁</div>
+    <div class="body"><div class="title">The four rules for LLM judges</div>
+      <ul class="mb0">
+        <li><b>Swap and average.</b> Grade (A,B) and (B,A); if the verdict flips, it's a tie. This removes position bias almost entirely.</li>
+        <li><b>Calibrate against humans.</b> Have people grade 100–200 of the same items and report agreement. A judge you haven't validated is a random number generator with good prose.</li>
+        <li><b>Prefer pairwise to absolute.</b> “Better than the incumbent?” is far more stable than “score out of 10”, and it's the decision you actually need.</li>
+        <li><b>Don't let a model grade its own family unchecked.</b> Self-preference is real; use a different model as judge, or validate the bias explicitly.</li>
+      </ul></div>
+  </div>
+
+  <h2>How big does the eval set need to be?</h2>
+  <div class="panel">
+    <div class="panel-head"><div class="dots"><i></i><i></i><i></i></div><span class="p-title">Eval set sizing</span><span class="p-tag">Interactive</span></div>
+    <div class="panel-body">
+      <div class="range-row"><label for="evBase">Current pass rate</label><input type="range" id="evBase" min="30" max="95" step="1" value="72"><output id="evBaseV"></output></div>
+      <div class="range-row"><label for="evDiff">Improvement you want to detect (absolute)</label><input type="range" id="evDiff" min="1" max="20" step="1" value="5"><output id="evDiffV"></output></div>
+      <div class="range-row"><label for="evN">Your eval set size</label><input type="range" id="evN" min="20" max="2000" step="10" value="200"><output id="evNV"></output></div>
+      <div class="stats">
+        <div class="stat acc"><div class="k">Needed for 80% power</div><div class="v" id="evNeed" style="font-size:18px">–</div></div>
+        <div class="stat"><div class="k">Detectable at your size</div><div class="v" id="evMde" style="font-size:18px">–</div></div>
+        <div class="stat good"><div class="k">95% CI half-width</div><div class="v" id="evCi" style="font-size:18px">–</div></div>
+        <div class="stat warn"><div class="k">Cost per eval run</div><div class="v" id="evCost" style="font-size:18px">–</div></div>
+      </div>
+      <div class="callout" id="evInfo" style="margin-top:12px"><div class="ico">📐</div><div class="body"><p style="margin:0"></p></div></div>
+      <p class="small muted">Paired comparison on the same items needs far fewer examples than two independent samples — always run both systems on the identical eval set and compare per-item.</p>
+    </div>
+  </div>
+
+  <h2>Evals in CI</h2>
+  <pre class="code">on: pull_request
+  fast-evals:       80 items, programmatic graders only     ~40 s   ← every commit
+  judge-evals:      250 items, pairwise vs production        ~6 min  ← on PR label
+  full-suite:       1,200 items + slices + safety set        ~35 min ← nightly &amp; pre-release
+  human-review:     50 sampled production answers            weekly
+
+gates: no regression &gt;2% on any capability slice
+       safety set: zero new failures (hard block)
+       parse-failure rate &lt; 0.5%</pre>
+
+  <div class="callout warn">
+    <div class="ico">🧭</div>
+    <div class="body"><div class="title">Eval-driven development</div>
+      <p>Write the eval before the change. It forces you to state what “better” means, turns a prompt tweak into a measurable experiment, and prevents the common cycle of improving one case while silently breaking three. Teams that do this ship prompt and model changes weekly with confidence; teams that don't accumulate a system nobody dares to touch.</p></div>
+  </div>
+
+  <h2>Keeping evals honest</h2>
+  <div class="table-wrap">
+    <table class="t">
+      <thead><tr><th>Risk</th><th>Symptom</th><th>Mitigation</th></tr></thead>
+      <tbody>
+        <tr><td><b>Saturation</b></td><td>Everything scores 97%; changes are invisible</td><td>Retire solved items, add harder ones from production failures</td></tr>
+        <tr><td><b>Overfitting to the eval</b></td><td>Eval improves, users don't</td><td>Hold back a rotating slice never used for iteration</td></tr>
+        <tr><td><b>Contamination</b></td><td>Suspiciously strong results on public sets</td><td>Keep your set private; check n-gram overlap</td></tr>
+        <tr><td><b>Judge drift</b></td><td>Scores move when the judge model is updated</td><td>Pin the judge version; re-baseline deliberately and note it</td></tr>
+        <tr><td><b>Distribution drift</b></td><td>The eval no longer looks like production traffic</td><td>Resample from recent traffic quarterly</td></tr>
+        <tr><td><b>Grading the wrong thing</b></td><td>High scores, unhappy users</td><td>Correlate eval scores against real outcomes — if they don't move together, the eval is wrong</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="callout danger"><div class="ico">⚠️</div><div class="body"><div class="title">Common mistakes</div>
+    <ul class="mb0">
+      <li><b>No task eval at all.</b> Then every change is a debate about anecdotes.</li>
+      <li><b>Using an unvalidated LLM judge.</b> Measure agreement with humans before you trust a single number from it.</li>
+      <li><b>Ignoring position bias.</b> Always swap A/B and average, or your win rates are partly about ordering.</li>
+      <li><b>Evaluating only happy paths.</b> Include unanswerable, adversarial and multilingual cases, or they break in production.</li>
+      <li><b>Comparing on different eval sets.</b> Run both systems on identical items and compare per-item.</li>
+      <li><b>Treating a 2-point move on 100 items as real.</b> That's inside the noise — report a confidence interval.</li>
+      <li><b>Publishing your eval set.</b> It then becomes training data and stops measuring anything.</li>
+    </ul></div></div>
+
+  <div class="callout interview"><div class="ico">🎤</div><div class="body"><div class="title">Interview drill</div>
+    <p class="small" style="margin:10px 0 0"><b>Warm-up:</b> How would you evaluate a customer-support assistant?</p>
+    <details class="ans"><summary>How a strong answer sounds</summary><div>Layered, cheapest first. Programmatic where possible: did it cite a source that exists, did it produce valid structured output, did it stay within policy limits, did it refuse when the sources don't contain the answer. Then a rubric-based LLM judge on groundedness, completeness and actionability, validated against 150 human-graded items so I know the agreement rate. Then pairwise win rate against the current production version on a golden set sampled from real tickets, including unanswerable and adversarial ones. In production: sampled human review weekly, plus implicit signals — escalation rate, thumbs-down, reopened tickets — as the alarm. The offline suite gates releases; the production signals tell me whether the offline suite is still measuring the right thing.</div></details>
+    <p class="small" style="margin:10px 0 0"><b>Deeper:</b> Your judge says the new prompt wins 61% of comparisons. Do you ship?</p>
+    <details class="ans"><summary>How a strong answer sounds</summary><div>Not yet. First, is 61% outside noise for the sample size? On 200 items the 95% interval is roughly ±7 points, so it's probably real but not comfortably. Second, is it position-bias-free — were comparisons run in both orders and averaged? Third, how well does this judge agree with humans on this task; if agreement is 70%, a 61% win rate is a much weaker claim than it sounds. Fourth, check the losses, not the wins: 39% of cases got worse, and if those cluster in one capability or language that's a regression I'd have to fix regardless of the average. Then check guardrails — length, cost, latency, refusal rate — and if all of that holds, ship behind a canary and confirm with production signals rather than treating the offline number as the decision.</div></details>
+  </div></div>
+
+  <div class="takeaways">
+    <h3>🧠 Key takeaways</h3>
+    <ul>
+      <li>Benchmarks shortlist models; your own task eval makes the decision.</li>
+      <li>Build the golden set from real traffic, keep it private, and feed every bug report into it.</li>
+      <li>Prefer programmatic graders; use pairwise LLM judges with order swapping and human calibration.</li>
+      <li>Report confidence intervals — small eval sets cannot see small differences.</li>
+      <li>Run fast evals in CI, full suites nightly, and sampled human review on production continuously.</li>
+    </ul>
+  </div>
+
+  <div class="quiz-wrap">
+    <h2>Check your understanding</h2>
+    <div class="quiz-score"></div>
+
+    <div class="quiz" data-answer="1">
+      <p class="q">Your LLM judge rates response A higher when it is shown first. What's the standard fix?</p>
+      <div class="opts">
+        <button class="opt">Use a bigger judge model</button>
+        <button class="opt">Run each comparison in both orders and average (counting flips as ties)</button>
+        <button class="opt">Lower the judge's temperature</button>
+        <button class="opt">Show only one response at a time</button>
+      </div>
+      <div class="explain">Position bias is well documented. Order swapping removes most of it and costs only a second judging pass.</div>
+    </div>
+
+    <div class="quiz" data-answer="2">
+      <p class="q">Which grader should you prefer when the task allows it?</p>
+      <div class="opts">
+        <button class="opt">An LLM judge with a rubric</button>
+        <button class="opt">Human raters</button>
+        <button class="opt">A programmatic check — schema validity, unit tests, citation existence</button>
+        <button class="opt">Embedding similarity to a reference answer</button>
+      </div>
+      <div class="explain">Deterministic, free, unambiguous and instant. Far more tasks admit a programmatic check than teams initially assume.</div>
+    </div>
+
+    <div class="quiz" data-answer="3">
+      <p class="q">On a 100-item eval, version B scores 3 points higher. What can you conclude?</p>
+      <div class="opts">
+        <button class="opt">B is better; ship it</button>
+        <button class="opt">A is better on hard cases</button>
+        <button class="opt">The judge is biased</button>
+        <button class="opt">Little — 3 points on 100 items is well inside the confidence interval</button>
+      </div>
+      <div class="explain">The 95% interval at n=100 is roughly ±9 points. Use a paired per-item comparison and a bootstrap, or a larger set.</div>
+    </div>
+
+    <div class="quiz" data-answer="0">
+      <p class="q">Why should a golden eval set stay private?</p>
+      <div class="opts">
+        <button class="opt">Published sets end up in training data and stop measuring generalisation</button>
+        <button class="opt">It contains proprietary model weights</button>
+        <button class="opt">Public sets are slower to evaluate</button>
+        <button class="opt">Licensing restrictions</button>
+      </div>
+      <div class="explain">Contamination is why headline benchmark numbers drift upward without matching real-world gains. Your private set is the only one you can trust over time.</div>
+    </div>
+
+    <div class="quiz" data-answer="2">
+      <p class="q">Your eval scores keep improving but users are no happier. What's the most likely problem?</p>
+      <div class="opts">
+        <button class="opt">The judge model is too small</button>
+        <button class="opt">The eval set is too large</button>
+        <button class="opt">The eval measures something that doesn't correlate with the user outcome, or you've overfitted to it</button>
+        <button class="opt">Temperature is too high</button>
+      </div>
+      <div class="explain">Correlate eval scores against real outcomes periodically. If they don't move together, the eval is the thing that needs fixing — and hold back a rotating slice you never iterate on.</div>
+    </div>
+  </div>
+</main>
+<script src="assets/app.js"></script>
+<script>
+(function(){
+  const { $, $$, clamp, fmt } = ML;
+
+  /* ================= judge bias ================= */
+  const BIASES = [
+    { id: 'pos', label: 'Position bias (A shown first)', on: true, eff: 0.07, note: 'Judges favour whichever response they read first — a robust, well-documented effect worth 5–10 points.' },
+    { id: 'len', label: 'Length bias (A is 2× longer)', on: true, eff: 0.09, note: 'Longer answers read as more thorough. This is also how RLHF-era models learned to pad (Chapter 18).' },
+    { id: 'self', label: 'Self-preference (judge is A’s family)', on: false, eff: 0.05, note: 'Models prefer text that resembles their own distribution.' },
+    { id: 'fmt', label: 'Formatting bias (A uses bullets)', on: false, eff: 0.04, note: 'Structure signals effort to a judge, independent of content.' },
+    { id: 'swap', label: '✅ Mitigation: swap order and average', on: false, eff: 0, note: '' },
+    { id: 'lenctl', label: '✅ Mitigation: length-controlled rubric', on: false, eff: 0, note: '' },
+  ];
+  const onB = (id) => BIASES.find(b => b.id === id).on;
+  function judge() {
+    $('#jChips').innerHTML = BIASES.map(b => `<button class="chip ${b.on ? 'on' : ''}" data-b="${b.id}">${b.on ? '✓' : '+'} ${b.label}</button>`).join('');
+    $$('#jChips [data-b]').forEach(el => el.onclick = () => { const b = BIASES.find(x => x.id === el.dataset.b); b.on = !b.on; judge(); });
+    let bias = 0;
+    BIASES.forEach(b => { if (b.on && b.eff) bias += b.eff; });
+    if (onB('swap')) bias -= BIASES.find(b => b.id === 'pos').on ? BIASES.find(b => b.id === 'pos').eff * 0.92 : 0;
+    if (onB('lenctl')) bias -= BIASES.find(b => b.id === 'len').on ? BIASES.find(b => b.id === 'len').eff * 0.75 : 0;
+    const win = clamp(0.5 + bias, 0, 1);
+    const agree = clamp(0.88 - Math.abs(bias) * 1.8, 0.4, 0.95);
+    const rows = BIASES.filter(b => b.eff).map(b => [b.label, b.on ? b.eff : 0, b.on ? 'var(--red)' : 'var(--surface-3)']);
+    $('#jBars').innerHTML = rows.map(([n, v, c]) =>
+      `<div class="r"><span>${n}</span><div class="tk"><i style="width:${clamp(v * 700, 1, 100)}%;background:${c}"></i></div><span class="v">${v ? '+' + (v * 100).toFixed(1) + ' pts' : '—'}</span></div>`).join('');
+    $('#jWin').textContent = (win * 100).toFixed(1) + '%';
+    $('#jBias').textContent = (bias >= 0 ? '+' : '') + (bias * 100).toFixed(1) + ' pts';
+    $('#jAgree').textContent = (agree * 100).toFixed(0) + '%';
+    $('#jInfo p').innerHTML = Math.abs(bias) < 0.02
+      ? `✅ <b>Near-unbiased.</b> Two genuinely equal responses now score close to 50/50, and agreement with human raters is around ${(agree * 100).toFixed(0)}%. This is the state you need before a win rate means anything.`
+      : `🚩 <b>The two responses are equally good, yet the judge reports ${(win * 100).toFixed(1)}% for A.</b> That ${(bias * 100).toFixed(1)}-point gap is pure artefact — and it is larger than most of the improvements you'll be trying to measure. Turn on the mitigations and watch it collapse. ` +
+        BIASES.filter(b => b.on && b.note).map(b => b.note).join(' ');
+  }
+  judge();
+
+  /* ================= eval sizing ================= */
+  function evalsize() {
+    const p = +$('#evBase').value / 100, d = +$('#evDiff').value / 100, n = +$('#evN').value;
+    $('#evBaseV').textContent = (p * 100).toFixed(0) + '%';
+    $('#evDiffV').textContent = '+' + (d * 100).toFixed(0) + ' pts';
+    $('#evNV').textContent = n + ' items';
+    // paired-ish: use independent binomial as a conservative estimate
+    const need = Math.ceil(2 * Math.pow(1.96 + 0.84, 2) * p * (1 - p) / (d * d));
+    const mde = 2.8 * Math.sqrt(2 * p * (1 - p) / n);
+    const ci = 1.96 * Math.sqrt(p * (1 - p) / n);
+    $('#evNeed').textContent = fmt(need, 0) + ' items';
+    $('#evMde').textContent = '±' + (mde * 100).toFixed(1) + ' pts';
+    $('#evCi').textContent = '±' + (ci * 100).toFixed(1) + ' pts';
+    $('#evCost').textContent = '$' + (n * 0.012).toFixed(2);
+    $('#evInfo p').innerHTML = n >= need
+      ? `✅ With <b>${n} items</b> you can detect a <b>${(d * 100).toFixed(0)}-point</b> change (you'd need ${fmt(need, 0)}). Each eval run costs roughly $${(n * 0.012).toFixed(2)} and a few minutes — cheap enough to run on every pull request, which is the real goal.`
+      : `⚠️ <b>${n} items is too few</b> to detect a ${(d * 100).toFixed(0)}-point change reliably; you'd need about <b>${fmt(need, 0)}</b>. At your current size the smallest trustworthy difference is around <b>${(mde * 100).toFixed(1)} points</b>. Options: grow the set from production traffic, use paired per-item comparison (substantially more sensitive than these independent-sample numbers), or accept that you can only detect larger changes and say so when reporting.`;
+  }
+  ['#evBase', '#evDiff', '#evN'].forEach(id => $(id).addEventListener('input', evalsize));
+  evalsize();
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,346 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Feature Stores &amp; Training/Serving Skew</title>
+<link rel="stylesheet" href="assets/style.css">
+<script>try{var t=JSON.parse(localStorage.getItem('ml-theme'));if(t)document.documentElement.setAttribute('data-theme',t)}catch(e){}</script>
+<style>
+  .pit-svg { width:100%; height:240px }
+  .pit-svg .upd { fill:var(--accent-2) }
+  .pit-svg .lbl-ev { fill:var(--pink) }
+  .pit-svg .join { stroke-width:2 }
+  .pit-svg .join.good { stroke:var(--green) }
+  .pit-svg .join.bad { stroke:var(--red); stroke-dasharray:4 3 }
+  .pit-svg text { font-size:10.5px; fill:var(--muted); font-family:var(--mono) }
+  .rowtbl td.bad { color:var(--red); font-weight:700 }
+  .rowtbl td.good { color:var(--green); font-weight:700 }
+  .fsviz text { font-size:11px; fill:var(--text-2); font-family:var(--font); font-weight:600 }
+  .fsviz .sub { font-size:9.5px; fill:var(--muted); font-family:var(--mono); font-weight:400 }
+  .skew-svg { width:100%; height:190px }
+  .skew-svg .off { fill:var(--accent); opacity:.6 }
+  .skew-svg .onl { fill:var(--amber); opacity:.6 }
+  .skew-svg text { font-size:10.5px; fill:var(--muted); font-family:var(--mono) }
+</style>
+</head>
+<body data-chapter="29">
+<main class="content">
+
+  <section class="hero">
+    <div class="eyebrow"><span class="pill accent">Chapter 29</span><span class="pill">Advanced</span><span class="pill">⏱ 40 min</span></div>
+    <h1>Feature Stores &amp; <span class="grad">Training/Serving Skew</span></h1>
+    <p class="lead">The most expensive bug in applied ML is not in the model. It's that the number called <code>avg_order_value_30d</code> in training is not the number with that name in production — computed by different code, from different data, at a different moment.</p>
+    <ul class="objectives">
+      <li>Name the three kinds of training/serving skew and how each arises</li>
+      <li>Build point-in-time-correct training sets with as-of joins</li>
+      <li>Describe feature store architecture and when it earns its cost</li>
+      <li>Choose between generating training data from logs or from the store</li>
+      <li>Monitor online/offline parity continuously</li>
+    </ul>
+  </section>
+
+  <h2>Three flavours of skew</h2>
+  <div class="grid c3">
+    <div class="card feature reveal"><div class="f-ico">🧮</div><h4>Implementation skew</h4><p>Training computes the feature in SQL; serving computes it in Python. Two implementations, two rounding rules, two null policies, and a drift that grows quietly.</p></div>
+    <div class="card feature reveal"><div class="f-ico" style="background:var(--amber-soft)">⏰</div><h4>Temporal skew</h4><p>Training uses values as they are <i>today</i>; serving uses values as they were <i>at request time</i>. This is leakage, and it flatters your offline metrics.</p></div>
+    <div class="card feature reveal"><div class="f-ico" style="background:var(--red-soft)">📊</div><h4>Distribution skew</h4><p>Training data comes from a clean warehouse table; serving sees timeouts, nulls, defaults and a stale cache. The model has never seen the inputs it actually receives.</p></div>
+  </div>
+
+  <div class="callout warn">
+    <div class="ico">🔍</div>
+    <div class="body"><div class="title">The signature</div>
+      <p>Excellent offline metrics, disappointing online results, and no obvious bug. Before blaming the model or the intervention, log the <b>exact feature vector served</b> for a sample of requests and compare it with the vector your training pipeline would have produced for the same entity at the same timestamp. Differences here explain more failed launches than every other cause combined.</p></div>
+  </div>
+
+  <h2>Point-in-time correctness</h2>
+  <p>A training row is (entity, timestamp, label). The features attached to it must be <b>the values that were knowable at that timestamp</b> — not the latest values, and not values from a table that has since been updated. That requires an <i>as-of</i> join, and it is fiddly enough that it's the main thing feature stores exist to do for you.</p>
+
+  <div class="panel">
+    <div class="panel-head"><div class="dots"><i></i><i></i><i></i></div><span class="p-title">As-of join vs naive join</span><span class="p-tag">Interactive</span></div>
+    <div class="panel-body">
+      <div class="seg" id="pitSeg"><button data-v="naive" class="active">Naive join (latest value)</button><button data-v="asof">Point-in-time (as-of) join</button></div>
+      <div class="svg-scroll"><svg id="pitSvg" class="diagram pit-svg" viewBox="0 0 640 240"></svg></div>
+      <div class="table-wrap" style="margin-top:8px">
+        <table class="t rowtbl">
+          <thead><tr><th>Training row</th><th>Label time</th><th>Feature value used</th><th>Knowable then?</th></tr></thead>
+          <tbody id="pitRows"></tbody>
+        </table>
+      </div>
+      <div class="callout" id="pitInfo" style="margin-top:12px"><div class="ico">⏱️</div><div class="body"><p style="margin:0"></p></div></div>
+    </div>
+  </div>
+
+  <div class="callout tip">
+    <div class="ico">🧾</div>
+    <div class="body"><div class="title">Also subtract the pipeline's own delay</div>
+      <p>Strictly, the correct question is not “what was true at time T?” but “what would the serving system have <i>known</i> at time T?”. If a feature pipeline lands data 20 minutes late, then at request time the online store held a value that was already 20 minutes old — so a training set built with instantaneous values is still optimistic. Good feature stores let you declare that delay and build training sets accordingly.</p></div>
+  </div>
+
+  <h2>What a feature store is</h2>
+  <div class="panel">
+    <div class="panel-head"><div class="dots"><i></i><i></i><i></i></div><span class="p-title">Feature store architecture</span><span class="p-tag">Diagram</span></div>
+    <div class="panel-body svg-scroll">
+      <svg class="diagram fsviz" viewBox="0 0 780 300">
+        <defs><marker id="fh" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" class="arrow-head"/></marker></defs>
+        <path class="edge" d="M150,60 L205,60" marker-end="url(#fh)"/>
+        <path class="edge" d="M345,60 L400,60" marker-end="url(#fh)"/>
+        <path class="edge" d="M345,75 L400,150" marker-end="url(#fh)"/>
+        <path class="edge" d="M540,60 L595,60" marker-end="url(#fh)"/>
+        <path class="edge" d="M540,165 L595,165" marker-end="url(#fh)"/>
+        <path class="edge dash" d="M270,95 L270,215" marker-end="url(#fh)"/>
+        <g class="node" transform="translate(20,35)"><rect width="130" height="50" rx="12"/><text x="65" y="24" text-anchor="middle">Raw events</text><text x="65" y="40" text-anchor="middle" class="sub">logs, CDC, streams</text></g>
+        <g class="node" transform="translate(205,35)"><rect width="140" height="50" rx="12"/><text x="70" y="24" text-anchor="middle">Transformations</text><text x="70" y="40" text-anchor="middle" class="sub">one definition, versioned</text></g>
+        <g class="node" transform="translate(400,35)"><rect width="140" height="50" rx="12"/><text x="70" y="24" text-anchor="middle">Offline store</text><text x="70" y="40" text-anchor="middle" class="sub">full history, as-of joins</text></g>
+        <g class="node" transform="translate(400,140)"><rect width="140" height="50" rx="12"/><text x="70" y="24" text-anchor="middle">Online store</text><text x="70" y="40" text-anchor="middle" class="sub">latest value, &lt;10 ms</text></g>
+        <g class="node" transform="translate(595,35)"><rect width="150" height="50" rx="12"/><text x="75" y="24" text-anchor="middle">Training set</text><text x="75" y="40" text-anchor="middle" class="sub">point-in-time correct</text></g>
+        <g class="node" transform="translate(595,140)"><rect width="150" height="50" rx="12"/><text x="75" y="24" text-anchor="middle">Model serving</text><text x="75" y="40" text-anchor="middle" class="sub">batch get by entity key</text></g>
+        <g class="node" transform="translate(190,215)"><rect width="170" height="50" rx="12" style="stroke-dasharray:5 4"/><text x="85" y="24" text-anchor="middle">Registry</text><text x="85" y="40" text-anchor="middle" class="sub">names, owners, types, TTL</text></g>
+        <text x="600" y="240" class="sub">parity monitor: compare served vs recomputed values</text>
+      </svg>
+    </div>
+  </div>
+
+  <div class="table-wrap">
+    <table class="t">
+      <thead><tr><th>Component</th><th>Job</th><th>Typical technology</th></tr></thead>
+      <tbody>
+        <tr><td><b>Registry / definitions</b></td><td>One versioned definition per feature, with owner, type, TTL and documentation</td><td>Code in the repo (Feast, Tecton, in-house)</td></tr>
+        <tr><td><b>Offline store</b></td><td>Full history for training sets and backfills</td><td>Lakehouse tables, warehouse</td></tr>
+        <tr><td><b>Online store</b></td><td>Latest value per entity, single-digit millisecond reads</td><td>Redis, DynamoDB, Cassandra, Bigtable</td></tr>
+        <tr><td><b>Materialization</b></td><td>Keep the online store fresh from batch and stream jobs</td><td>Spark/Flink jobs on a schedule or continuously</td></tr>
+        <tr><td><b>Serving API</b></td><td>Batch fetch many features for many entities in one call</td><td>gRPC/HTTP with a strict timeout and a default policy</td></tr>
+        <tr><td><b>Monitoring</b></td><td>Freshness, null rates, and online/offline parity</td><td>Your metrics stack (Chapter 34)</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h2>Two ways to build the training set</h2>
+  <div class="split">
+    <div class="card"><h4 class="mt0">A · Reconstruct from history</h4><p class="small mb0">Take labelled events and as-of join the offline store. Works retroactively for any model, lets you add features after the fact — and is exactly where point-in-time bugs live.</p></div>
+    <div class="card"><h4 class="mt0">B · Log what you served</h4><p class="small mb0">Write the exact feature vector used for each prediction, then join labels when they arrive. <b>Zero skew by construction</b>, and it's also your parity monitor. The catch: you can only train on features you were already serving, so new features still need path A.</p></div>
+  </div>
+
+  <div class="callout tip">
+    <div class="ico">✅</div>
+    <div class="body"><div class="title">Do both</div>
+      <p>Log served feature vectors from day one — it costs a little storage and pays back the first time a launch underperforms. Use reconstruction to explore new features, and use the logs to verify that your reconstruction produces the same numbers. A weekly job that compares the two on a sample and alerts on divergence is one of the highest-value things in an ML platform.</p></div>
+  </div>
+
+  <h2>Watching parity</h2>
+  <div class="panel">
+    <div class="panel-head"><div class="dots"><i></i><i></i><i></i></div><span class="p-title">Parity monitor</span><span class="p-tag">Interactive</span></div>
+    <div class="panel-body">
+      <div class="seg" id="skewSeg"><button data-v="ok" class="active">Healthy</button><button data-v="impl">Implementation skew</button><button data-v="stale">Stale online store</button><button data-v="null">Timeout defaults</button></div>
+      <div class="svg-scroll"><svg id="skewSvg" class="diagram skew-svg" viewBox="0 0 640 190"></svg></div>
+      <div class="stats">
+        <div class="stat acc"><div class="k">Mean difference</div><div class="v" id="skDiff" style="font-size:18px">–</div></div>
+        <div class="stat bad"><div class="k">Rows differing &gt;1%</div><div class="v" id="skRows" style="font-size:18px">–</div></div>
+        <div class="stat good"><div class="k">Verdict</div><div class="v" id="skVerdict" style="font-size:15px">–</div></div>
+      </div>
+      <div class="callout" id="skInfo" style="margin-top:12px"><div class="ico">🔬</div><div class="body"><p style="margin:0"></p></div></div>
+      <div class="legend"><span><i style="background:var(--accent)"></i>offline (recomputed)</span><span><i style="background:var(--amber)"></i>online (served)</span></div>
+    </div>
+  </div>
+
+  <h2>Do you need a feature store?</h2>
+  <div class="table-wrap">
+    <table class="t">
+      <thead><tr><th>Situation</th><th>Verdict</th></tr></thead>
+      <tbody>
+        <tr><td>One model, features computed from the request payload</td><td><b>No.</b> A shared function in your service is enough.</td></tr>
+        <tr><td>One model, batch predictions written to a table</td><td><b>No.</b> The warehouse is your feature store.</td></tr>
+        <tr><td>Several models sharing entity-level features</td><td><b>Probably.</b> The value is reuse and one definition, not the technology.</td></tr>
+        <tr><td>Real-time features with strict latency and point-in-time training</td><td><b>Yes.</b> This is precisely the problem it solves.</td></tr>
+        <tr><td>Many teams, compliance requirements, feature lineage</td><td><b>Yes.</b> The registry and governance become the main benefit.</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="callout warn">
+    <div class="ico">🧰</div>
+    <div class="body"><div class="title">The discipline matters more than the product</div>
+      <p>You can get 90% of the value with conventions: one repository of feature definitions, one execution path shared by training and serving, as-of joins in the training-set builder, served vectors logged, and a parity alert. Buying a feature store without those disciplines gives you a new system to operate and the same bugs.</p></div>
+  </div>
+
+  <div class="callout danger"><div class="ico">⚠️</div><div class="body"><div class="title">Common mistakes</div>
+    <ul class="mb0">
+      <li><b>Two implementations of one feature.</b> They will diverge; the only question is when you notice.</li>
+      <li><b>Joining the latest feature values to historical labels.</b> Leakage, great offline numbers, flat launch.</li>
+      <li><b>Ignoring the online store's staleness</b> when building training data — the model learns from fresher data than it will ever see.</li>
+      <li><b>No default policy for timeouts.</b> If a feature fetch fails at serving time, what value is used — and did the model ever see that value in training?</li>
+      <li><b>Unbounded feature sprawl.</b> Hundreds of features, no owners, no TTLs, nobody able to delete anything safely.</li>
+      <li><b>No parity monitoring.</b> Skew is silent by definition; it only shows up as a disappointing A/B result months later.</li>
+    </ul></div></div>
+
+  <div class="callout interview"><div class="ico">🎤</div><div class="body"><div class="title">Interview drill</div>
+    <p class="small" style="margin:10px 0 0"><b>Warm-up:</b> What is point-in-time correctness and why does it matter?</p>
+    <details class="ans"><summary>How a strong answer sounds</summary><div>It means every feature attached to a training example reflects only what was knowable at that example's timestamp. Without it, a feature computed from data that arrived after the label leaks the future — the model appears to perform brilliantly offline and cannot reproduce it in production, because at inference that information doesn't exist yet. Implementing it means an as-of join on (entity, timestamp), and strictly it should also account for pipeline delay: what the serving system <i>would have known</i>, not what was true.</div></details>
+    <p class="small" style="margin:10px 0 0"><b>Deeper:</b> Offline AUC 0.89, online lift zero. Design the investigation.</p>
+    <details class="ans"><summary>How a strong answer sounds</summary><div>Assume skew until proven otherwise. Take a sample of production requests and log the exact served feature vector plus the model's output. Recompute the same features from the offline pipeline for the same entity and timestamp, and diff them feature by feature — large systematic differences point at implementation skew, small ones at staleness, and null spikes at timeout defaults. Separately, rebuild the training set with a strict as-of join including pipeline delay and see how much AUC survives; a big drop means temporal leakage. Then check distribution: compare the served values against the training distribution per feature, since serving sees defaults, retries and cold entities the warehouse never contained. Only after all three would I look at the model or at whether the intervention itself changes behaviour.</div></details>
+  </div></div>
+
+  <div class="takeaways">
+    <h3>🧠 Key takeaways</h3>
+    <ul>
+      <li>Skew comes in implementation, temporal and distribution flavours; all three are silent.</li>
+      <li>Training rows need as-of joins that respect both event time and pipeline delay.</li>
+      <li>A feature store is a registry, an offline store, an online store and a materialization path — plus discipline.</li>
+      <li>Logging the served feature vector gives you zero-skew training data and a parity monitor for free.</li>
+      <li>You often don't need the product; you always need one definition and one execution path.</li>
+    </ul>
+  </div>
+
+  <div class="quiz-wrap">
+    <h2>Check your understanding</h2>
+    <div class="quiz-score"></div>
+
+    <div class="quiz" data-answer="1">
+      <p class="q">You join today's <code>customer_tier</code> onto labels from 18 months ago. What kind of skew is this?</p>
+      <div class="opts">
+        <button class="opt">Implementation skew</button>
+        <button class="opt">Temporal skew — leakage of future information</button>
+        <button class="opt">Distribution skew</button>
+        <button class="opt">No skew, if the tier rarely changes</button>
+      </div>
+      <div class="explain">Values that only became true later are attached to earlier examples. The model learns a relationship that doesn't exist at prediction time.</div>
+    </div>
+
+    <div class="quiz" data-answer="2">
+      <p class="q">What's the main advantage of logging the served feature vector?</p>
+      <div class="opts">
+        <button class="opt">It reduces serving latency</button>
+        <button class="opt">It removes the need for an online store</button>
+        <button class="opt">Training data matches serving exactly — zero skew by construction</button>
+        <button class="opt">It allows training on unlabelled data</button>
+      </div>
+      <div class="explain">You train on precisely what the model saw, including staleness, defaults and nulls. It doubles as your parity check — at the cost of only being able to train on features you already serve.</div>
+    </div>
+
+    <div class="quiz" data-answer="3">
+      <p class="q">Your feature fetch times out for 2% of requests and the code substitutes 0. What must you check?</p>
+      <div class="opts">
+        <button class="opt">Whether the timeout is logged</button>
+        <button class="opt">Whether the online store is sharded</button>
+        <button class="opt">Whether the model is calibrated</button>
+        <button class="opt">Whether the training data ever contained that default value</button>
+      </div>
+      <div class="explain">If the model never saw 0 in training, it interprets it as a real value — often a strong one. Represent missingness explicitly and include it in the training distribution.</div>
+    </div>
+
+    <div class="quiz" data-answer="0">
+      <p class="q">When is a dedicated feature store <i>least</i> justified?</p>
+      <div class="opts">
+        <button class="opt">A single model whose features come entirely from the request payload</button>
+        <button class="opt">Several teams sharing real-time entity features</button>
+        <button class="opt">Strict point-in-time training requirements across many models</button>
+        <button class="opt">Regulated environments needing feature lineage</button>
+      </div>
+      <div class="explain">If there's nothing to share and no temporal join, a shared function in the service gives you the same guarantee without another system to run.</div>
+    </div>
+
+    <div class="quiz" data-answer="1">
+      <p class="q">What should a parity monitor compare?</p>
+      <div class="opts">
+        <button class="opt">Model predictions against labels</button>
+        <button class="opt">Served feature values against the same features recomputed offline for the same entity and timestamp</button>
+        <button class="opt">Training loss against validation loss</button>
+        <button class="opt">Online latency against the SLO</button>
+      </div>
+      <div class="explain">That comparison is the only direct measurement of skew. Alert on divergence per feature, because a single broken feature rarely moves an aggregate metric until it's too late.</div>
+    </div>
+  </div>
+</main>
+<script src="assets/app.js"></script>
+<script>
+(function(){
+  const { $, $$, clamp } = ML;
+
+  /* ================= point-in-time join ================= */
+  const UPDATES = [
+    { t: 10, v: 120 }, { t: 45, v: 180 }, { t: 80, v: 240 }, { t: 130, v: 520 }, { t: 165, v: 610 },
+  ];
+  const LABELS = [
+    { t: 30, y: 'no churn' }, { t: 70, y: 'no churn' }, { t: 120, y: 'churn' }, { t: 175, y: 'churn' },
+  ];
+  function drawPit() {
+    const mode = $('#pitSeg').dataset.value || 'naive';
+    const X = (t) => 45 + t / 200 * 570;
+    let g = `<line stroke="var(--border-strong)" x1="45" y1="120" x2="625" y2="120"/>`;
+    UPDATES.forEach(u => {
+      g += `<circle class="upd" cx="${X(u.t)}" cy="120" r="6"/><text x="${X(u.t) - 14}" y="108">£${u.v}</text>`;
+    });
+    LABELS.forEach(l => {
+      g += `<circle class="lbl-ev" cx="${X(l.t)}" cy="185" r="6"/><text x="${X(l.t) - 20}" y="205">${l.y}</text>`;
+      const asof = UPDATES.filter(u => u.t <= l.t).slice(-1)[0];
+      const latest = UPDATES[UPDATES.length - 1];
+      const used = mode === 'asof' ? asof : latest;
+      if (used) g += `<line class="join ${mode === 'asof' ? 'good' : 'bad'}" x1="${X(l.t)}" y1="178" x2="${X(used.t)}" y2="128"/>`;
+    });
+    g += `<text x="45" y="40">feature updates: avg_order_value_30d</text>` +
+      `<text x="45" y="230">labelled events (churn / no churn)</text>`;
+    $('#pitSvg').innerHTML = g;
+
+    $('#pitRows').innerHTML = LABELS.map(l => {
+      const asof = UPDATES.filter(u => u.t <= l.t).slice(-1)[0];
+      const latest = UPDATES[UPDATES.length - 1];
+      const used = mode === 'asof' ? asof : latest;
+      const ok = mode === 'asof' || used.t <= l.t;
+      return `<tr><td>day ${l.t} · ${l.y}</td><td>t = ${l.t}</td><td>£${used ? used.v : '—'} <span class="small muted">(set at t = ${used ? used.t : '—'})</span></td><td class="${ok ? 'good' : 'bad'}">${ok ? '✅ yes' : '❌ no — from the future'}</td></tr>`;
+    }).join('');
+
+    $('#pitInfo p').innerHTML = mode === 'naive'
+      ? `🚩 <b>Naive join.</b> Every label gets today’s feature value (£610), including labels from before that value existed. Note what this teaches the model: customers who churned have high average order values — because their value was updated <i>after</i> they churned. The model will rank churn risk by a number it can never see in time, offline AUC will look excellent, and the launch will do nothing.`
+      : `✅ <b>As-of join.</b> Each label is matched to the most recent feature value at or before its timestamp, so every row contains only knowable information. This is what a feature store’s <code>get_historical_features</code> does, and what you must implement by hand otherwise. Strictly, you should also subtract the pipeline delay — if this feature lands 20 minutes late, shift the cut-off accordingly.`;
+  }
+  $('#pitSeg').addEventListener('segchange', drawPit);
+  drawPit();
+
+  /* ================= parity monitor ================= */
+  function skew() {
+    const mode = $('#skewSeg').dataset.value || 'ok';
+    let seed = 5;
+    const rnd = () => { seed = (seed * 1103515245 + 12345) % 2147483648; return seed / 2147483648; };
+    const off = [], onl = [];
+    for (let i = 0; i < 600; i++) {
+      const base = 40 + (rnd() + rnd() + rnd() - 1.5) * 26;
+      off.push(clamp(base, 0, 100));
+      let o = base;
+      if (mode === 'impl') o = base * 1.18 + 2;                 // different rounding / window
+      else if (mode === 'stale') o = base - (rnd() * 22);        // hours-old value
+      else if (mode === 'null') o = rnd() < 0.12 ? 0 : base;     // timeout default
+      onl.push(clamp(o, 0, 100));
+    }
+    const B = 30, ho = new Array(B).fill(0), hn = new Array(B).fill(0);
+    off.forEach(v => ho[clamp(Math.floor(v / 100 * B), 0, B - 1)]++);
+    onl.forEach(v => hn[clamp(Math.floor(v / 100 * B), 0, B - 1)]++);
+    const mx = Math.max(...ho, ...hn);
+    let g = '';
+    for (let i = 0; i < B; i++) {
+      const x = 35 + i * (590 / B);
+      g += `<rect class="off" x="${x}" y="${150 - ho[i] / mx * 130}" width="${590 / B - 2}" height="${ho[i] / mx * 130}"/>`;
+      g += `<rect class="onl" x="${x}" y="${150 - hn[i] / mx * 130}" width="${590 / B - 2}" height="${hn[i] / mx * 130}"/>`;
+    }
+    g += `<line stroke="var(--border-strong)" x1="35" y1="150" x2="625" y2="150"/><text x="35" y="168">feature value distribution</text>`;
+    $('#skewSvg').innerHTML = g;
+
+    const diffs = off.map((v, i) => Math.abs(v - onl[i]) / Math.max(1, v));
+    const mean = diffs.reduce((a, b) => a + b, 0) / diffs.length;
+    const bad = diffs.filter(d => d > 0.01).length;
+    $('#skDiff').textContent = (mean * 100).toFixed(2) + '%';
+    $('#skRows').textContent = (bad / diffs.length * 100).toFixed(1) + '%';
+    const notes = {
+      ok: ['✅ in parity', 'Online and offline values agree within floating-point noise. This is what the monitor should look like every day — and the reason to run it daily is that it stops looking like this without anyone changing the model.'],
+      impl: ['🚨 implementation skew', 'The online values are systematically higher: the two implementations disagree — a different window boundary, a different null policy, or a rounding difference. Systematic offsets like this are the most damaging kind, because the model was trained on one distribution and is served another on every single request.'],
+      stale: ['⚠️ staleness', 'The online distribution is shifted low and smeared: the store holds values that are hours old while the offline recomputation uses the true value at that instant. The fix is either fresher materialization or — often better — building training data with the same staleness the online path has.'],
+      null: ['🚨 default values', 'A spike at zero: roughly 12% of fetches timed out and the code substituted a default. The model has almost certainly never seen that value in training and will interpret it as a genuine, extreme signal. Represent missingness explicitly and include it in training.'],
+    };
+    $('#skVerdict').textContent = notes[mode][0];
+    $('#skInfo p').innerHTML = notes[mode][1];
+  }
+  $('#skewSeg').addEventListener('segchange', skew);
+  skew();
+})();
+</script>
+</body>
+</html>
