@@ -61,11 +61,11 @@
   ];
 
   const LEVELS = [
-    ['Beginner', 'var(--green)', 'How learning actually works, and the data and evaluation it rests on.'],
-    ['Intermediate', 'var(--accent-2)', 'Deep learning, transformers and the machinery that trains them.'],
-    ['Advanced', 'var(--accent)', 'Distributed training, retrieval, agents and serving at real scale.'],
-    ['Expert', 'var(--amber)', 'Production ML: platforms, cost, safety, reliability and interviews.'],
-    ['Case Studies', 'var(--pink)', 'Twelve complete ML system designs, from feed ranking to a frontier training run.'],
+    ['Beginner', 'var(--accent)', 'How learning actually works, and the data and evaluation it rests on.'],
+    ['Intermediate', 'color-mix(in srgb, var(--accent-2) 25%, var(--accent))', 'Deep learning, transformers and the machinery that trains them.'],
+    ['Advanced', 'color-mix(in srgb, var(--accent-2) 50%, var(--accent))', 'Distributed training, retrieval, agents and serving at real scale.'],
+    ['Expert', 'color-mix(in srgb, var(--accent-2) 75%, var(--accent))', 'Production ML: platforms, cost, safety, reliability and interviews.'],
+    ['Case Studies', 'var(--accent-2)', 'Twelve complete ML system designs, from feed ranking to a frontier training run.'],
   ];
 
 
@@ -218,7 +218,7 @@
 
     // sidebar
     const done = doneSet();
-    let html = `<a class="brand" href="index.html"><span class="brand-logo">◆</span><span>ML &amp; AI Systems<br><small style="font-weight:500;color:var(--muted);font-size:12px">by Palak Deb Patra</small></span></a>
+    let html = `<a class="brand" href="index.html"><span class="brand-logo"><svg viewBox="0 0 24 24" width="19" height="19" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3.5 3v15.5h17"/><path d="M6.5 6.2c2.6.3 2.4 9.1 5.6 9.1 2.9 0 3-4.6 5.9-6.3"/><circle cx="12.1" cy="15.3" r="1.8" fill="currentColor" stroke="none"/></svg></span><span><span class="grad">ML &amp; AI Systems</span><br><small style="font-weight:500;color:var(--muted);font-size:12px">by Palak Deb Patra</small></span></a>
       <div class="side-progress"><div class="bar"><i style="width:${(done.size / CHAPTERS.length) * 100}%"></i></div><small>${done.size} of ${CHAPTERS.length} chapters complete</small></div>`;
     let lastLevel = '';
     for (const c of CHAPTERS) {
