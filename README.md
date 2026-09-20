@@ -1,3 +1,12 @@
+> [!IMPORTANT]
+> **This course has moved.** It now lives alongside my other courses in
+> **[The Engineering Atlas](https://github.com/CaptainBlue793/palak-engineering-atlas)** — one repo, one site, shared progress
+> and search across every chapter.
+>
+> **Read it here → https://captainblue793.github.io/palak-engineering-atlas/ml-ai-systems/**
+>
+> This repository is archived and kept only so existing links keep working.
+
 # Palak's ML & AI Systems Playlist
 
 An interactive course on machine learning and AI systems: **52 chapters** across five levels, from
